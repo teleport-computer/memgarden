@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "memory-garden"
+version = "0.1.0"
+description = "记忆的编辑判断：什么值得记、归哪个桶、几张卡、什么时候该整理。不调模型、不碰存储。"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+keywords = ["memory", "llm", "agent", "long-term-memory"]
+
+# 内核零第三方依赖。agent-protocol-core 是同源的纯标准库小包，
+# 聊天与记忆两边共用 —— 见它的 __init__ 说明为什么不并进来。
+dependencies = ["agent-protocol-core>=0.1.0"]
+
+[project.optional-dependencies]
+sqlite = []          # 只用标准库 sqlite3，列在这里是为了让意图显式
+dev = ["pytest>=8.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/memory_garden"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# 未发布前用本地路径解析同源的 agent-protocol-core。
+# 两个包都发布之后，删掉这一节即可 —— 上面的 dependencies 不用改。
+[tool.uv.sources]
+agent-protocol-core = { path = "packages/agent-protocol-core", editable = true }

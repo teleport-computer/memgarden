@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-protocol-core"
+version = "0.1.0"
+description = "模型协议残留处理：识别漏进正文的协议头、孤儿 JSON 尾、思考标记。纯标准库。"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_protocol_core"]
