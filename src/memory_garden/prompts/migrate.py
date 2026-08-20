@@ -148,8 +148,8 @@ def parse_migrated_cards(
             lang_text=f"{summary}\n{content}",
         )
         if "bucket_protocol_leak" in label_reasons:
-            # migrate 走 prebuilt-envelope upgrade,绕过了宿主写入路径上那道会给空桶兜默认值的闸
-            # 默认 —— 必须在此就地降级到按语言的默认桶(codex code_review Important)。
+            # migrate 走 prebuilt-envelope upgrade,绕过了宿主写入路径上那道会给空桶
+            # 兜默认值的闸 —— 必须在此就地降级到按语言的默认桶(codex code_review Important)。
             bucket = card_guard.default_bucket_for_text(f"{summary}\n{content}")
         seen.add(mid)
         out.append({
