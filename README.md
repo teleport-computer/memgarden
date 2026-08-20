@@ -51,11 +51,12 @@ uv run python examples/quickstart.py
 from memory_garden.prompts.capture import build_capture_prompt, parse_capture_cards
 from memory_garden.stores.sqlite import SqliteStore
 
-# 1. 库告诉你该问模型什么
+# 1. 库告诉你该问模型什么（指令是英文，桶名是 locale 那套）
 prompt = build_capture_prompt(
     ai_name="io", user_name="老王",
     window="用户：我不吃辣，一吃就胃疼\n我：记住了",
     buckets="", threads="", identity="", cards="",
+    locale="zh-Hans",          # 必填：这个花园用哪套桶名
 )
 
 # 2. 你自己调模型 —— 用什么模型、怎么调，库不管
@@ -237,14 +238,21 @@ class MyPolicy:
 **能用的**：24 条契约测试绿，示例可脱离任何宿主独立跑通。
 生产验证来自宿主 io（陪伴类 App），线上跑着。
 
-**开源前的两个阻塞**：
+**2026-08-20 起，开源前的两个阻塞已解决**：
 
 ```
-🔴 提示词正文是中文     纯英文对话时模型仍可能把卡写成中文
-🔴 桶名写死中文         「工作 / 健康 / 我们的关系」是特定产品的分类法
+✅ 指令是英文        capture 的提示词正文、「什么值得记」、语言规则全部英文
+✅ 桶名按语言取一套   locale="zh-Hans" 或 "en"，两套桶不会同时出现
 ```
 
-两条都已定方案（默认英文 + 桶名可配置带中英两版默认），尚未动工。
+`locale` **必填、没有默认值**。这是刻意的：默认成某种语言，等于把一套分类法
+硬塞给所有使用者，而他们不会知道为什么自己的库里长出了中文桶。
+
+> 只发一套是重点，不是省事。旧做法把两套桶都塞进去让模型挑一边，实测约 1/3
+> 的中文记忆被贴上英文桶 —— 给模型一个它不该做的选择题，它就会做错。
+
+**仍未英文化**：`dream` / `migrate` 的提示词，以及导入档的「什么值得记」。
+它们走另一条写入路径，刻意留作对照，还没上线验证。
 
 **次要**：`selection.RelevanceStage` 的阈值是对内置打分算法校准的 ——
 换了打分实现，这些数字就没有意义。

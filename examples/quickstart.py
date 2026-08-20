@@ -39,6 +39,7 @@ def main() -> None:
         print(f"     {name:22} 每次最多 {cap} 张")
 
     print("\n② 库告诉你该问模型什么（它自己不调模型）")
+    # locale 必填，没有默认值：默认成某种语言，等于把一套桶名硬塞给所有使用者。
     prompt = build_capture_prompt(
         ai_name="io",
         user_name="老王",
@@ -47,9 +48,18 @@ def main() -> None:
         threads="",
         identity="",
         cards="",
+        locale="zh-Hans",
     )
-    print(f"     提示词长度 {len(prompt)} 字符")
-    print("     （naming_rule 不传就按 user_name 生成默认的「别叫用户」规则）")
+    print(f"     提示词长度 {len(prompt)} 字符（指令是英文，桶名是这个花园的语言）")
+    print("     （naming_rule 不传就按 user_name + locale 生成默认的「别叫用户」规则）")
+
+    en = build_capture_prompt(
+        ai_name="io", user_name="Alex", window="user: I don't eat spicy food",
+        buckets="", threads="", identity="", cards="", locale="en",
+    )
+    from memory_garden.prompts.buckets import BUCKET_SETS
+    print("     换成 locale='en' → 桶名整套换英文，且中文那套**不会**同时出现："
+          f"{BUCKET_SETS['zh-Hans'] not in en}")
 
     print("\n③ 解析模型回答，并按档位裁剪")
     # 默认 strict=True：超额不是悄悄砍掉，而是**整批打回**，让你重问模型一次。
