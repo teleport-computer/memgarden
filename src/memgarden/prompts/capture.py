@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 
+from ..text.leak_signals import GENERIC_SIGNALS, LeakSignals
 from ..text.card_text import (
     build_format_retry_prompt,
     card_text_rejection,
@@ -112,6 +113,7 @@ def parse_capture_cards(
     *,
     strict: bool = True,
     policy: CapturePolicy | str | None = None,
+    signals: LeakSignals = GENERIC_SIGNALS,
 ) -> tuple[list[dict], str | None]:
     """Parse the 落卡 agent reply into normalized capture cards.
 
@@ -156,7 +158,9 @@ def parse_capture_cards(
             continue
         summary = str(row.get("summary") or "").strip()[:2000]
         content = str(row.get("content") or "").strip()
-        rejection = card_text_rejection(summary=summary, content=content, guard=_guard_on)
+        rejection = card_text_rejection(
+            summary=summary, content=content, guard=_guard_on, signals=signals
+        )
         if rejection:
             # 占位符/空正文/协议残片的卡不写进花园 —— 用户会亲眼看到它。
             hard_rejections.append(rejection)
@@ -169,7 +173,7 @@ def parse_capture_cards(
         # 软字段只清洗,不参与打回判定(硬内容没问题就不值得再烧一次 provider)。
         bucket, threads, _label_reasons = sanitize_card_labels(
             bucket=str(row.get("bucket") or "").strip()[:80], threads=threads, guard=_guard_on,
-            lang_text=f"{summary}\n{content}",
+            lang_text=f"{summary}\n{content}", signals=signals,
         )
         target_id = str(row.get("target_id") or "").strip() or None
         out.append({

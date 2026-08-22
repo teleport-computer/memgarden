@@ -20,6 +20,7 @@ import json
 
 from ..text import card_guard
 from ..guards import dream_gates
+from ..text.leak_signals import GENERIC_SIGNALS, LeakSignals
 from ..text.card_text import (
     build_format_retry_prompt,
     card_text_rejection,
@@ -145,7 +146,8 @@ def _clamp01(value) -> float:
 
 
 def parse_dream_consolidations(
-    raw: str, *, strict: bool = True, known_ids=()
+    raw: str, *, strict: bool = True, known_ids=(),
+    signals: LeakSignals = GENERIC_SIGNALS,
 ) -> tuple[list[dict], list[str], str | None]:
     """Parse the Dream agent reply.
 
@@ -209,7 +211,9 @@ def parse_dream_consolidations(
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
         summary = str(result.get("summary") or "").strip()[:2000]
         content = str(result.get("content") or "").strip()
-        rejection = card_text_rejection(summary=summary, content=content, guard=_guard_on)
+        rejection = card_text_rejection(
+            summary=summary, content=content, guard=_guard_on, signals=signals
+        )
         if rejection is None:
             # 卡 id 泄漏与内容闸同待遇:打回重问,让模型把内容本身写回来。
             rejection = dream_gates.result_id_leak(
@@ -224,7 +228,7 @@ def parse_dream_consolidations(
         # 软字段只清洗,不参与打回判定(硬内容没问题就不值得再烧一次 provider)。
         bucket, threads, _label_reasons = sanitize_card_labels(
             bucket=str(result.get("bucket") or "").strip()[:80], threads=threads, guard=_guard_on,
-            lang_text=f"{summary}\n{content}",
+            lang_text=f"{summary}\n{content}", signals=signals,
         )
         out.append({
             "op": op,
