@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS applied (
 class SqliteStore:
     """单文件存储。并发写用 sqlite 自己的事务 + 一把进程内的锁。"""
 
-    def __init__(self, path: str | Path = "memory_garden.db") -> None:
+    def __init__(self, path: str | Path = "memgarden.db") -> None:
         self._path = str(path)
         self._lock = threading.RLock()
         with self._connect() as conn:

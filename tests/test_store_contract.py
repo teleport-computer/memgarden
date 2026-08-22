@@ -20,9 +20,9 @@ for p in (str(SRC), str(PROTO)):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from memory_garden.storage import FULL_CAPABILITIES, StoragePort  # noqa: E402
-from memory_garden.stores.memory import InMemoryStore  # noqa: E402
-from memory_garden.stores.sqlite import SqliteStore  # noqa: E402
+from memgarden.storage import FULL_CAPABILITIES, StoragePort  # noqa: E402
+from memgarden.stores.memory import InMemoryStore  # noqa: E402
+from memgarden.stores.sqlite import SqliteStore  # noqa: E402
 
 
 @pytest.fixture(params=["memory", "sqlite"])

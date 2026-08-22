@@ -1,7 +1,7 @@
 """五分钟跑通：档位 → 提示词 → 解析 → 存储 → 换字段映射。
 
-    uv run --with ./packages/agent-protocol-core --with ./packages/memory-garden \
-        python packages/memory-garden/examples/quickstart.py
+    uv run --with ./packages/agent-protocol-core --with ./packages/memgarden \
+        python packages/memgarden/examples/quickstart.py
 
 全程不联网、不调模型、不需要 API key —— 模型那步用一段假回复代替。
 """
@@ -10,10 +10,10 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from memory_garden.adapt import FieldMap, summary_of, to_card
-from memory_garden.policies import get_policy
-from memory_garden.prompts.capture import build_capture_prompt, parse_capture_cards
-from memory_garden.stores.sqlite import SqliteStore
+from memgarden.adapt import FieldMap, summary_of, to_card
+from memgarden.policies import get_policy
+from memgarden.prompts.capture import build_capture_prompt, parse_capture_cards
+from memgarden.stores.sqlite import SqliteStore
 
 # 模型的假回复。真实用法是把 build_capture_prompt 的产物发给任意 LLM。
 # ⚠️ 每张卡必须带 `action`（add / merge / supersede）—— 没有 action 的会被当成
@@ -57,7 +57,7 @@ def main() -> None:
         ai_name="io", user_name="Alex", window="user: I don't eat spicy food",
         buckets="", threads="", identity="", cards="", locale="en",
     )
-    from memory_garden.prompts.buckets import BUCKET_SETS
+    from memgarden.prompts.buckets import BUCKET_SETS
     print("     换成 locale='en' → 桶名整套换英文，且中文那套**不会**同时出现："
           f"{BUCKET_SETS['zh-Hans'] not in en}")
 

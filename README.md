@@ -9,7 +9,7 @@
 整个包是纯函数，零第三方依赖。
 
 ```bash
-pip install memory-garden
+pip install memgarden
 ```
 
 ---
@@ -48,8 +48,8 @@ uv run python examples/quickstart.py
 最小代码：
 
 ```python
-from memory_garden.prompts.capture import build_capture_prompt, parse_capture_cards
-from memory_garden.stores.sqlite import SqliteStore
+from memgarden.prompts.capture import build_capture_prompt, parse_capture_cards
+from memgarden.stores.sqlite import SqliteStore
 
 # 1. 库告诉你该问模型什么（指令是英文，桶名是 locale 那套）
 prompt = build_capture_prompt(
@@ -78,7 +78,7 @@ store.apply("user_1", [{"op": "add", "card": c} for c in cards],
 ### 1. 三个档位：同一套判断，三把尺子
 
 ```python
-from memory_garden.policies import get_policy
+from memgarden.policies import get_policy
 
 get_policy("conversation_capture")   # 最多 2 张厚卡    聊一晚上不该冒出 20 张碎卡
 get_policy("history_import")         # 过滤一次性事件   「昨天吃火锅」丢；「我不吃辣」留
@@ -105,7 +105,7 @@ cards, err = parse_capture_cards(raw, policy="conversation_capture", strict=Fals
 ### 3. 这轮该想起哪几张（挑卡）
 
 ```python
-from memory_garden.selection import Chain, RoleStage, RecentStage, RelevanceStage
+from memgarden.selection import Chain, RoleStage, RecentStage, RelevanceStage
 
 policy = Chain(stages=(
     RoleStage("turning_point", limit=3),   # 3 张转折点
@@ -163,7 +163,7 @@ atomic_batch   一批要么全成、要么全不成，不许留半截
 翻译归你，但套路是现成的：
 
 ```python
-from memory_garden.adapt import FieldMap, to_card
+from memgarden.adapt import FieldMap, to_card
 
 notion = FieldMap(
     summary_fields=("Name",),          # 可公开的摘要从哪来
@@ -262,7 +262,7 @@ class MyPolicy:
 ## 七、目录
 
 ```
-src/memory_garden/
+src/memgarden/
   policies.py        三个档位
   prompts/           该问模型什么 + 怎么解析回答（capture / dream / migrate / buckets）
   scoring/           相关性打分
