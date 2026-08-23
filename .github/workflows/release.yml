@@ -1,0 +1,94 @@
+name: release
+
+# 打 tag 时由 CI 构建并发布 wheel，同时生成构建出处凭证（provenance attestation）。
+#
+# 为什么不在本机编好再传：哈希锁只能证明「装进镜像的字节 = Release 上那份字节」，
+# 证明不了「这份字节是由公开 tag 的源码编出来的」。本机编 + 手工上传时，有仓库
+# 权限的人可以传一个跟源码对不上的 wheel，别人看源码看不出问题。
+#
+# 由 tag 触发的 CI 编译 + GitHub 签发的 attestation 把这一环补上：凭证里绑定了
+# 仓库、workflow、commit 和产物摘要，任何人都能用
+#   gh attestation verify <wheel> --repo teleport-computer/memgarden
+# 独立验证这个 wheel 确实由这个仓库的这个 commit 编出来。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要重新发布的 tag（不填则用当前 ref）"
+        required: false
+
+permissions:
+  contents: write        # 建 Release、传产物
+  id-token: write        # 换取 OIDC token 用于签发凭证
+  attestations: write    # 写 attestation
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pipx install uv
+
+      - name: Tag 与 pyproject 版本必须一致
+        # 不一致就停：否则会出现「tag 是 v0.1.3、wheel 却是 0.1.2」这种
+        # 凭证与产物名对不上的情况，验证方无从判断该信哪个。
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          CORE=$(grep -m1 '^version = ' packages/agent-protocol-core/pyproject.toml | cut -d'"' -f2)
+          echo "tag=$TAG  memgarden=$PKG  agent-protocol-core=$CORE"
+          test "$TAG" = "$PKG" || { echo "::error::tag $TAG 与 memgarden 版本 $PKG 不一致"; exit 1; }
+          test "$TAG" = "$CORE" || { echo "::error::tag $TAG 与 agent-protocol-core 版本 $CORE 不一致"; exit 1; }
+
+      - name: 跑测试
+        # 发一个测试不过的包出去比不发更糟 —— 装它的人会以为它是可用的。
+        run: uv run pytest tests/ -q
+
+      - name: 示例必须能脱离宿主跑通
+        # 这是包对外的核心承诺（无 io、无 API key、无网络），
+        # 发版时验一次，比等使用者发现便宜得多。
+        run: uv run python examples/quickstart.py
+
+      - name: 构建两个包
+        run: |
+          uv build
+          (cd packages/agent-protocol-core && uv build)
+          mkdir -p out
+          cp dist/* out/
+          cp packages/agent-protocol-core/dist/* out/
+
+      - name: 生成构建出处凭证
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "out/*"
+
+      - name: 记录产物摘要
+        # 打进 job 日志，方便对照 Release 页和宿主 lock 里的哈希。
+        run: |
+          echo "### 产物摘要" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sha256sum out/* >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          sha256sum out/*
+
+      - name: 发布到 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --clobber
+          else
+            gh release create "$TAG" out/* --title "memgarden $TAG" --generate-notes
+          fi

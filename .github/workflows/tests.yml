@@ -1,0 +1,38 @@
+name: tests
+
+# 每次 push / PR 都跑。发版 workflow 也会再跑一次 —— 那次是发版前的最后一道闸，
+# 不是重复：Release 是不可回收的，测试不过的包发出去，装它的人会以为它可用。
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pipx install uv
+      - name: 契约测试 + 纯度守卫
+        run: uv run pytest tests/ -q
+      - name: 示例必须能脱离宿主跑通
+        # 「无 io、无 API key、无网络」是这个包对外的核心承诺。
+        # 只跑单测证明不了它 —— 单测本来就在仓库里跑。
+        run: uv run python examples/quickstart.py
+      - name: wheel 能构建，且带许可证
+        run: |
+          uv build
+          python - <<'PY'
+          import zipfile, glob, sys
+          whl = glob.glob("dist/*.whl")[0]
+          names = zipfile.ZipFile(whl).namelist()
+          assert any("LICENSE" in n for n in names), f"wheel 里没有 LICENSE：{whl}"
+          print(f"OK {whl} 带许可证")
+          PY
