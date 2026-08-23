@@ -50,8 +50,8 @@ def naming_rule(user_name: str, *, locale: str = "zh-Hans") -> str:
         if name != "TA":
             return (
                 f"Refer to {name} by the name \"{name}\". "
-                "Never use 「用户」/\"user\", the placeholder 「TA」, a guessed he/she, "
-                "or the second person \"you\" for them."
+                "Never call them \"the user\", never use a placeholder pronoun, "
+                "never guess he/she, and never address them in the second person."
             )
         return (
             "If the material clearly shows the name this person wants to be called, use it; "
@@ -59,8 +59,8 @@ def naming_rule(user_name: str, *, locale: str = "zh-Hans") -> str:
             "goes quiet when tired\"). When a subject is unavoidable, infer gender from the "
             "identity card, your relationship, older cards, and the conversation, and use "
             "\"he\" or \"she\"; only when the evidence is too thin, use a neutral referent. "
-            "Never use 「用户」/\"user\", the placeholder 「TA」, or the second person \"you\" "
-            "for them."
+            "Never call them \"the user\", never use a placeholder pronoun, and never "
+            "address them in the second person."
         )
     if name != "TA":
         return (
@@ -217,3 +217,45 @@ def rewrite_user_reference(text: str, user_name: str, subject: str = "") -> str:
 
 #: 兼容 io 内部的旧名字，新代码请用 `naming_rule`。
 _naming_rule = naming_rule
+
+
+# --------------------------------------------------------------------------- #
+# 「卡里别用系统称谓」那段说明 —— 按语言取一份
+# --------------------------------------------------------------------------- #
+#
+# 这段会原样插进 capture / dream 的提示词。它讲的是**哪些词不许出现在卡里**，
+# 而「哪些词」本身是跟语言绑死的：
+#
+#     中文花园   要防的是「用户」「TA」「你」，以及「用户界面」这种产品术语误伤
+#     英文花园   要防的是 "the user" / "they (the user)"，中文那套举例完全用不上
+#
+# 之前这段整块写死中文，于是英文花园的提示词里会冒出「用户界面」「用户留存」这类
+# 跟它毫无关系的中文串 —— 既占篇幅，又是混合语言信号（实测最容易让模型顺着写中文卡）。
+
+_REFERENT_RULE_ZH = """这些卡会由这个人亲眼看到，是你写下的记忆——
+写进卡里的字段（bucket/threads/summary/content）永远不要用"用户"/"user"
+这类系统称谓，也不要用「TA」指代本人——「TA」只是这份指令里的标记，
+不是你对这个人的称呼。转写里的说话人标签同理：有名字时是真名，
+没名字时是「对方」，那只是标签——卡里怎么称呼，按上面那条规则判断。
+卡里的字段最好整个不出现「用户」/"user"这两个词：如果你要写的确实是产品术语，
+就去掉这个前缀（写「界面」「留存」「满意度」，而不是「用户界面」「用户留存」）——
+这样就不会有人分不清那个「用户」说的是这个人还是这个人的客户。"""
+
+_REFERENT_RULE_EN = """This person will read these cards with their own eyes — they are memories you wrote.
+Never use a system label like "the user" in any card field (bucket/threads/summary/content),
+and never use a placeholder pronoun for them. A speaker label in a transcript is only a label;
+how you address this person inside a card follows the rule above.
+Where you genuinely mean the product term, drop the prefix (write "the interface", "retention",
+"satisfaction", not "user interface", "user retention") so nobody has to wonder whether
+that "user" means this person or this person's customers."""
+
+_REFERENT_RULES = {"zh-Hans": _REFERENT_RULE_ZH, "en": _REFERENT_RULE_EN}
+
+
+def referent_rule(locale: str, *, indent: str = "") -> str:
+    """卡里禁用哪些称谓 —— 按花园语言取一份，跟着排版缩进。"""
+    text = _REFERENT_RULES.get(str(locale or "").strip(), _REFERENT_RULE_ZH)
+    if not indent:
+        return text
+    lines = text.splitlines()
+    return "\n".join([lines[0]] + [f"{indent}{l}" for l in lines[1:]])

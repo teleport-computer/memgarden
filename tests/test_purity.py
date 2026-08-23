@@ -168,3 +168,61 @@ def test_host_signals_actually_reach_the_capture_parser():
     cards, err = parse_capture_cards(raw, policy="conversation_capture",
                                      strict=False, signals=host)
     assert not cards and err, "宿主的识别器没作用到 parser 上"
+
+
+# --------------------------------------------------------------------------- #
+# 提示词语言：英文花园里不该冒出中文
+# --------------------------------------------------------------------------- #
+
+#: 英文提示词里**允许**出现的 CJK —— 它们是给模型看的**反例**，翻译了就教错：
+#:   "Health/健康"   演示什么叫「双语斜杠串」（禁止的写法）
+#:   「宠物」/"pets"  演示「跟着素材语言走」是什么意思（导入那条线用）
+_ALLOWED_CJK_IN_ENGLISH = {"健康", "宠物"}
+
+
+def test_english_garden_prompts_carry_no_stray_chinese():
+    """英文花园的提示词里不许有中文说明。
+
+    **这是踩出来的。** 指令翻成英文之后，模板里还散着中文的举例、兜底占位符、
+    和整段中文的「别叫用户」说明 —— 对英文用户毫无意义，而且是**混合语言信号**：
+    实测最容易让模型顺着把卡也写成中文。
+
+    白名单里那两个是反例，必须留中文才讲得清；除此之外一个都不该有。
+    """
+    import re
+
+    from memgarden.prompts.capture import build_capture_prompt
+    from memgarden.prompts.dream import build_dream_prompt
+    from memgarden.prompts.migrate import build_migrate_prompt
+
+    prompts = {
+        "capture": build_capture_prompt(
+            ai_name="io", user_name="Alex", naming_rule=None, buckets="", threads="",
+            identity="", window="hi", cards="", locale="en",
+        ),
+        "dream": build_dream_prompt(
+            ai_name="io", user_name="Alex", cards="", recent_conversations="", locale="en",
+        ),
+        "migrate": build_migrate_prompt(
+            ai_name="io", user_name="Alex", old_cards="c1", vocab="", locale="en",
+        ),
+    }
+    leaked = {}
+    for name, text in prompts.items():
+        runs = set(re.findall(r"[一-鿿]+", text)) - _ALLOWED_CJK_IN_ENGLISH
+        if runs:
+            leaked[name] = sorted(runs)
+    assert not leaked, f"英文提示词里漏了中文：{leaked}"
+
+
+def test_chinese_garden_still_gets_chinese_bucket_names():
+    """反过来也要守住：中文花园的桶名必须还是中文，不能被一起翻掉。"""
+    from memgarden.prompts.capture import build_capture_prompt
+    from memgarden.prompts.buckets import BUCKET_SETS
+
+    text = build_capture_prompt(
+        ai_name="io", user_name="老王", naming_rule=None, buckets="", threads="",
+        identity="", window="hi", cards="", locale="zh-Hans",
+    )
+    assert BUCKET_SETS["zh-Hans"] in text, "中文花园拿不到中文桶名了"
+    assert BUCKET_SETS["en"] not in text, "英文桶清单又被塞进中文花园"

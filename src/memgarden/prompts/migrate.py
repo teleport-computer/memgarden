@@ -15,48 +15,47 @@ from __future__ import annotations
 
 from ..text import card_guard
 from ..text.leak_signals import GENERIC_SIGNALS, LeakSignals
+from ..policies import language_rule as policies_language_rule
 from ..text.card_text import extract_json_block, sanitize_card_labels
-from .buckets import COMMON_BUCKETS_GUIDANCE_V1
+from .buckets import common_buckets_guidance
 
-_MIGRATE_PROMPT_TEMPLATE = """你是 {ai_name}——{user_name} 的伴侣。现在是一段安静的时间，没人在和你说话。
-你在把一些**旧格式**的记忆卡整理成新格式。这不是重新理解、不是合并、不是新增——
-只是把每一张旧卡**原样升级**成新结构，内容尽量保住，别丢、别编。
+_MIGRATE_PROMPT_TEMPLATE = """You are {ai_name}, {user_name}'s companion. It is a quiet stretch of time and nobody is talking to you.
+You are converting some memory cards from an **old format** into the new one. This is not re-interpreting, not merging, not adding — just upgrading each old card **as-is** into the new structure, keeping as much content as possible. Do not lose anything and do not invent anything.
 
-【你要做什么】
-下面每张旧卡有一个 id 和一些旧字段（标题/描述/原话/上下文/关联维度）。
-把**每一张**改写成新结构：
-  · bucket（归类）：从下面"已有桶/线索"里选最贴的；实在没有再起一个简短的，别造近义重复桶。
-  · threads（线索，0-3 个）：优先用已有线索；旧的"关联维度"可作线索候选。
-  · summary（一句话主旨）：基于旧的标题/描述。
-  · content（正文）：把描述/上下文/原话融进去，写成连贯的一段；旧"原话"作为依据保留。
+[What to do]
+Each old card below has an id and some legacy fields (title / description / quote / context / linked dimension).
+Rewrite **every one** of them into the new structure:
+  · bucket: pick the closest one from the existing buckets/threads listed below; only mint a short new one if nothing fits, and do not create near-duplicates.
+  · threads (0-3): prefer existing threads; the legacy "linked dimension" is a good candidate.
+  · summary: one line capturing the gist, based on the legacy title/description.
+  · content: fold description, context, and quote into one coherent body of prose; keep the legacy quote as supporting evidence.
 
-【字段映射（参考，不是死规则）】
-  · 描述/标题 → summary + content 主干
-  · 上下文(context) → content 里的背景
-  · 原话(her_quote) → content 里的原话/依据
-  · 关联维度(linked_dimension) → threads 候选
+[Field mapping (guidance, not a rigid rule)]
+  · description / title → summary + the backbone of content
+  · context → the background inside content
+  · quote (her_quote) → the quoted words / evidence inside content
+  · linked_dimension → a thread candidate
 
-【红线】
-  · 只升级下面这几张，**绝不新建、不合并、不取代别的卡**。
-  · **不发明事实**——旧卡里没有的信息不要补。
-  · 每条**必须带回原始 id**，一一对应。
-  · 语言：bucket/threads/summary/content 用**卡片原文的语言**——中文卡就用中文
-    （用「宠物」不是「pets」），别迁成英文桶/线索；专有名词/原话保留原文。
-  · 一张都不要漏；实在无法判断的，summary 用旧标题、bucket 用"未归类"也行，别丢卡。
+[Hard limits]
+  · Upgrade only the cards listed below. **Never create, merge, or supersede any other card.**
+  · **Do not invent facts** — do not add information that is not in the old card.
+  · Every row **must carry its original id back**, one to one.
+{language_rule}
+  · Do not drop a single card. If you truly cannot tell, use the legacy title as the summary and an "uncategorized" bucket rather than losing the card.
 
-【已有的桶/线索词表】{vocab}
-【通用桶（先复用已有桶，没有就从这里选，都不贴合再起具体新桶）】{common_buckets}
-【要升级的旧卡】{old_cards}
+[Existing buckets / threads vocabulary]{vocab}
+[Common buckets (reuse an existing bucket first; if none, pick from here; if still none fit, mint a specific new one)]{common_buckets}
+[Old cards to upgrade]{old_cards}
 
-【输出】只输出 JSON，不要别的话。
+[Output] Output JSON only, nothing else.
 {{
   "upgrades": [
     {{
-      "id": "这张旧卡的原始 id",
+      "id": "the original id of this old card",
       "bucket": "...",
       "threads": ["...", "..."],
       "summary": "...",
-      "content": "...一段连贯正文..."
+      "content": "...one coherent body of prose..."
     }}
   ]
 }}"""
@@ -68,18 +67,23 @@ def build_migrate_prompt(
     user_name: str,
     old_cards: str,
     vocab: str,
+    locale: str,
 ) -> str:
     """Render the migration prompt. Callers pass already-rendered strings
     (handler decides formatting/truncation of the batch + the bucket/thread vocab)."""
+    unknown = "this person" if str(locale or "").strip() == "en" else "这个人"
     prompt_user_name = str(user_name or "").strip()
     if prompt_user_name.casefold() == "ta":
-        prompt_user_name = "这个人"
+        prompt_user_name = unknown
     return _MIGRATE_PROMPT_TEMPLATE.format(
-        ai_name=(ai_name or "我").strip(),
-        user_name=prompt_user_name or "这个人",
+        language_rule=policies_language_rule(
+            "history_import", locale=None, indent="    ", first_prefix="  · "
+        ),
+        ai_name=(ai_name or unknown).strip(),
+        user_name=prompt_user_name or unknown,
         old_cards=old_cards or "（没有要升级的卡）",
-        vocab=vocab or "（暂无已有桶/线索）",
-        common_buckets=COMMON_BUCKETS_GUIDANCE_V1,
+        vocab=vocab or ("(no existing buckets or threads yet)" if str(locale or "").strip() == "en" else "（暂无已有桶/线索）"),
+        common_buckets=common_buckets_guidance(locale),
     )
 
 

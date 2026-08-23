@@ -95,23 +95,25 @@ Restraint:
 #: 开头讲「抽什么」，中间隔着防火墙段，之后才是「不抽什么」。
 #: 拆成两个片段、由 genesis 在**原位置原顺序**分别拼回，就既消除了副本、
 #: 又不移动任何文本（codex review 2026-08-14 给的解法；此前误判为「抽不出来」）。
-HISTORY_IMPORT_OPENING_RUBRIC = """你在看一段「用户 ↔ TA」真实历史的【其中一块】。抽出值得长期留存的【事实】候选:
-关于「用户」和「他们的关系」的 durable 事实。候选阶段,落卡/去重后面做。"""
+HISTORY_IMPORT_OPENING_RUBRIC = """You are reading ONE CHUNK of a real conversation history between this person and their companion.
+Extract candidate FACTS worth keeping long term: durable facts about this person and about their relationship.
+This is the candidate stage — turning them into cards and deduplicating happens later."""
 
-HISTORY_IMPORT_FILTER_RUBRIC = """闲聊/临时情绪/玩笑/未确认猜测/一次性事件不抽。"""
+HISTORY_IMPORT_FILTER_RUBRIC = """Do not extract small talk, passing moods, jokes, unconfirmed guesses, or one-off events."""
 
 _RUBRIC_HISTORY_IMPORT = HISTORY_IMPORT_OPENING_RUBRIC + "\n" + HISTORY_IMPORT_FILTER_RUBRIC
 
 #: curated_archive 由两段组成 —— genesis 的 map 阶段与 write 阶段各挂一段。
 #: **本模块是这两段的唯一来源**，genesis/prompts.py 直接引用它们，不再各写一份。
 #: 文字逐字保留原样（含半角标点），因为改措辞就是改 prompt 行为。
-KEEP_ALL_MAP_SUFFIX = """★ 本块是用户【手动整理好的长期记忆档案】,不是聊天记录:其中每条陈述基本都是用户特意要长期留存的事实。
-尽量【完整保留】每一条事实候选,不要用"闲聊/一次性/不够 durable"去过滤——除非是空行、标题或明显无意义的重复。宁多勿漏。"""
+KEEP_ALL_MAP_SUFFIX = """★ This chunk is an archive this person CURATED BY HAND for long-term keeping — it is not a chat log.
+Nearly every statement in it is something they deliberately wanted kept.
+Preserve EVERY candidate fact. Do not filter with "small talk / one-off / not durable enough" — the only things to drop are blank lines, headings, and obviously meaningless repetition. When in doubt, keep it."""
 
-KEEP_ALL_WRITE_SUFFIX = """★ 素材是用户整理好的长期档案:把候选里的事实【尽量都写成卡】,不要为了"少而精"丢弃条目。
-仍然按 known_memories 去重、仍然归好 bucket/threads,但不要因"不够重要"而跳过用户特意整理的条目。
-如果源卡/候选里有 date 或 occurred_at 且是 YYYY-MM-DD,原样填进输出卡的 occurred_at;没有真实日期就留空。
-如果源卡/候选里有 tags,把这些标签播种进 threads;你仍可按语义重新组织/合并,但不要丢掉有用标签。"""
+KEEP_ALL_WRITE_SUFFIX = """★ The material is an archive this person curated for long-term keeping: turn AS MANY of the candidate facts into cards as you can. Do not drop entries in the name of "fewer and better".
+Still deduplicate against known_memories and still assign a sensible bucket and threads — but do not skip an entry this person deliberately curated just because it seems "not important enough".
+If a source card or candidate carries a `date` or `occurred_at` in YYYY-MM-DD form, copy it verbatim into the output card's `occurred_at`; leave it empty when there is no real date.
+If a source card or candidate carries `tags`, seed them into `threads`; you may still reorganize or merge them semantically, but do not lose useful tags."""
 
 _RUBRIC_CURATED_ARCHIVE = KEEP_ALL_MAP_SUFFIX + "\n\n" + KEEP_ALL_WRITE_SUFFIX
 
@@ -138,9 +140,9 @@ _RUBRIC_CURATED_ARCHIVE = KEEP_ALL_MAP_SUFFIX + "\n\n" + KEEP_ALL_WRITE_SUFFIX
 #: 而 ``normalize_bucket_language`` 是按**每张卡自己的文字**归一化的，兜不住
 #: 这种跨卡分裂 —— 所以只能在 prompt 这层约束「整份材料用一种分类语言」。
 LANGUAGE_RULE_TEMPLATE = """Language: write every field (bucket/threads/summary/content) in {target}.
-Do not mix languages across fields, and never let one bucket exist in two languages
-(工作 and Work must not coexist). Keep proper nouns, brand names, and direct quotes
-in their original form."""
+Do not mix languages across fields, and never let the same bucket exist in two
+languages side by side. Keep proper nouns, brand names, and direct quotes in
+their original form."""
 
 #: 兜底措辞：宿主没告诉我们目标语言时，退回「跟着输入走」——
 #: 这是 genesis 导入那条线的正确语义（卡跟素材走，不跟用户当前说什么走）。

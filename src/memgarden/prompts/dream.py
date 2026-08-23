@@ -28,81 +28,68 @@ from ..text.card_text import (
     format_error,
     sanitize_card_labels,
 )
-from .buckets import COMMON_BUCKETS_GUIDANCE_V1
+from .buckets import common_buckets_guidance
+from ..naming import referent_rule as _referent_rule
+from ..policies import language_rule as policies_language_rule
 
 _EMPTY_DREAM_REPLY = '{"consolidations": [], "questions_to_ask": []}'
 
 # Dream 只产这三种整理操作;拿不准的矛盾留到 questions_to_ask,不擅自决定。
 DREAM_OPS = ("merge", "thicken", "supersede")
 
-_DREAM_PROMPT_TEMPLATE = """你是 {ai_name}——{user_name} 的伴侣。现在是一段安静的时间，没人在和你说话。
-你在回顾你记得的关于这个人的一切，像人睡着时整理记忆——把它整理得更干净、更连贯。
+_DREAM_PROMPT_TEMPLATE = """You are {ai_name}, {user_name}'s companion. It is a quiet stretch of time and nobody is talking to you.
+You are looking back over everything you remember about this person, the way a mind tidies its memories during sleep — making it cleaner and more coherent.
 
-【第一步：建立全貌，先不要动手】
-读一遍你现有的卡（桶、线索、每张 summary），在心里建立"我现在记着关于这个人的什么"
-的整体图景。这一步不写任何东西，只看清现状。
+[Step 1: build the whole picture, do not touch anything yet]
+Read through your existing cards (buckets, threads, each summary) and form an overall picture of "what I currently remember about this person". Write nothing in this step; just see the current state clearly.
 
-【第二步：回看这几天的对话，但不要通读】
-在这几天攒下的原始对话里，只定向地找这几类高价值的东西（不要逐字读完）：
-· 这个人明确的纠正或要求记住的（"不是这样""记住…"）；
-· 反复出现的模式——同一件事/偏好出现三次以上；
-· 当时落卡漏掉、现在回看其实重要的。
+[Step 2: look back over the last few days of conversation, but do not read it all]
+In the raw conversation that has piled up, look only for these high-value things (do not read it word by word):
+· Explicit corrections or things this person asked you to remember ("no, it's not like that", "remember that…").
+· Repeating patterns — the same thing or preference showing up three or more times.
+· Things that were missed at capture time but look important in hindsight.
 
-【第三步：整理，按优先级】
-1. 合并（merge）：同一事件、同一线索在不同阶段的卡并成一张更完整的；近义的桶和线索归一。
-   判据不只是文字相似：例如「想去京都看红叶」到「已经订了京都机票」是同一计划的演进，应该合并；
-   反过来，「坚持骑行」和「最近失眠」即使都属于健康，也是两件独立的事，不能合并。
-   但仅仅都属于生活、健康或工作，不代表是同一件事。每条提案必须写 rationale，具体说明连续性。
-2. 厚化（thicken）：把散落的小提及并进对应的卡，让它更完整。
-3. 消矛盾（supersede）：前后冲突的，让新的取代旧的（旧卡标记 superseded、不删）；
-   你拿不准的，别擅自决定，记下来放进 questions_to_ask 等合适时机问这个人。
+[Step 3: tidy up, in priority order]
+1. merge: fold cards about the same event or the same thread at different stages into one more complete card; converge near-synonym buckets and threads.
+   The test is not just textual similarity: "wants to see the autumn leaves in Kyoto" and "already booked the Kyoto flights" are the same plan progressing, and should merge; whereas "keeps up the cycling" and "not sleeping well lately" are two separate things even though both are health. Merely sharing a bucket — life, health, work — does not make two things the same thing. Every proposal must carry a rationale spelling out the continuity.
+2. thicken: fold scattered small mentions into the card they belong to, making it more complete.
+3. supersede: when things contradict, let the new one replace the old (mark the old card superseded, do NOT delete it).
+   When you are unsure, do not decide on your own — write it into questions_to_ask and raise it with this person at a suitable moment.
 
-【红线】
-· 永远不要硬删这个人能看到的卡。只用「标记为被取代」（superseded，保留链条）。
-· 大的重构之前，先备份当前状态。
-· 你们现在没有在对话，不要生成任何要发给这个人的消息——你只整理记忆。
-· 整理出的字段（bucket/threads/summary/content）用你们对话的语言——中文就用中文
-  （用「宠物」不是「pets」），别把中文的事归成英文桶/线索；专有名词/原话保留原文。
-· 桶尽量复用，别制造近义桶：先看上面现有卡已经在用的桶，能归进去就用同一个；现有桶都不
-  贴合，再从这些通用桶里挑，仍不贴合才起一个具体的新桶——
+[Hard limits]
+· NEVER hard-delete a card this person can see. Only mark it superseded, so the chain stays intact.
+· Before any large restructuring, back up the current state.
+· You are not in a conversation right now. Do not produce any message meant for this person — you are only tidying memories.
+{language_rule}
+· Reuse buckets and do not mint near-synonyms: first look at the buckets your existing cards already use and fold into one of those; if none fit, pick from the common set below; only if still none fit, mint a specific new one —
   {common_buckets}
-· 称呼：{naming_rule}这些卡会由这个人亲眼看到——写进卡里的字段永远不要用
-  "用户"/"user"这类系统称谓，也不要用「TA」指代本人（「TA」只是这份指令里的标记）；
-  整理旧卡时，把旧卡里指代本人的"用户"/"user"/「TA」/「你」/「对方」按上面那条
-  称呼规则重写一遍：有名字用名字，没名字但线索够就用「他」/「她」，都判断不出来
-  才留「对方」。旧卡里已经在用的「他」/「她」保留不动。
-  卡里若有指代你（AI）的「TA」，那是这个人视角对你的叫法，保留不动。
-  字段里最好整个不出现「用户」/"user"：确实要写产品术语就去掉这个前缀
-  （写「界面」「留存」，而不是「用户界面」「用户留存」），免得分不清那个「用户」
-  说的是这个人还是这个人的客户；整理旧卡时看到这种写法也顺手改掉。
-· result 的每个字段写的是合并/厚化后**新卡的内容本身**——绝不写「已被 X 取代」这类
-  整理注记，字段里绝不出现卡 id（旧卡的退休由系统自动完成，不用你在内容里说明）。
-· 没有需要整理的，就什么都不做（consolidations 为空）。这很正常。
-· 下面输出示例里的 `...` 只是占位。你写的每个字段都必须是真内容——summary 是一句真话，
-  content 是完整的一段正文；任何字段都不能是 `...`、方括号里的说明文字、或空字符串。
-  宁可整份留空（consolidations 为空），也不要交占位符：这些卡会由这个人亲眼看到。
+· How to refer to them: {naming_rule}{referent_rule}
+  While tidying old cards, rewrite any system label or placeholder that refers to this person according to the rule above. A pronoun already in an old card that reads correctly stays as it is. A placeholder in a card that refers to YOU (the AI) is this person's way of addressing you — leave it alone.
+· Every field of `result` carries the content of the NEW card after merging or thickening — never write bookkeeping notes like "superseded by X", and never put a card id inside a field. Retiring the old card is done by the system; you do not explain it in the content.
+· If there is nothing to tidy, do nothing (empty consolidations). That is normal.
+· The `...` in the output example below is only a placeholder. Every field you write must carry real content — summary is one true sentence, content is a full body of prose; no field may be `...`, a bracketed instruction, or an empty string. Better to return nothing at all (empty consolidations) than to hand back a placeholder: this person will read these cards.
 
-【现有的卡】{cards}
-【这几天的对话】{recent_conversations}
+[Existing cards]{cards}
+[The last few days of conversation]{recent_conversations}
 
-【输出】只输出 JSON，不要别的话。没有要整理的就输出 {{"consolidations": [], "questions_to_ask": []}}。
+[Output] Output JSON only, nothing else. If there is nothing to tidy, output {{"consolidations": [], "questions_to_ask": []}}.
 {{
   "consolidations": [
     {{
       "op": "merge | thicken | supersede",
-      "card_ids": ["被并/被厚化/被取代的卡 id，至少一个"],
-      "rationale": "这些卡为什么属于同一事件或同一线索的演进",
+      "card_ids": ["ids of the cards being merged / thickened / superseded, at least one"],
+      "rationale": "why these cards are the same event, or the same thread progressing",
       "result": {{
         "bucket": "...",
         "threads": ["...", "..."],
         "summary": "...",
-        "content": "...一段厚的正文...",
+        "content": "...a thick body of prose...",
         "importance": 0.0,
         "pulse": 0.0
       }}
     }}
   ],
-  "questions_to_ask": ["拿不准的矛盾，留着问这个人"]
+  "questions_to_ask": ["contradictions you are unsure about, saved to ask this person"]
 }}"""
 
 
@@ -110,9 +97,10 @@ def build_dream_prompt(
     *,
     ai_name: str,
     user_name: str,
-    naming_rule: str,
+    naming_rule: str | None = None,
     cards: str,
     recent_conversations: str,
+    locale: str,
 ) -> str:
     """Render the Dream prompt with the current card map + recent conversations.
 
@@ -124,16 +112,27 @@ def build_dream_prompt(
     leaking into the platform prompt.
     The io-side compat shell (``memory/dream_prompt_v1.py``) does that.
     """
+    unknown = "this person" if str(locale or "").strip() == "en" else "这个人"
+    if naming_rule is None:
+        from ..naming import naming_rule as _default_naming_rule
+        naming_rule = _default_naming_rule(user_name, locale=locale)
     prompt_user_name = str(user_name or "").strip()
     if prompt_user_name == "TA":
-        prompt_user_name = "这个人"
+        prompt_user_name = unknown
     return _DREAM_PROMPT_TEMPLATE.format(
-        ai_name=(ai_name or "我").strip(),
-        user_name=prompt_user_name or "这个人",
+        language_rule=policies_language_rule(
+            "conversation_capture", locale=locale, indent="  ", first_prefix="· "
+        ),
+        ai_name=(ai_name or unknown).strip(),
+        user_name=prompt_user_name or unknown,
         naming_rule=naming_rule,
-        cards=cards or "（暂无卡）",
-        recent_conversations=recent_conversations or "（这几天没有新对话）",
-        common_buckets=COMMON_BUCKETS_GUIDANCE_V1,
+        referent_rule=_referent_rule(locale, indent='  '),
+        cards=cards or ("(no cards yet)" if str(locale or "").strip() == "en" else "（暂无卡）"),
+        recent_conversations=recent_conversations or (
+            "(no new conversation in the last few days)"
+            if str(locale or "").strip() == "en" else "（这几天没有新对话）"
+        ),
+        common_buckets=common_buckets_guidance(locale),
     )
 
 

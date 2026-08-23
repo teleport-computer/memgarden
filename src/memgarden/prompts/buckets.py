@@ -153,6 +153,12 @@ Memory write guidance:
 #:
 #: 现在只递一套：模型没得挑，也就挑不错。兜底仍然保留（模型自造缩写、旧卡回流），
 #: 但它从「常态纠错」退回成「异常兜底」。
+#: 「自造一个具体桶」的举例 —— 要跟花园语言一致，否则英文花园里会冒出中文桶名做示范。
+_MINT_EXAMPLE = {
+    "zh-Hans": "（如 妈妈、房子）。",
+    "en": "(e.g. Mom, the house).",
+}
+
 BUCKET_SETS = {
     "zh-Hans": _COMMON_BUCKETS_ZH,
     "en": _COMMON_BUCKETS_EN,
@@ -212,8 +218,9 @@ def common_buckets_guidance(locale: str) -> str:
         "  " + bucket_list(locale) + "\n"
         "Write the bucket as ONE short name, copied verbatim from the list above — "
         "do not translate it, and never join two languages with a slash "
-        "(no 「健康/Health」, no 「宠物/Pets」).\n"
-        "If none of them fit, mint one short specific bucket (e.g. 妈妈 / the house). "
-        "Do not create near-duplicates of an existing bucket.\n"
+        "(never write a name like \"Health/健康\").\n"
+        "If none of them fit, mint one short specific bucket "
+        + _MINT_EXAMPLE.get(str(locale or "").strip(), _MINT_EXAMPLE["zh-Hans"])
+        + " Do not create near-duplicates of an existing bucket.\n"
         + MEMORY_CARD_LENGTH_RULE_V1
     ).strip()

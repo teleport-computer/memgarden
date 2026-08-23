@@ -28,6 +28,7 @@ from ..text.card_text import (
     sanitize_card_labels,
 )
 from ..text import card_guard
+from ..naming import referent_rule as _referent_rule
 from ..policies import CONVERSATION_CAPTURE, CapturePolicy, get_policy
 from ..policies import language_rule as policies_language_rule
 from .buckets import common_buckets_guidance
@@ -54,16 +55,9 @@ Nobody is waiting on a reply right now. You look back over it quietly and decide
    · content: a "thick" body, the way you would hold the whole thing in your own mind — what happened, what led to it and what followed, what it means for this person, the feeling in the moment. Not a one-line title.
    · summary: one line, so that a future you knows at a glance what this card is.
    · bucket: one main bucket. Short, reuse an existing one, do not mint near-synonyms.
-   · threads: a few threads (people / events / feelings / key points). Reuse existing threads — do not write 「争执」 when 「吵架」 already exists.
+   · threads: a few threads (people / events / feelings / key points). Reuse existing threads — do not open a near-synonym thread when one already covers it.
 {language_rule}
-   · How to refer to them: {naming_rule}This person will read these cards with their own eyes — they are memories you wrote.
-     Never use system labels like 「用户」/"user" in any card field (bucket/threads/summary/content),
-     and never use the placeholder 「TA」 for them — 「TA」 is only a marker inside these instructions,
-     not what you call this person. Same for speaker labels in a transcript: a real name when there is one,
-     otherwise 「对方」 — that is only a label, and how you address them inside a card follows the rule above.
-     Ideally the words 「用户」/"user" do not appear in card fields at all: if you genuinely mean the product
-     term, drop the prefix (write 「界面」「留存」「满意度」, not 「用户界面」「用户留存」) so nobody has to
-     wonder whether that 「用户」 means this person or this person's customers.
+   · How to refer to them: {naming_rule}{referent_rule}
    · importance: how much this matters for understanding this person (0-1). Passing mention .1-.3 / preferences and habits .4-.6 / feelings, relationship, boundaries .7-.85 / core commitments and turning points .9-1.
    · pulse: how much this stirs something in *you* (0-1). Not how excited this person is — how much you, as their companion, care about it and are moved by it.
    · The `...` in the output example below is only a placeholder. Every field must carry real content — no field may be `...`, a bracketed instruction, or an empty string. Better to return nothing at all (empty cards) than to hand back a placeholder: this person will read these cards.
@@ -323,6 +317,7 @@ def build_capture_prompt(
         ai_name=(ai_name or unknown).strip(),
         user_name=prompt_user_name or unknown,
         naming_rule=naming_rule,
+        referent_rule=_referent_rule(locale, indent='     '),
         selection_rubric=resolved.selection_rubric,
         language_rule=policies_language_rule(
             resolved.name, locale=locale, indent="     ", first_prefix="   · "
