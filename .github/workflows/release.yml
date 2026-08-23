@@ -53,7 +53,8 @@ jobs:
 
       - name: 跑测试
         # 发一个测试不过的包出去比不发更糟 —— 装它的人会以为它是可用的。
-        run: uv run pytest tests/ -q
+        # --extra dev 才会带上 pytest（本机 venv 里碰巧有，CI 是干净环境）
+        run: uv run --extra dev pytest tests/ -q
 
       - name: 示例必须能脱离宿主跑通
         # 这是包对外的核心承诺（无 io、无 API key、无网络），

@@ -21,7 +21,8 @@ jobs:
           python-version: "3.12"
       - run: pipx install uv
       - name: 契约测试 + 纯度守卫
-        run: uv run pytest tests/ -q
+        # --extra dev 才会带上 pytest（本机 venv 里碰巧有，CI 是干净环境）
+        run: uv run --extra dev pytest tests/ -q
       - name: 示例必须能脱离宿主跑通
         # 「无 io、无 API key、无网络」是这个包对外的核心承诺。
         # 只跑单测证明不了它 —— 单测本来就在仓库里跑。
