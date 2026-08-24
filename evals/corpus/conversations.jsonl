@@ -1,0 +1,5 @@
+{"cid": "v01", "locale": "zh-Hans", "window": "用户：今天面试挂了，算法题第三次没做出来，感觉自己不适合这行\n我：怎么说？", "expect_lang": "zh", "expect_cards_min": 1, "expect_cards_max": 2, "why": "⚠️ 核心：英文指令下，中文对话必须产出中文卡", "incident": "提示词英文化后最大的风险面"}
+{"cid": "v02", "locale": "en", "window": "user: bombed the interview today, third time i've failed the algo round\nme: what happened?", "expect_lang": "en", "expect_cards_min": 1, "expect_cards_max": 2, "why": "英文花园产出英文卡"}
+{"cid": "v03", "locale": "zh-Hans", "window": "用户：今天天气不错\n我：是啊，适合出门", "expect_lang": "zh", "expect_cards_min": 0, "expect_cards_max": 0, "why": "闲聊不该落卡 —— 只测「能记」不测「能不记」，会得到一个话痨系统"}
+{"cid": "v04", "locale": "zh-Hans", "window": "用户：我不吃辣，一吃就胃疼，以后点菜避开\n我：记住了", "expect_lang": "zh", "expect_cards_min": 1, "expect_cards_max": 1, "why": "明确要求记住的偏好，必须落且只落一张"}
+{"cid": "v05", "locale": "zh-Hans", "window": "用户：这周开了一整天会，心率飙到 120，晚上失眠，我老婆说我该去看医生了，我们为这个吵了一架\n我：听起来这周很难熬", "expect_lang": "zh", "expect_cards_min": 1, "expect_cards_max": 2, "why": "一件事的多个侧面 —— 该合成厚卡，不该拆成四张薄卡"}

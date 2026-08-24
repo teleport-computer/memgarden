@@ -27,6 +27,17 @@ jobs:
         # 「无 io、无 API key、无网络」是这个包对外的核心承诺。
         # 只跑单测证明不了它 —— 单测本来就在仓库里跑。
         run: uv run python examples/quickstart.py
+      - name: 挑卡质量 eval（确定性，不调模型）
+        # 这不是重复单测。单测证明"函数按写的那样跑"；这条证明"挑出来的卡是对的"。
+        # 半年里最贵的两次事故都属于后者：管道全通、单测全绿，而用户召不回自己的记忆。
+        run: uv run --extra dev python evals/recall.py --baseline evals/baseline.json
+
+      - name: 落卡质量 eval（真模型）
+        # 没 key 就 SKIP 并明说 —— 提示词行为的 bug 只有真模型能暴露，
+        # 单测把 agent stub 掉了，什么都验不到。
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.EVAL_DEEPSEEK_API_KEY }}
+        run: uv run --extra dev python evals/capture.py --provider deepseek --model deepseek-chat
       - name: wheel 能构建，且带许可证
         run: |
           uv build

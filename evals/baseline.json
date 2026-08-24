@@ -1,0 +1,169 @@
+{
+  "recall": 1.0,
+  "relevance_precision": 0.177,
+  "relevance_violations": 0,
+  "zero_recall_queries": 0,
+  "anchor_slots_per_query": 4.0,
+  "filler_per_query": 1.4,
+  "queries": 10,
+  "cards": 17,
+  "per_query": [
+    {
+      "qid": "q01",
+      "query": "我的狗是什么品种",
+      "recalled": [
+        "c03"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 6
+    },
+    {
+      "qid": "q02",
+      "query": "我最近睡眠怎么样",
+      "recalled": [
+        "c04"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 5
+    },
+    {
+      "qid": "q03",
+      "query": "我之前跟你说过什么工作上的事",
+      "recalled": [
+        "c01",
+        "c02"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 7
+    },
+    {
+      "qid": "q04",
+      "query": "深夜想换工作那次",
+      "recalled": [
+        "L01"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 7
+    },
+    {
+      "qid": "q05",
+      "query": "我答应过你什么",
+      "recalled": [
+        "c07"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 7
+    },
+    {
+      "qid": "q06",
+      "query": "帮我写一段 SQL",
+      "recalled": [],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 4
+    },
+    {
+      "qid": "q07",
+      "query": "今天天气不错",
+      "recalled": [],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 7
+    },
+    {
+      "qid": "q08",
+      "query": "我妈身体怎么样",
+      "recalled": [
+        "c08"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 5
+    },
+    {
+      "qid": "q09",
+      "query": "我周末一般干什么",
+      "recalled": [
+        "c05"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 7
+    },
+    {
+      "qid": "q10",
+      "query": "点菜要注意什么",
+      "recalled": [
+        "c06"
+      ],
+      "missed": [],
+      "violated_by_relevance": [],
+      "anchored": [
+        "E02",
+        "N01",
+        "c07",
+        "c10"
+      ],
+      "returned": 7
+    }
+  ]
+}
