@@ -46,6 +46,24 @@ from memgarden.garden_language import decide_garden_language  # noqa: E402
 CORPUS = pathlib.Path(__file__).resolve().parent / "corpus" / "gardens.jsonl"
 
 
+def _basis_ok(got: str | None, want: str | None) -> bool:
+    """依据对不对。
+
+    ⚠️ `fallback_N` 里的 **N 不做严格比对**。语料里的槽位序号是内核自己的排法；
+    宿主的证据链完全可能是另一套顺序（io 就是 identity → locale → 归档语言）。
+    强行比对序号，测的就变成"你的取证顺序跟内核一样吗"—— 那不是这条 eval 该管的事，
+    而且会逼宿主写一层假的序号映射来凑绿。
+
+    真正要守住的是**档位**：这次结论是从桶来的、从兜底信号来的、还是纯默认值。
+    尤其是 `existing_buckets` 那档必须精确对上 —— 事故就出在那一档。
+    """
+    if not want:
+        return True
+    if want.startswith("fallback"):
+        return bool(got and got.startswith("fallback"))
+    return got == want
+
+
 def _default_decider(buckets, fallbacks):
     return decide_garden_language(buckets, fallbacks=fallbacks)
 
@@ -57,8 +75,7 @@ def run(decider=_default_decider, *, corpus: pathlib.Path = CORPUS) -> int:
     for c in cases:
         got = decider(c.get("buckets", ""), tuple(c.get("fallbacks") or ()))
         locale_ok = got.get("locale") == c["expect"]
-        # 依据是可选断言：宿主的证据来源不同，依据名可以不一样；但只要语料写了，就得对上。
-        basis_ok = "expect_basis" not in c or got.get("basis") == c["expect_basis"]
+        basis_ok = _basis_ok(got.get("basis"), c.get("expect_basis"))
         tag = "  ⚠事故" if c.get("incident") else ""
 
         if locale_ok and basis_ok:
