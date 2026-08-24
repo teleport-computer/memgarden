@@ -1,0 +1,15 @@
+{"id":"g_pure_zh","why":"最常见的中文用户","buckets":"工作、健康、宠物、家庭","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_pure_en","why":"最常见的英文用户","buckets":"Work, Health, Pets, Family","expect":"en","expect_basis":"existing_buckets"}
+{"id":"g_incident_0824","incident":"2026-08-24 线上事故:中文用户花园两天翻成英文","why":"事故当天真实的桶构成。按字符数算英文赢(中文12字 vs 英文40字),按桶数算平票→保持中文","buckets":"我们的关系、工作、健康、Our relationship、Feelings & comfort、GitHub","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_zh_majority_with_en_tail","incident":"2026-08-24","why":"6中3英。字符数 20 vs 33 判英文(错);桶数 6 vs 3 判中文(对)","buckets":"工作、健康、宠物、家庭、朋友、爱好、Work、Health、Pets","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_one_long_en_bucket","incident":"2026-08-24","why":"最小复现:三个短中文桶 vs 一个长英文桶。字符数 6 vs 32","buckets":"工作、健康、家庭、Feelings and emotional comfort","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_tie","why":"平票。保持原状(默认中文)——翻语言是用户看得见的破坏,不动最多是没跟上","buckets":"工作、健康、Work、Health","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_en_majority","why":"英文确实占多数时要能翻过去,别一味保守","buckets":"工作、Work、Health、Pets、Family","expect":"en","expect_basis":"existing_buckets"}
+{"id":"g_empty","why":"新用户没有桶。没有证据要能说出「没有证据」,好让宿主接着看别的信号","buckets":"","expect":"zh-Hans","expect_basis":"default"}
+{"id":"g_non_linguistic","why":"纯数字/符号桶不携带语言信息,不该投票","buckets":"2026、###、___","expect":"zh-Hans","expect_basis":"default"}
+{"id":"g_slash_separated","why":"桶名清单可能用斜杠分隔而不是顿号","buckets":"Work / Health / Pets","expect":"en","expect_basis":"existing_buckets"}
+{"id":"g_newline_separated","why":"也可能是一行一个","buckets":"工作\n健康\n宠物","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_mixed_inside_one_bucket","why":"单个桶内中英混排(「工作 Work」)含 CJK,算中文桶","buckets":"工作 Work、健康 Health","expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_fallback_used","why":"没有桶但宿主给了别的信号(用户明说的语言偏好),要用它而不是默认值","buckets":"","fallbacks":["en"],"expect":"en","expect_basis":"fallback_0"}
+{"id":"g_fallback_skipped_when_buckets_exist","why":"有桶时桶说了算,fallback 不该盖过它——否则一个陈旧的 locale 能翻掉整个花园","buckets":"工作、健康、宠物","fallbacks":["en"],"expect":"zh-Hans","expect_basis":"existing_buckets"}
+{"id":"g_fallback_chain","why":"多个 fallback 按优先级取第一个非空的","buckets":"","fallbacks":[null,"","zh-Hans"],"expect":"zh-Hans","expect_basis":"fallback_2"}

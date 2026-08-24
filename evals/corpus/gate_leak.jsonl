@@ -1,0 +1,5 @@
+{"id":"leak_harmony_marker","verdict":"reject","why":"模型的通道标记漏进正文。这是宿主 io 真实撞到过的一类","summary":"他答应周末去看医生","content":"<|channel|>analysis<|message|>用户提到了健康问题,我应该记录下来","signals":{"strong":["<|channel|>","<|message|>"],"weak":[]}}
+{"id":"leak_error_echo","verdict":"reject","why":"报错回显被当成记忆内容写进卡里","summary":"关于他的工作","content":"Error: model_api request failed with status 429, retrying in 3s","signals":{"strong":["model_api request failed"],"weak":[]}}
+{"id":"leak_two_weak_signals","verdict":"reject","why":"单个弱证据不够,两个共现才判泄漏——误杀真卡的代价太高","summary":"他答应周末去看医生","content":"assistant: 好的 tool_call: capture","signals":{"strong":[],"weak":["assistant:","tool_call:"]}}
+{"id":"leak_one_weak_signal_passes","verdict":"pass","why":"**闸门必须够宽**:一个弱证据就打回会误杀真卡。这条守的是「别过度拦截」","summary":"他答应周末去看医生","content":"他在群里 assistant: 那个梗玩了一整晚,后来自己也笑了,说明心情不错。","signals":{"strong":[],"weak":["assistant:","tool_call:"]}}
+{"id":"leak_generic_signals_dont_eat_real_cards","verdict":"pass","why":"不带宿主信号时(通用闸)普通真卡必须过","summary":"他对猫毛过敏","content":"上次在朋友家待了两小时开始打喷嚏,确认是猫毛过敏。","signals":null}

@@ -1,0 +1,11 @@
+{"id":"ok_plain_zh","verdict":"pass","why":"最普通的一张真卡。闸门的第一职责是别拦它","summary":"约定这周末去看医生","content":"因为连日加班到晚上十一点,对方答应本周末一定去医院做个检查。需要到时候提醒。"}
+{"id":"ok_plain_en","verdict":"pass","why":"英文花园的普通真卡","summary":"Agreed to see a doctor this weekend","content":"After weeks of working until 11pm, they finally agreed to get a checkup this weekend. Worth a reminder."}
+{"id":"ok_short_but_real","verdict":"pass","why":"短但是真内容。长度闸不能把简洁的真卡当垃圾","summary":"他对猫毛过敏","content":"上次去朋友家待了两小时就开始打喷嚏,后来确认是猫毛过敏,以后约地方要避开。"}
+{"id":"ok_contains_ellipsis","verdict":"pass","why":"正文里**含有**省略号 ≠ 正文**就是**省略号。真卡常有停顿","summary":"关于换工作这件事他还在犹豫","content":"他说想跳槽……但又担心新团队不稳定,打算再观察一个季度。"}
+{"id":"ok_quotes_the_user","verdict":"pass","why":"引用用户原话的卡不是泄漏","summary":"他说压力主要来自汇报","content":"原话是「不是活多,是每周三那个汇报」。压力源在汇报本身,不在工作量。"}
+{"id":"reject_empty_content","verdict":"reject","reason_prefix":"content_","why":"长标题+空正文,用户看到的第一类垃圾卡","summary":"关于他最近的工作状态和心情变化的一些观察","content":""}
+{"id":"reject_empty_summary","verdict":"reject","reason_prefix":"summary_","why":"没有摘要的卡在列表里是一行空白","summary":"","content":"他答应周末去医院检查。"}
+{"id":"reject_ellipsis_only","verdict":"reject","reason_prefix":"content_","why":"正文只有省略号——模型放弃了但还是产出了一张卡","summary":"关于健康的一些事","content":"..."}
+{"id":"reject_bracket_placeholder","verdict":"reject","reason_prefix":"summary_","why":"模板占位符原样落库","summary":"[摘要]","content":"[在这里写正文]"}
+{"id":"reject_tombstone","verdict":"reject","reason_prefix":"summary_","why":"整理动作的记账注记被当成内容本身","summary":"已被 c42ebb98a1d2 取代","content":"已被 c42ebb98a1d2 取代"}
+{"id":"reject_punctuation_only","verdict":"reject","reason_prefix":"content_","why":"纯标点没有实义字符","summary":"他的近况","content":"。。。—— !"}
