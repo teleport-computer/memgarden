@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-protocol-core"
-version = "0.1.5"
+version = "0.2.0"
 description = "模型协议残留处理：识别漏进正文的协议头、孤儿 JSON 尾、思考标记。纯标准库。"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

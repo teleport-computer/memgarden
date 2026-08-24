@@ -1,15 +1,15 @@
-{"id":"g_pure_zh","why":"最常见的中文用户","buckets":"工作、健康、宠物、家庭","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_pure_en","why":"最常见的英文用户","buckets":"Work, Health, Pets, Family","expect":"en","expect_basis":"existing_buckets"}
-{"id":"g_incident_0824","incident":"2026-08-24 线上事故:中文用户花园两天翻成英文","why":"事故当天真实的桶构成。按字符数算英文赢(中文12字 vs 英文40字),按桶数算平票→保持中文","buckets":"我们的关系、工作、健康、Our relationship、Feelings & comfort、GitHub","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_zh_majority_with_en_tail","incident":"2026-08-24","why":"6中3英。字符数 20 vs 33 判英文(错);桶数 6 vs 3 判中文(对)","buckets":"工作、健康、宠物、家庭、朋友、爱好、Work、Health、Pets","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_one_long_en_bucket","incident":"2026-08-24","why":"最小复现:三个短中文桶 vs 一个长英文桶。字符数 6 vs 32","buckets":"工作、健康、家庭、Feelings and emotional comfort","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_tie","why":"平票。保持原状(默认中文)——翻语言是用户看得见的破坏,不动最多是没跟上","buckets":"工作、健康、Work、Health","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_en_majority","why":"英文确实占多数时要能翻过去,别一味保守","buckets":"工作、Work、Health、Pets、Family","expect":"en","expect_basis":"existing_buckets"}
-{"id":"g_empty","why":"新用户没有桶。没有证据要能说出「没有证据」,好让宿主接着看别的信号","buckets":"","expect":"zh-Hans","expect_basis":"default"}
-{"id":"g_non_linguistic","why":"纯数字/符号桶不携带语言信息,不该投票","buckets":"2026、###、___","expect":"zh-Hans","expect_basis":"default"}
-{"id":"g_slash_separated","why":"桶名清单可能用斜杠分隔而不是顿号","buckets":"Work / Health / Pets","expect":"en","expect_basis":"existing_buckets"}
-{"id":"g_newline_separated","why":"也可能是一行一个","buckets":"工作\n健康\n宠物","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_mixed_inside_one_bucket","why":"单个桶内中英混排(「工作 Work」)含 CJK,算中文桶","buckets":"工作 Work、健康 Health","expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_fallback_used","why":"没有桶但宿主给了别的信号(用户明说的语言偏好),要用它而不是默认值","buckets":"","fallbacks":["en"],"expect":"en","expect_basis":"fallback_0"}
-{"id":"g_fallback_skipped_when_buckets_exist","why":"有桶时桶说了算,fallback 不该盖过它——否则一个陈旧的 locale 能翻掉整个花园","buckets":"工作、健康、宠物","fallbacks":["en"],"expect":"zh-Hans","expect_basis":"existing_buckets"}
-{"id":"g_fallback_chain","why":"多个 fallback 按优先级取第一个非空的","buckets":"","fallbacks":[null,"","zh-Hans"],"expect":"zh-Hans","expect_basis":"fallback_2"}
+{"id": "g_explicit_wins", "why": "用户明说要中文。任何东西都不该盖过它——这是他自己的设置,不是我们的推断", "explicit": "zh-Hans", "written": "I mostly chat in English actually", "locale": "en", "expect": "zh-Hans", "expect_basis": "explicit_preference"}
+{"id": "g_explicit_en", "why": "反方向同样成立,别只守一边", "explicit": "en", "written": "我平时都说中文的", "expect": "en", "expect_basis": "explicit_preference"}
+{"id": "g_written_zh", "why": "没明说时,看他实际在用什么语言写", "written": "今天面试挂了,算法题第三次没做出来,感觉自己不太适合这行,有点想放弃了", "expect": "zh-Hans", "expect_basis": "writing_language"}
+{"id": "g_written_en", "why": "英文用户", "written": "Bombed the interview again today, third time stuck on the same algorithm problem. Starting to wonder if this field is for me.", "expect": "en", "expect_basis": "writing_language"}
+{"id": "g_written_zh_with_tech_english", "incident": "2026-08-24 同类形状", "why": "中文用户天天夹英文技术词。拉丁字符可能过半,但这个人说的是中文——所以判据要有把握度门槛,不是简单比大小", "written": "今天 review 了一天的 PR,眼睛快瞎了。那个 data pipeline 的重构改了 4000 多行,team 里只有我碰过那块老代码,manager 说 sprint 排不下", "expect": "zh-Hans", "expect_basis": "writing_language"}
+{"id": "g_written_too_short", "why": "「ok thanks」不该把一个花园推向英文。证据不够就往下走,别拿 51:49 的结论翻人家的花园", "written": "ok thanks", "locale": "zh-Hans", "expect": "zh-Hans", "expect_basis": "client_locale"}
+{"id": "g_written_balanced", "why": "势均力敌也算证据不足。翻语言是用户看得见的破坏,保持不变最多是没跟上", "written": "今天开了三个会 meeting notes are attached please review them before tomorrow", "locale": "zh-Hans", "expect": "zh-Hans", "expect_basis": "client_locale"}
+{"id": "g_locale_only", "why": "全新用户,还没写过任何东西,只有设备 locale", "locale": "en", "expect": "en", "expect_basis": "client_locale"}
+{"id": "g_nothing", "why": "什么证据都没有时落到默认,并且要能说出「这是默认值」——好让宿主知道这个结论有多弱", "expect": "zh-Hans", "expect_basis": "default"}
+{"id": "g_buckets_are_not_evidence_james", "incident": "hx 2026-08-24 指出:一个中文用户给外国朋友建桶就会翻语言", "why": "🔴 判据里**不该有桶名**。人名是专有名词,不携带语言信息。这条把桶名塞进 written 也不该翻转——因为它压根不是这个人写的字。语料把桶名放在判定器收不到的字段里——**契约的形状本身就说明桶名不是证据**", "written": "", "locale": "zh-Hans", "expect": "zh-Hans", "expect_basis": "client_locale", "buckets_present_but_ignored": "工作、健康、James、Sarah、Mike"}
+{"id": "g_buckets_are_not_evidence_brands", "incident": "hx 2026-08-24 指出", "why": "🔴 公司名/项目名同理:OpenAI、GitHub、Figma 全是拉丁字母,跟这个人说什么语言无关。语料把桶名放在判定器收不到的字段里——**契约的形状本身就说明桶名不是证据**", "written": "", "locale": "zh-Hans", "expect": "zh-Hans", "expect_basis": "client_locale", "buckets_present_but_ignored": "工作、James、OpenAI、GitHub、Figma"}
+{"id": "g_incident_0824_buckets", "incident": "2026-08-24 线上事故的真实桶构成", "why": "🔴 事故当天那些桶,现在压根不该进判据。这条守的是「桶名永远影响不了语言」。语料把桶名放在判定器收不到的字段里——**契约的形状本身就说明桶名不是证据**", "written": "", "locale": "zh-Hans", "expect": "zh-Hans", "expect_basis": "client_locale", "buckets_present_but_ignored": "我们的关系、工作、健康、Our relationship、Feelings & comfort、GitHub"}
+{"id": "g_explicit_beats_written", "why": "他明说要中文,但最近在写英文邮件。**明说的优先**——用户的设置不是我们可以推翻的推断", "explicit": "zh-Hans", "written": "Please find the quarterly report attached. Let me know if you need anything else before the board meeting on Thursday.", "expect": "zh-Hans", "expect_basis": "explicit_preference"}
+{"id": "g_written_beats_locale", "why": "设备 locale 是英文(比如买的水货手机),但他一直在用中文写。实际写作比设备设置强", "written": "这周三那个季度汇报准备到凌晨两点,PPT 改了六版,老板每次都说方向不对但也不说要什么", "locale": "en", "expect": "zh-Hans", "expect_basis": "writing_language"}
+{"id": "g_empty_written_not_a_signal", "why": "空字符串/空列表不算证据,别把它当成「写了但没内容」", "written": "", "locale": "en", "expect": "en", "expect_basis": "client_locale"}

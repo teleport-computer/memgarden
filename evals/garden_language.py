@@ -44,8 +44,12 @@ for _p in (str(_ROOT / "src"), str(_ROOT / "packages" / "agent-protocol-core" / 
 from memgarden.contract import run_garden_language_contract  # noqa: E402
 from memgarden.garden_language import decide_garden_language  # noqa: E402
 
-def _default_decider(buckets, fallbacks):
-    return decide_garden_language(buckets, fallbacks=fallbacks)
+def _default_decider(evidence: dict) -> dict:
+    return decide_garden_language(
+        explicit=evidence.get("explicit"),
+        written=evidence.get("written") or "",
+        locale=evidence.get("locale"),
+    )
 
 
 def run(decider=_default_decider) -> int:

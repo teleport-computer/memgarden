@@ -27,7 +27,11 @@ import json
 from importlib import resources
 from typing import Any, Callable
 
-Decider = Callable[[Any, tuple], dict]
+#: 宿主的判定器。收一条**证据**（语料里那几个字段），返回至少含 ``locale`` 的 dict。
+#:
+#: ⚠️ 证据里**没有桶名**。这是设计 —— 桶名是 AI 的输出，且大量是人名/公司名这类
+#: 不携带语言信息的专有名词。详见 ``memgarden.garden_language`` 的模块说明。
+Decider = Callable[[dict], dict]
 
 
 def garden_language_cases() -> list[dict]:
@@ -39,32 +43,33 @@ def garden_language_cases() -> list[dict]:
 def basis_matches(got: str | None, want: str | None) -> bool:
     """依据对不对。
 
-    ⚠️ ``fallback_N`` 里的 **N 不做严格比对**。语料里的槽位序号是内核自己的排法；
-    宿主的证据链完全可能是另一套顺序。强行比对序号，测的就变成「你的取证顺序跟内核
-    一样吗」—— 那不是契约该管的事，而且会逼宿主写一层假的序号映射来凑绿。
+    依据名是闭集（``explicit_preference`` / ``writing_language`` / ``client_locale``
+    / ``default``），四档语义清楚、跨宿主一致，所以精确比对。
 
-    真正要守住的是**档位**：这次结论是从桶来的、从兜底信号来的、还是纯默认值。
-    尤其 ``existing_buckets`` 那档必须精确对上 —— 事故就出在那一档。
+    比对依据而不只比对结论，是因为**结论对、依据错**是最难发现的一类问题：
+    碰巧两条证据指向同一种语言时，用错证据也能得出正确答案 —— 直到有一天它们不一致。
     """
     if not want:
         return True
-    if want.startswith("fallback"):
-        return bool(got and got.startswith("fallback"))
     return got == want
 
 
 def run_garden_language_contract(decider: Decider, *, echo=print) -> tuple[int, list[str]]:
     """拿宿主的判定器跑内核的语料。返回 ``(通过数, 失败的 id 列表)``。
 
-    ``decider(buckets, fallbacks)`` 要返回至少含 ``locale`` 的 dict；有 ``basis``
-    的话会一并核对（按上面的宽严规则）。
+    ``decider(evidence)`` 收一个 dict（``explicit`` / ``written`` / ``locale``），
+    返回至少含 ``locale`` 的 dict；有 ``basis`` 的话会一并核对。
     """
     cases = garden_language_cases()
     fails: list[str] = []
     incidents = 0
 
     for c in cases:
-        got = decider(c.get("buckets", ""), tuple(c.get("fallbacks") or ()))
+        got = decider({
+            "explicit": c.get("explicit") or None,
+            "written": c.get("written") or "",
+            "locale": c.get("locale") or None,
+        })
         ok = got.get("locale") == c["expect"] and basis_matches(
             got.get("basis"), c.get("expect_basis")
         )
