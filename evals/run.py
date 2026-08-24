@@ -44,6 +44,13 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 
+# 本文件要 import memgarden 来查**包内**语料。装了包的话（宿主那边）直接就有；
+# 在这个仓库里开发时没装，就退回源码目录。
+for _p in (str(HERE.parent / "src"),
+           str(HERE.parent / "packages" / "agent-protocol-core" / "src")):
+    if _p not in sys.path:
+        sys.path.append(_p)
+
 FREE = [
     ("recall.py", "① 挑卡质量"),
     ("gate.py", "② 落库闸（拦得住 / 放得过）"),
@@ -61,9 +68,8 @@ def _check_corpus() -> list[str]:
     problems = []
     # 断言文件 vs 数据文件：只有「写了期望结果」的文件才要求逐条说明理由。
     # cards.jsonl / conversations.jsonl 是**素材**，它们的理由写在引用它们的查询里。
-    ASSERTING = {"queries.jsonl", "gardens.jsonl", "gate.jsonl", "gate_leak.jsonl"}
-    expected = {"cards.jsonl": 10, "queries.jsonl": 5, "gardens.jsonl": 10,
-                "gate.jsonl": 5, "gate_leak.jsonl": 3, "conversations.jsonl": 3}
+    ASSERTING = {"queries.jsonl", "gate.jsonl", "gate_leak.jsonl"}
+    expected = {"cards.jsonl": 10, "queries.jsonl": 5, "gate.jsonl": 5, "gate_leak.jsonl": 3, "conversations.jsonl": 3}
     for name, floor in expected.items():
         p = HERE / "corpus" / name
         if not p.exists():
@@ -92,6 +98,25 @@ def _check_corpus() -> list[str]:
             blank = [i for i, r in zip(ids, rows) if not str(r.get("why") or "").strip()]
             if blank:
                 problems.append(f"{name} 有 {len(blank)} 条没写 why：{blank[:3]}")
+    # 语言那份语料住在**包里**（随 wheel 分发给宿主），不在这个目录 —— 但一样会被
+    # 清空/写坏，所以一样要查。漏了它，宿主那边会拿到一个静默通过的契约。
+    try:
+        from memgarden.contract import garden_language_cases
+        rows = garden_language_cases()
+        if len(rows) < 10:
+            problems.append(f"包内 gardens.jsonl 只有 {len(rows)} 条，低于下限 10")
+        ids = [r.get("id") for r in rows]
+        if len(set(ids)) != len(ids):
+            problems.append("包内 gardens.jsonl 有重复 id")
+        blank = [i for i, r in zip(ids, rows) if not str(r.get("why") or "").strip()]
+        if blank:
+            problems.append(f"包内 gardens.jsonl 有 {len(blank)} 条没写 why：{blank[:3]}")
+        if not any(r.get("incident") for r in rows):
+            # 事故条目是这份语料存在的理由。一条都没有，多半是被谁「精简」掉了。
+            problems.append("包内 gardens.jsonl 一条 incident 都没有 —— 事故语料被删过？")
+    except Exception as e:
+        problems.append(f"包内语料读不出来：{e}")
+
     return problems
 
 

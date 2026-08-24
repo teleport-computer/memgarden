@@ -41,56 +41,17 @@ for _p in (str(_ROOT / "src"), str(_ROOT / "packages" / "agent-protocol-core" / 
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from memgarden.contract import run_garden_language_contract  # noqa: E402
 from memgarden.garden_language import decide_garden_language  # noqa: E402
-
-CORPUS = pathlib.Path(__file__).resolve().parent / "corpus" / "gardens.jsonl"
-
-
-def _basis_ok(got: str | None, want: str | None) -> bool:
-    """依据对不对。
-
-    ⚠️ `fallback_N` 里的 **N 不做严格比对**。语料里的槽位序号是内核自己的排法；
-    宿主的证据链完全可能是另一套顺序（io 就是 identity → locale → 归档语言）。
-    强行比对序号，测的就变成"你的取证顺序跟内核一样吗"—— 那不是这条 eval 该管的事，
-    而且会逼宿主写一层假的序号映射来凑绿。
-
-    真正要守住的是**档位**：这次结论是从桶来的、从兜底信号来的、还是纯默认值。
-    尤其是 `existing_buckets` 那档必须精确对上 —— 事故就出在那一档。
-    """
-    if not want:
-        return True
-    if want.startswith("fallback"):
-        return bool(got and got.startswith("fallback"))
-    return got == want
-
 
 def _default_decider(buckets, fallbacks):
     return decide_garden_language(buckets, fallbacks=fallbacks)
 
 
-def run(decider=_default_decider, *, corpus: pathlib.Path = CORPUS) -> int:
-    cases = [json.loads(l) for l in corpus.read_text("utf-8").splitlines() if l.strip()]
-    fails, incidents = [], 0
-
-    for c in cases:
-        got = decider(c.get("buckets", ""), tuple(c.get("fallbacks") or ()))
-        locale_ok = got.get("locale") == c["expect"]
-        basis_ok = _basis_ok(got.get("basis"), c.get("expect_basis"))
-        tag = "  ⚠事故" if c.get("incident") else ""
-
-        if locale_ok and basis_ok:
-            print(f"  ✓ {c['id']:38} → {got.get('locale'):8}{tag}")
-        else:
-            print(f"  ✗ {c['id']:38} → {got.get('locale')!r} (期望 {c['expect']!r})"
-                  f" 依据={got.get('basis')!r}{tag}")
-            print(f"      语料写的理由：{c['why']}")
-            fails.append(c["id"])
-            if c.get("incident"):
-                incidents += 1
-
-    print(f"\n  {len(cases) - len(fails)}/{len(cases)} 通过")
-    if incidents:
-        print(f"  🔴 其中 {incidents} 条是**曾经真的发生过的事故**，回归了。")
+def run(decider=_default_decider) -> int:
+    """语料**来自包内**（memgarden.contract），不是这个目录 —— 宿主装了包就能跑
+    同一份，不必 clone 内核仓库。见 contract/__init__.py 里的理由。"""
+    _, fails = run_garden_language_contract(decider)
     if fails:
         print(f"  失败：{', '.join(fails)}")
         return 1
