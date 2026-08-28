@@ -18,6 +18,8 @@ V2 extraction/worker 两条运行时共用一份判据 —— 不再像旧栅栏
 """
 from __future__ import annotations
 
+from .. import config
+
 import os
 
 # ---------------------------------------------------------------------------
@@ -62,19 +64,11 @@ def result_id_leak(*, summary: str, content: str, known_ids) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _fuse_ratio() -> float:
-    try:
-        value = float(os.environ.get("FEEDLING_DREAM_FUSE_RATIO", "0.8"))
-    except (TypeError, ValueError):
-        return 0.8
-    return value if 0.0 < value <= 1.0 else 0.8
+    return config.ratio("DREAM_FUSE_RATIO", default=0.8)
 
 
 def _fuse_min_cards() -> int:
-    try:
-        value = int(os.environ.get("FEEDLING_DREAM_FUSE_MIN_CARDS", "10"))
-    except (TypeError, ValueError):
-        return 10
-    return value if value > 0 else 10
+    return config.count("DREAM_FUSE_MIN_CARDS", default=10)
 
 
 def blast_radius_exceeded(retiring_count: int, active_count: int) -> bool:
@@ -85,8 +79,8 @@ def blast_radius_exceeded(retiring_count: int, active_count: int) -> bool:
     重写整个花园」这种规模才明显不对。熔断 = 整个 job 失败等人查,不部分执行:
     部分执行会把「哪些做了哪些没做」变成排查噩梦。
 
-    env 可调:``FEEDLING_DREAM_FUSE_RATIO``(默认 0.8)、
-    ``FEEDLING_DREAM_FUSE_MIN_CARDS``(默认 10)。
+    env 可调:``MEMGARDEN_DREAM_FUSE_RATIO``(默认 0.8)、
+    ``MEMGARDEN_DREAM_FUSE_MIN_CARDS``(默认 10)。旧的 FEEDLING_* 前缀仍读,但已弃用。
     """
     retiring = max(0, int(retiring_count or 0))
     active = max(0, int(active_count or 0))

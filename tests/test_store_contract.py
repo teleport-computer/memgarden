@@ -150,3 +150,69 @@ def test_a_failed_mutation_rolls_back_the_whole_batch(store):
 def test_unknown_op_is_rejected(store):
     with pytest.raises(ValueError):
         store.apply(T, [{"op": "打个响指"}], idempotency_key="k1")
+
+
+# --------------------------------------------------------------------------- #
+# 2026-08-27 Seven 评审 §10.3 / §10.4：两个静默丢数据的 bug
+# --------------------------------------------------------------------------- #
+
+def test_deleting_a_card_never_lets_the_next_one_overwrite_a_survivor(store):
+    """**删一条之后新增，绝不能覆盖幸存者。**
+
+    原实现用「当前总数 + 1」生成 id：删掉一条后计数回退，算出的 id 撞上已存在
+    的卡，而写入是 upsert（有则覆盖）——
+
+        初始      {m_1: first, m_2: second}
+        删掉 m_1  {m_2: second}
+        新增      COUNT=1 → 算出 m_2 → **覆盖掉 second，不报错**
+
+    这是最坏的一类 bug：静默丢数据。用户的一条记忆凭空消失，没有任何错误可查。
+    """
+    t = "tenant-overwrite"
+    store.apply(t, [{"op": "add", "card": {"summary": "first"}}], idempotency_key="k1")
+    store.apply(t, [{"op": "add", "card": {"summary": "second"}}], idempotency_key="k2")
+    survivors_before = {c["summary"] for c in store.load(t).cards}
+
+    store.apply(t, [{"op": "delete", "target_id": "m_1"}], idempotency_key="k3")
+    store.apply(t, [{"op": "add", "card": {"summary": "third"}}], idempotency_key="k4")
+
+    after = {c["summary"] for c in store.load(t).cards}
+    assert "second" in after, (
+        f"删除后新增覆盖了幸存的卡：删前 {survivors_before}，删后新增得到 {after}"
+    )
+    assert "third" in after
+
+
+def test_the_same_idempotency_key_with_different_content_is_a_conflict(store):
+    """**同一个幂等键送来不同内容 = 冲突，不能静默返回旧结果。**
+
+    幂等键的语义是「同一个请求重放，别写第二遍」。同 key 不同内容不是重放，
+    是两个不同请求撞了 key（多半是调用方的键生成漏了这批改动的标识）。
+
+    静默返回第一次的结果，会让第二批改动凭空消失，而调用方以为写成功了 ——
+    用户那边的表现是「说了话但没记住」，且没有任何错误可查。
+    """
+    from memgarden.storage import IdempotencyConflict
+
+    t = "tenant-idem"
+    store.apply(t, [{"op": "add", "card": {"summary": "A"}}], idempotency_key="same")
+
+    with pytest.raises(IdempotencyConflict):
+        store.apply(t, [{"op": "add", "card": {"summary": "B 完全不同"}}],
+                    idempotency_key="same")
+
+
+def test_a_genuine_replay_is_still_idempotent(store):
+    """反向：**真正的重放必须还是幂等的。**
+
+    上一条守「别静默吞掉不同内容」，这条守「别把正常重试也当成冲突」——
+    只守一边的话，把幂等键改成「永远报冲突」也能让上一条变绿。
+    """
+    t = "tenant-replay"
+    mutations = [{"op": "add", "card": {"summary": "A", "content": "x"}}]
+    first = store.apply(t, mutations, idempotency_key="same")
+    again = store.apply(t, list(mutations), idempotency_key="same")
+
+    assert again.results == first.results
+    assert again.revision == first.revision
+    assert len(store.load(t).cards) == 1, "重放写进了第二份"

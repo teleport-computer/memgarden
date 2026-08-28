@@ -226,3 +226,54 @@ def test_chinese_garden_still_gets_chinese_bucket_names():
     )
     assert BUCKET_SETS["zh-Hans"] in text, "中文花园拿不到中文桶名了"
     assert BUCKET_SETS["en"] not in text, "英文桶清单又被塞进中文花园"
+
+
+def test_no_host_specific_env_var_names_in_the_kernel():
+    """公共包里不许**读取**产品专属的环境变量名。
+
+    别人装了 `pip install memgarden`，要调一个阈值得去设 `FEEDLING_DREAM_FUSE_RATIO`
+    —— 而他们根本不知道 Feedling 是什么。这跟写死中文桶名、写死宿主的枚举
+    是同一类问题：**通用规则里夹带了宿主专有的具体值。**
+
+    sevenfloor 评审 §11 指出：原来的纯净度测试只查 import 和少量文本模式，
+    拦不住这一类。所以补上。
+
+    ⚠️ **只查真正读 env 的字符串，不查文档和注释。**
+    第一版是全文搜前缀，结果把「旧名已弃用」这句说明也判成违规 ——
+    那会逼着大家把弃用说明删掉，而那正是别人最需要看到的一句话。
+    守卫应该拦住行为，不该拦住解释行为的文字。
+
+    唯一豁免 ``config.py`` —— 它刻意保留旧前缀的读取以免「设了不生效」。
+    """
+    import ast
+    import pathlib as _p
+
+    HOST_PREFIXES = ("FEEDLING_", "IO_", "PHALA_")
+    root = _p.Path(__file__).resolve().parent.parent / "src" / "memgarden"
+    offenders = []
+
+    for f in root.rglob("*.py"):
+        if f.name == "config.py":
+            continue
+        tree = ast.parse(f.read_text("utf-8"))
+        # 文档字符串单独收集，扫描时跳过它们。
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef,
+                                 ast.FunctionDef, ast.AsyncFunctionDef)):
+                doc = ast.get_docstring(node, clean=False)
+                if doc:
+                    docstrings.add(doc)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if node.value in docstrings:
+                continue
+            for prefix in HOST_PREFIXES:
+                if node.value.startswith(prefix):
+                    offenders.append(f"{f.relative_to(root)}:{node.lineno} {node.value}")
+
+    assert not offenders, (
+        "内核里读了宿主专属的环境变量，应该走 config.py 的 MEMGARDEN_* 命名空间："
+        + ", ".join(offenders)
+    )

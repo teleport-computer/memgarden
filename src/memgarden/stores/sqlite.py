@@ -13,7 +13,15 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from ..storage import FULL_CAPABILITIES, ApplyResult, Capabilities, Snapshot
+from ..storage import (
+    FULL_CAPABILITIES,
+    ApplyResult,
+    Capabilities,
+    IdempotencyConflict,
+    RevisionConflict,
+    Snapshot,
+    mutations_digest,
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -30,7 +38,14 @@ CREATE TABLE IF NOT EXISTS applied (
     tenant   TEXT NOT NULL,
     key      TEXT NOT NULL,
     result   TEXT NOT NULL,
+    digest   TEXT,
     PRIMARY KEY (tenant, key)
+);
+-- 只增不减的 id 计数器。**不要**改回「数 cards 的行数」——
+-- 删除会让计数回退、撞上已有 id，而写入是 upsert，结果是静默覆盖数据。
+CREATE TABLE IF NOT EXISTS id_counters (
+    tenant   TEXT PRIMARY KEY,
+    next_id  INTEGER NOT NULL DEFAULT 1
 );
 """
 
@@ -79,11 +94,16 @@ class SqliteStore:
         expected_revision: str | None = None,
     ) -> ApplyResult:
         with self._lock, self._connect() as conn:
+            digest = mutations_digest(mutations)
             cached = conn.execute(
-                "SELECT result FROM applied WHERE tenant=? AND key=?",
+                "SELECT result, digest FROM applied WHERE tenant=? AND key=?",
                 (tenant, idempotency_key),
             ).fetchone()
             if cached:
+                # 同 key 必须同内容。不同内容不是重放，是两个不同请求撞了 key ——
+                # 静默返回旧结果会让第二批改动凭空消失，而调用方以为写成功了。
+                if cached[1] and cached[1] != digest:
+                    raise IdempotencyConflict(idempotency_key)
                 payload = json.loads(cached[0])
                 return ApplyResult(results=payload["results"], revision=payload["revision"])
 
@@ -91,9 +111,7 @@ class SqliteStore:
             try:
                 current = self._rev(conn, tenant)
                 if expected_revision is not None and expected_revision != current:
-                    raise RuntimeError(
-                        f"revision conflict: expected {expected_revision}, now {current}"
-                    )
+                    raise RevisionConflict(expected_revision, current)
                 results = [self._one(conn, tenant, m) for m in mutations]
                 new_rev = str(int(current) + 1)
                 conn.execute(
@@ -102,9 +120,10 @@ class SqliteStore:
                     (tenant, int(new_rev)),
                 )
                 conn.execute(
-                    "INSERT INTO applied(tenant, key, result) VALUES(?,?,?)",
+                    "INSERT INTO applied(tenant, key, result, digest) VALUES(?,?,?,?)",
                     (tenant, idempotency_key,
-                     json.dumps({"results": results, "revision": new_rev}, ensure_ascii=False)),
+                     json.dumps({"results": results, "revision": new_rev}, ensure_ascii=False),
+                     digest),
                 )
                 conn.execute("COMMIT")
             except Exception:
@@ -148,8 +167,29 @@ class SqliteStore:
         )
 
     def _next_id(self, conn: sqlite3.Connection, tenant: str) -> str:
-        n = conn.execute("SELECT COUNT(*) FROM cards WHERE tenant=?", (tenant,)).fetchone()[0]
-        return f"m_{n + 1}"
+        """下一个卡片 id。
+
+        ⚠️ **绝不能用「当前总数 + 1」。** 那样删掉一条之后计数会回退，
+        算出来的 id 撞上已存在的卡，而 ``_put`` 是 upsert（有则覆盖）——
+        结果是**静默覆盖别人的数据**：
+
+            初始      {m_1: first, m_2: second}
+            删掉 m_1  {m_2: second}
+            新增      COUNT=1 → 算出 m_2 → 覆盖掉 second，不报错
+
+        这里用一张只增不减的计数表。真实宿主更应该直接用 ULID / UUID /
+        数据库序列 —— 任何**不会因删除而回退**的东西都行，别自己数数。
+        """
+        row = conn.execute(
+            "SELECT next_id FROM id_counters WHERE tenant=?", (tenant,)
+        ).fetchone()
+        n = int(row[0]) if row else 1
+        conn.execute(
+            "INSERT INTO id_counters(tenant, next_id) VALUES(?,?) "
+            "ON CONFLICT(tenant) DO UPDATE SET next_id=excluded.next_id",
+            (tenant, n + 1),
+        )
+        return f"m_{n}"
 
     def _rev(self, conn: sqlite3.Connection, tenant: str) -> str:
         row = conn.execute("SELECT revision FROM revisions WHERE tenant=?", (tenant,)).fetchone()

@@ -10,7 +10,15 @@ import copy
 import itertools
 import threading
 
-from ..storage import FULL_CAPABILITIES, ApplyResult, Capabilities, Snapshot
+from ..storage import (
+    ApplyResult,
+    Capabilities,
+    FULL_CAPABILITIES,
+    IdempotencyConflict,
+    RevisionConflict,
+    Snapshot,
+    mutations_digest,
+)
 
 
 class InMemoryStore:
@@ -51,14 +59,18 @@ class InMemoryStore:
     ) -> ApplyResult:
         with self._lock:
             # 幂等：同一个 key 重放，原样返回上次的结果，不重复写。
+            # 但**必须是同一批内容** —— 同 key 不同内容不是重放，是撞了 key，
+            # 静默返回旧结果会让第二批改动凭空消失。
+            digest = mutations_digest(mutations)
             cached = self._applied.get(tenant, {}).get(idempotency_key)
             if cached is not None:
-                return cached
+                prev_digest, prev_result = cached
+                if prev_digest != digest:
+                    raise IdempotencyConflict(idempotency_key)
+                return prev_result
 
             if expected_revision is not None and expected_revision != self._rev(tenant):
-                raise RuntimeError(
-                    f"revision conflict: expected {expected_revision}, now {self._rev(tenant)}"
-                )
+                raise RevisionConflict(expected_revision, self._rev(tenant))
 
             bucket = self._cards.setdefault(tenant, {})
             results: list[dict] = []
@@ -91,7 +103,7 @@ class InMemoryStore:
             self._cards[tenant] = staged
             self._revision[tenant] = int(self._rev(tenant)) + 1
             out = ApplyResult(results=results, revision=self._rev(tenant))
-            self._applied.setdefault(tenant, {})[idempotency_key] = out
+            self._applied.setdefault(tenant, {})[idempotency_key] = (digest, out)
             return out
 
     # -- 内部 ------------------------------------------------------------ #

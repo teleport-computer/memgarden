@@ -20,10 +20,10 @@
 """
 from __future__ import annotations
 
-import os
 import re
 
 from ..prompts.buckets import _text_is_chinese
+from .. import config
 from .leak_signals import GENERIC_SIGNALS, LeakSignals
 
 
@@ -33,9 +33,7 @@ def guard_enabled() -> bool:
     ⚠️ 纯检测函数(``field_pollution_reason`` 等)刻意**不读 env** —— 只有这一个边界
     函数读,由调用层把结果传进各写入路径。默认 ON:内测无灰度,开关只当回滚闸。
     """
-    return os.environ.get("FEEDLING_MEMORY_CARD_GUARD", "1").strip().lower() not in (
-        "0", "false", "off", "no",
-    )
+    return config.flag("MEMORY_CARD_GUARD", default=True)
 
 #: 判据强弱怎么权衡留在内核（见 leak_signals 的说明）；**识别器由宿主提供**。
 #: io 那套（harmony token / to=functions.x / 报错回显 / 自家协议键名 / 桶 denylist）

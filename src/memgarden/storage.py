@@ -47,11 +47,14 @@ IO 自己的适配器用 ``FULL_CAPABILITIES``。
    executor / wrapper 里按 mutation 类型自动校验，而不是靠自觉。
 3. 读侧只定义了 ``load``，没定义「挑完候选之后怎么取内容」（index → fetch →
    decrypt 那一段现在还在 IO 侧的 ``memory_readside_core``，没进 port）。
-4. 冲突与部分失败没有标准表达：``RevisionConflict`` / ``IdempotencyConflict`` /
-   ``UnsupportedMutation`` 都还没定义，调用方只能靠约定。
+4. ~~冲突与部分失败没有标准表达~~ —— ``RevisionConflict`` /
+   ``IdempotencyConflict`` 已定义（2026-08-27）。仍缺的是「部分失败」：
+   一批 mutation 里前几条成功、后面失败时，调用方现在只能看到一个异常，
+   看不到哪几条已经落库。
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
@@ -119,6 +122,51 @@ class Degradation:
     capability: str
     fallback: str
     cost: str
+
+
+def mutations_digest(mutations: list[dict]) -> str:
+    """这批改动的内容指纹，用来判断「同一个幂等键送来的是不是同一批东西」。
+
+    ``sort_keys`` 是必需的：同样的内容，dict 的键序不该算成两批改动 ——
+    否则调用方换个 Python 版本、或者字段拼装顺序变了，重放就会误报冲突。
+
+    摘要只用于比对，不参与存储内容，所以用 sha256 截断即可。
+    """
+    import hashlib
+
+    blob = json.dumps(mutations, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+class RevisionConflict(RuntimeError):
+    """``expected_revision`` 与库里当前版本不一致 —— 有人在你读到之后改过了。
+
+    调用方应当重读快照、重新决策，**不要**盲目重试同一批改动：那批改动是基于
+    过期状态算出来的。
+    """
+
+    def __init__(self, expected: str, current: str) -> None:
+        self.expected, self.current = expected, current
+        super().__init__(f"revision conflict: expected {expected}, now {current}")
+
+
+class IdempotencyConflict(RuntimeError):
+    """同一个幂等键，两次送来的**内容不一样**。
+
+    幂等键的语义是「同一个请求重放，别写第二遍」。同 key 不同内容不是重放，
+    是两个不同的请求撞了 key —— 多半是调用方的键生成有 bug（比如键里没带上
+    这批改动的标识）。
+
+    **这里必须报错，不能返回第一次的结果。** 静默返回旧结果会让第二批改动凭空
+    消失，而调用方以为写成功了 —— 用户那边的表现是「说了话但没记住」，
+    且没有任何错误可查。
+    """
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(
+            f"idempotency key {key!r} was already used for a different set of mutations"
+        )
 
 
 @dataclass(frozen=True)
