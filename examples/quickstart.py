@@ -13,6 +13,7 @@ from pathlib import Path
 from memgarden.adapt import FieldMap, summary_of, to_card
 from memgarden.policies import get_policy
 from memgarden.prompts.capture import build_capture_prompt, parse_capture_cards
+from memgarden.storage import IdempotencyConflict
 from memgarden.stores.sqlite import SqliteStore
 
 # 模型的假回复。真实用法是把 build_capture_prompt 的产物发给任意 LLM。
@@ -80,16 +81,21 @@ def main() -> None:
     print("\n④ 存进本地 SQLite（数据在你自己机器上，库不加密）")
     with tempfile.TemporaryDirectory() as tmp:
         store = SqliteStore(Path(tmp) / "demo.db")
-        result = store.apply(
-            "user_1",
-            [{"op": "add", "card": c} for c in cards],
-            idempotency_key="turn_42",
-        )
+        batch = [{"op": "add", "card": c} for c in cards]
+        result = store.apply("user_1", batch, idempotency_key="turn_42")
         print(f"     写入 {len(result.results)} 张，版本号 {result.revision}")
 
-        # 幂等：同一个 key 重放不会写第二次
-        store.apply("user_1", [{"op": "add", "card": cards[0]}], idempotency_key="turn_42")
-        print(f"     用同一个幂等键重放 → 库里仍是 {len(store.load('user_1').cards)} 张")
+        # 幂等：**同一批内容**重放不会写第二次（网络重试、任务重跑都会这样）
+        store.apply("user_1", batch, idempotency_key="turn_42")
+        print(f"     同一批内容重放 → 库里仍是 {len(store.load('user_1').cards)} 张")
+
+        # 反过来：同一个 key 送来**不同内容**是冲突，不是重放。
+        # 静默返回旧结果会让这批改动凭空消失，而调用方以为写成功了。
+        try:
+            store.apply("user_1", batch[:1], idempotency_key="turn_42")
+            print("     ⚠️ 同 key 不同内容没报错 —— 这批改动会被静默丢掉")
+        except IdempotencyConflict:
+            print("     同一个 key 换一批内容 → 报冲突（多半是键生成漏了批次标识）")
 
     print("\n⑤ 接别的记忆库：只换字段映射，不改代码")
     notion = FieldMap(
