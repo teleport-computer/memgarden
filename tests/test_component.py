@@ -391,3 +391,48 @@ def test_capture_gives_both_mutations_and_raw_cards() -> None:
     assert out.cards[0]["action"] == "add"          # 原始卡保留 action
     assert "action" not in out.mutations[0]["card"]  # 指令里拆到了外层 op
     assert out.cards[0]["summary"] == out.mutations[0]["card"]["summary"]
+
+
+# --------------------------------------------------------------- 截断
+
+class TruncatingModel:
+    """第一次返回被截断的回复，第二次正常。
+
+    截断标记由**宿主**给 —— 内核看不到 provider 的 finish_reason。
+    """
+
+    def __init__(self, good: str) -> None:
+        self.good = good
+        self.calls = 0
+        self.prompts: list[str] = []
+
+    def complete(self, prompt: str, *, purpose: str = "") -> dict:
+        self.calls += 1
+        self.prompts.append(prompt)
+        if self.calls == 1:
+            return {"text": '{"cards":[{"action":"add","summary":"他不吃', "truncated": True}
+        return {"text": self.good, "truncated": False}
+
+
+def test_a_truncated_reply_is_asked_again_with_a_shorter_prompt() -> None:
+    """回复被截断时原样重问多半还是会截在同一个位置 —— 要换更简短的提示词。
+
+    这是宿主 io 一直在做的事（provider 层能看到 finish_reason）。收进组件时
+    不能把它丢掉，否则半截 JSON 会被当成解析失败、整个窗口的落卡清零。
+    """
+    model = TruncatingModel(_cards_reply(GOOD_CARD))
+    steps = []
+    out = GardenComponent(model=model, on_step=steps.append).capture(
+        CaptureRequest(window="用户：我不吃辣", locale="zh-Hans"))
+
+    assert model.calls == 2
+    assert model.prompts[1] != model.prompts[0], "第二问该换一版更简短的提示词"
+    assert out.mutations and out.error is None
+    assert any(s.detail.get("why") == "output_truncated" for s in steps)
+
+
+def test_a_plain_string_reply_still_works() -> None:
+    """宿主不关心截断时，返回纯字符串即可 —— 不必为了报一个 bool 改整套调用链。"""
+    out = GardenComponent(model=FakeModel(_cards_reply(GOOD_CARD))).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    assert out.mutations and out.error is None

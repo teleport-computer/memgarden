@@ -55,6 +55,7 @@ from .prompts.capture import (
     parse_capture_cards,
 )
 from .prompts.dream import build_dream_prompt, parse_dream_consolidations
+from .text.card_text import build_truncation_retry_prompt
 from .selection import Chain
 from .text.card_text import is_retryable_parse_error
 from .text.leak_signals import GENERIC_SIGNALS, LeakSignals
@@ -81,6 +82,20 @@ class GardenCapabilities:
         from dataclasses import asdict
 
         return asdict(self)
+
+
+def _is_truncated(reply) -> bool:
+    """模型回复带不带「被截断」的标记。
+
+    内核**自己判断不了**截断 —— 那要看 provider 的 finish_reason，只有宿主有。
+    所以约定一个可选的信封：模型端口可以返回一个带 ``truncated`` 的对象
+    （或 dict），内核认这个标记；返回纯字符串就当没截断。
+
+    这样宿主不必为了报一个 bool 而改整套调用链。
+    """
+    if isinstance(reply, dict):
+        return bool(reply.get("truncated"))
+    return bool(getattr(reply, "truncated", False))
 
 
 class _CapturePlan:
@@ -141,16 +156,39 @@ class _CapturePlan:
             return build_capture_semantic_retry_prompt(
                 self.prompt, capture_semantic_retry_reasons(self.cards)
             )
+        if self._stage == "truncation_retry":
+            # 换一版**更简短**的提示词 —— 原样重问多半还是会被截在同一个位置。
+            return build_truncation_retry_prompt(self.prompt)
         return None
 
-    def feed(self, raw: str) -> None:
-        """把模型这次的回复喂回来，并决定下一步。"""
+    def feed(self, raw: str, *, truncated: bool = False) -> None:
+        """把模型这次的回复喂回来，并决定下一步。
+
+        ``truncated`` 由**宿主**判断 —— 回复有没有被 provider 截断，只有拿到
+        原始响应元数据（finish_reason / usage）的那一层看得见，内核看不到。
+        这是刻意的分工：**宿主判断，内核决定怎么办**（换一版更简短的提示词重问）。
+
+        判错的代价不对称：漏判会把半截 JSON 当成解析失败、整个窗口的落卡清零；
+        误判只是多花一次调用。所以宿主宁可宽一点。
+        """
         self.calls += 1
+        if truncated and self._stage != "truncation_retry" and self.retried < self.owner._max_retries:
+            self.owner._step(Step(
+                kind="retrying", purpose="capture", attempt=self.calls,
+                detail={"why": "output_truncated", "kind": "truncation"},
+            ))
+            self._stage = "truncation_retry"
+            self.retried += 1
+            return
         self.owner._step(Step(
             kind="model_called", purpose="capture", attempt=self.calls,
-            detail={"reply_chars": len(raw or ""), "stage": self._stage},
-            reply=raw,
+            detail={"reply_chars": len(str(raw or "")), "stage": self._stage,
+                    "truncated": truncated},
+            reply=raw if isinstance(raw, str) else None,
         ))
+        raw = raw if isinstance(raw, str) else (
+            raw.get("text", "") if isinstance(raw, dict) else str(getattr(raw, "text", raw))
+        )
         strict = self._stage == "first"
         cards, err = parse_capture_cards(
             raw, strict=strict, policy=self.request.policy, signals=self.owner._signals
@@ -274,7 +312,8 @@ class GardenComponent:
             ask = plan.next_prompt()
             if ask is None:
                 return plan.finish()
-            plan.feed(self._model.complete(ask, purpose="capture"))
+            reply = self._model.complete(ask, purpose="capture")
+            plan.feed(reply, truncated=_is_truncated(reply))
 
     async def acapture(self, request: CaptureRequest) -> CaptureResult:
         """:meth:`capture` 的异步版 —— 逐步等价，**判断逻辑是同一份**。
@@ -292,7 +331,8 @@ class GardenComponent:
             ask = plan.next_prompt()
             if ask is None:
                 return plan.finish()
-            plan.feed(await self._model.complete(ask, purpose="capture"))
+            reply = await self._model.complete(ask, purpose="capture")
+            plan.feed(reply, truncated=_is_truncated(reply))
 
     # -- 想起来 ---------------------------------------------------------- #
 
