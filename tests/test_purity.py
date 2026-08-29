@@ -359,3 +359,67 @@ def test_the_readme_install_command_matches_how_we_actually_publish():
             "只写了 memgarden —— 但它依赖同源的 agent-protocol-core，"
             "只装一个会以 ResolutionImpossible 失败"
         )
+
+
+def test_the_demo_agent_only_touches_the_top_level():
+    """demo agent 是「陌生 Runtime 接得上」的活证明 —— 它一旦开始深挖内部模块，
+    这个证明就作废了，而且抄它的人会照做。
+
+    例外和「十分钟接入」那条一样：``memgarden.selection`` 的挑卡段是公开插口。
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "examples" / "demo-agent"
+    allowed = {"memgarden", "memgarden.selection"}
+    offenders = []
+    for f in sorted(root.glob("*.py")):
+        for node in ast.walk(ast.parse(f.read_text("utf-8"))):
+            if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("memgarden"):
+                if node.module not in allowed:
+                    offenders.append(f"{f.name}: {node.module}")
+            elif isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name.startswith("memgarden") and a.name not in allowed:
+                        offenders.append(f"{f.name}: {a.name}")
+    assert not offenders, f"demo agent 深挖了内部模块：{offenders}"
+
+
+def test_the_demo_agent_holds_the_api_key_not_the_kernel():
+    """key 必须在 demo 自己手里 —— 这正是「模型由宿主提供」的意思。
+
+    ⚠️ 查的是**代码**，不是文本。第一版按字符串扫，被三处误报打回：
+    ``OpenAI`` 出现在「专有名词桶名不该当语言证据」的举例里，
+    ``deepseek`` 出现在一次事故的说明里 —— 那些是文档，不是依赖。
+    按文本扫会逼着后来的人把有用的注释删掉来凑绿，那是反效果。
+    """
+    import ast
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parent.parent / "src" / "memgarden"
+    PROVIDER_SDKS = {"openai", "anthropic", "httpx", "requests", "urllib"}
+    KEYISH = ("api_key", "apikey", "_token", "secret")
+
+    offenders = []
+    for f in root.rglob("*.py"):
+        tree = ast.parse(f.read_text("utf-8"))
+        for node in ast.walk(tree):
+            # ① import 了某家 provider 的 SDK 或 HTTP 客户端
+            if isinstance(node, ast.Import):
+                for a in node.names:
+                    if a.name.split(".")[0] in PROVIDER_SDKS:
+                        offenders.append(f"{f.name}: import {a.name}")
+            elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                if (node.module or "").split(".")[0] in PROVIDER_SDKS:
+                    offenders.append(f"{f.name}: from {node.module}")
+            # ② 读了看起来像凭据的环境变量
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+                low = node.value.lower()
+                if low.startswith(("sk-", "sk_")) or (
+                    any(k in low for k in KEYISH) and node.value.isupper()
+                ):
+                    offenders.append(f"{f.name}: 常量 {node.value!r}")
+
+    assert not offenders, (
+        "内核碰了模型凭据或某家 provider 的 SDK：\n" + "\n".join(offenders)
+    )

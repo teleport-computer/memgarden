@@ -249,3 +249,60 @@ def test_trace_carries_no_user_content() -> None:
     blob = json.dumps(result.trace, ensure_ascii=False)
     for fragment in ("国贸", "朵朵", "他在"):
         assert fragment not in blob
+
+
+# --------------------------------------------------------------- 异步
+
+class AsyncFakeModel:
+    def __init__(self, *replies: str) -> None:
+        self.replies = list(replies) or ["{}"]
+        self.calls = 0
+
+    async def complete(self, prompt: str, *, purpose: str = "") -> str:
+        self.calls += 1
+        return self.replies[min(self.calls - 1, len(self.replies) - 1)]
+
+
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
+def test_async_capture_matches_sync_exactly() -> None:
+    """同步和异步必须产出同一个结果。
+
+    各写一份编排的话，改了一边忘了另一边，两条路会**悄悄**产出不同的卡 ——
+    而这种分岔只有在真模型上才看得见。所以它们共用同一个状态机，
+    这条测试守着它们没有分家。
+    """
+    reply = _cards_reply(GOOD_CARD)
+    sync = GardenComponent(model=FakeModel(reply)).capture(
+        CaptureRequest(window="用户：我不吃辣", locale="zh-Hans")
+    )
+    a = _run(GardenComponent(model=AsyncFakeModel(reply)).acapture(
+        CaptureRequest(window="用户：我不吃辣", locale="zh-Hans")
+    ))
+    assert a.mutations == sync.mutations
+    assert a.retried == sync.retried and a.error == sync.error
+
+
+def test_async_capture_retries_the_same_way() -> None:
+    bad = _cards_reply({"action": "add", "summary": "[摘要]", "content": "...",
+                        "bucket": "工作"})
+    good = _cards_reply(GOOD_CARD)
+    model = AsyncFakeModel(bad, good)
+    out = _run(GardenComponent(model=model).acapture(
+        CaptureRequest(window="x", locale="zh-Hans")
+    ))
+    assert model.calls == 2 and out.retried == 1 and len(out.mutations) == 1
+
+
+def test_async_capture_separates_empty_from_failed() -> None:
+    empty = _run(GardenComponent(model=AsyncFakeModel(_cards_reply())).acapture(
+        CaptureRequest(window="哈哈哈", locale="zh-Hans")))
+    assert empty.nothing_worth_keeping and empty.error is None
+
+    broken = _run(GardenComponent(model=AsyncFakeModel("这不是 JSON")).acapture(
+        CaptureRequest(window="重要的话", locale="zh-Hans")))
+    assert broken.error and not broken.nothing_worth_keeping

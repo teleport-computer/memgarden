@@ -82,6 +82,103 @@ class GardenCapabilities:
         return asdict(self)
 
 
+class _CapturePlan:
+    """落卡的状态机 —— **同步和异步共用这一份**。
+
+    为什么要抽出来：``capture`` 和 ``acapture`` 只有「怎么等模型回复」不同，
+    判断逻辑完全一样。各写一份的话，改了一边忘了另一边，同步和异步就会
+    悄悄产出不同的结果 —— 而这种分岔只有在真模型上才看得见。
+
+    用法：反复问 ``next_prompt()``，拿到 ``None`` 就 ``finish()``；
+    拿到提示词就调模型，把回复 ``feed()`` 回来。
+    """
+
+    def __init__(self, owner: "GardenComponent", request: CaptureRequest) -> None:
+        self.owner = owner
+        self.request = request
+        self.rejected: CaptureResult | None = None
+        self.prompt = ""
+        self.cards: list[dict] = []
+        self.err: str | None = None
+        self.retried = 0
+        self.calls = 0
+        self._stage = "first"
+
+        if not str(request.locale or "").strip():
+            # 不给默认值是刻意的：默认成某种语言，等于把一套分类法硬塞给使用者，
+            # 而他不会知道自己的库里为什么长出了中文桶。
+            self.rejected = CaptureResult(error="locale_required")
+            return
+
+        self.prompt = build_capture_prompt(
+            ai_name=request.ai_name,
+            user_name=request.user_name,
+            naming_rule=request.naming_rule,
+            buckets=request.buckets,
+            threads=request.threads,
+            identity=request.identity,
+            window=request.window,
+            cards=request.cards,
+            policy=request.policy,
+            locale=request.locale,
+        )
+
+    def next_prompt(self) -> str | None:
+        """下一次该问模型什么；``None`` = 问完了。"""
+        if self._stage == "first":
+            return self.prompt
+        if self._stage == "format_retry":
+            return build_capture_retry_prompt(self.prompt, self.err or "")
+        if self._stage == "semantic_retry":
+            return build_capture_semantic_retry_prompt(
+                self.prompt, capture_semantic_retry_reasons(self.cards)
+            )
+        return None
+
+    def feed(self, raw: str) -> None:
+        """把模型这次的回复喂回来，并决定下一步。"""
+        self.calls += 1
+        strict = self._stage == "first"
+        cards, err = parse_capture_cards(
+            raw, strict=strict, policy=self.request.policy, signals=self.owner._signals
+        )
+
+        if self._stage == "semantic_retry":
+            # 语义重问只在**确实修好了**的时候采用；没修好就保留上一版，
+            # 别把一次失败的重问变成倒退。
+            if not err and not capture_semantic_retry_reasons(cards):
+                self.cards = cards
+            self.retried += 1
+            self._stage = "done"
+            return
+
+        self.cards, self.err = cards, err
+        if self._stage == "format_retry":
+            self.retried += 1
+
+        if err:
+            if is_retryable_parse_error(err) and self.retried < self.owner._max_retries:
+                self._stage = "format_retry"
+            else:
+                self._stage = "done"
+            return
+
+        if capture_semantic_retry_reasons(cards) and self.retried < self.owner._max_retries:
+            self._stage = "semantic_retry"
+        else:
+            self._stage = "done"
+
+    def finish(self) -> CaptureResult:
+        trace = self.owner._trace(self.request, self.calls, cards=len(self.cards))
+        if self.err:
+            return CaptureResult(error=self.err, retried=self.retried, trace=trace)
+        return CaptureResult(
+            mutations=[self.owner._to_mutation(c, self.request) for c in self.cards],
+            retried=self.retried,
+            trace=trace,
+        )
+
+
 class GardenComponent:
     """完整的 Memory Garden 能力，注入式依赖。
 
@@ -125,64 +222,32 @@ class GardenComponent:
         **两种「没有产出」必须分得开**：真的没什么值得记（正常，游标该推进）
         和解析彻底失败（异常，游标不能动，否则这批对话永远不会再被看一眼）。
         """
-        if not str(request.locale or "").strip():
-            # 不给默认值是刻意的：默认成某种语言，等于把一套分类法硬塞给使用者，
-            # 而他不会知道自己的库里为什么长出了中文桶。
-            return CaptureResult(error="locale_required")
+        plan = _CapturePlan(self, request)
+        if plan.rejected is not None:
+            return plan.rejected
+        while True:
+            ask = plan.next_prompt()
+            if ask is None:
+                return plan.finish()
+            plan.feed(self._model.complete(ask, purpose="capture"))
 
-        prompt = build_capture_prompt(
-            ai_name=request.ai_name,
-            user_name=request.user_name,
-            naming_rule=request.naming_rule,
-            buckets=request.buckets,
-            threads=request.threads,
-            identity=request.identity,
-            window=request.window,
-            cards=request.cards,
-            policy=request.policy,
-            locale=request.locale,
-        )
-        calls = 0
-        raw = self._model.complete(prompt, purpose="capture")
-        calls += 1
-        cards, err = parse_capture_cards(raw, policy=request.policy, signals=self._signals)
+    async def acapture(self, request: CaptureRequest) -> CaptureResult:
+        """:meth:`capture` 的异步版 —— 逐步等价，**判断逻辑是同一份**。
 
-        retried = 0
-        while err and is_retryable_parse_error(err) and retried < self._max_retries:
-            raw = self._model.complete(
-                build_capture_retry_prompt(prompt, err), purpose="capture"
-            )
-            calls += 1
-            retried += 1
-            cards, err = parse_capture_cards(
-                raw, strict=False, policy=request.policy, signals=self._signals
-            )
+        存在的理由不是接口对称：真实 Runtime 的模型调用几乎都是 async，
+        一次 capture 要等几秒，同步阻塞会卡住整个事件循环。
+        只有同步版的话，异步宿主（比如 io 的托管 worker）根本接不上。
 
-        if err:
-            return CaptureResult(
-                error=err, retried=retried,
-                trace=self._trace(request, calls, cards=0),
-            )
-
-        # 语义重问：模型说要覆盖旧卡却没给 target_id 这类，本地就能证明是错的。
-        reasons = capture_semantic_retry_reasons(cards)
-        if reasons and retried < self._max_retries:
-            raw = self._model.complete(
-                build_capture_semantic_retry_prompt(prompt, reasons), purpose="capture"
-            )
-            calls += 1
-            retried += 1
-            retried_cards, retry_err = parse_capture_cards(
-                raw, strict=False, policy=request.policy, signals=self._signals
-            )
-            if not retry_err and not capture_semantic_retry_reasons(retried_cards):
-                cards = retried_cards
-
-        return CaptureResult(
-            mutations=[self._to_mutation(c, request) for c in cards],
-            retried=retried,
-            trace=self._trace(request, calls, cards=len(cards)),
-        )
+        要求注入的 ``model`` 有 ``async def complete``。
+        """
+        plan = _CapturePlan(self, request)
+        if plan.rejected is not None:
+            return plan.rejected
+        while True:
+            ask = plan.next_prompt()
+            if ask is None:
+                return plan.finish()
+            plan.feed(await self._model.complete(ask, purpose="capture"))
 
     # -- 想起来 ---------------------------------------------------------- #
 

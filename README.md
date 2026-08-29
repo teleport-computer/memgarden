@@ -37,6 +37,19 @@ memgarden manifest                                     # 这东西会做什么
 memgarden capture --window-file chat.txt --locale zh-Hans --model-cmd "llm -m gpt-4o"
 ```
 
+完整的例子在 `examples/`：
+
+```
+examples/quickstart.py             最小可运行
+examples/mount_in_ten_minutes.py   四个方法各调一次，带注释
+examples/demo-agent/               ⭐ 一个真能聊天的命令行 agent，200 行
+                                      跟任何宿主无关，自带模型和存储
+```
+
+```bash
+cd examples/demo-agent && python agent.py --fake     # 不用 key
+```
+
 ---
 
 ## 一、它跟 mem0 / Zep / Letta 不是一回事

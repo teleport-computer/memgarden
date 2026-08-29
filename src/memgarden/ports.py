@@ -38,6 +38,22 @@ class ModelPort(Protocol):
 
 
 @runtime_checkable
+class AsyncModelPort(Protocol):
+    """异步版的 :class:`ModelPort`。
+
+    **不是可有可无的对称设计** —— 真实 Runtime 的模型调用几乎都是 async：
+    一次 capture 要等几秒，同步阻塞会卡住整个事件循环。宿主 io 的托管 worker
+    就是全程 async 的，只提供同步接口等于它接不上。
+
+    实现二选一即可：``GardenComponent`` 用同步方法，``AsyncGardenComponent``
+    用异步方法，两者共用同一套判断逻辑。
+    """
+
+    async def complete(self, prompt: str, *, purpose: str = "") -> str:
+        ...
+
+
+@runtime_checkable
 class ClockPort(Protocol):
     """「现在几点」。
 
@@ -60,4 +76,4 @@ class SystemClock:
         return datetime.now(timezone.utc).isoformat()
 
 
-__all__ = ["ModelPort", "ClockPort", "SystemClock"]
+__all__ = ["ModelPort", "AsyncModelPort", "ClockPort", "SystemClock"]
