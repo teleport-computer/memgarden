@@ -9,7 +9,32 @@
 整个包是纯函数，零第三方依赖。
 
 ```bash
-pip install memgarden
+# 还没发到 PyPI。从 Release 装（两个包一起 —— memgarden 依赖同源的 core）：
+pip install \
+  https://github.com/teleport-computer/memgarden/releases/latest/download/memgarden-0.2.0-py3-none-any.whl \
+  https://github.com/teleport-computer/memgarden/releases/latest/download/agent_protocol_core-0.2.0-py3-none-any.whl
+```
+
+> 每个 Release 的 wheel 都由 GitHub Actions 从公开 tag 构建，
+> 带 build provenance，可以自己验：
+> `gh attestation verify <wheel> --repo teleport-computer/memgarden`
+
+```python
+from memgarden import GardenComponent, CaptureRequest
+
+garden = GardenComponent(model=my_model)              # 模型你提供，key 不给它
+result = garden.capture(CaptureRequest(
+    window="用户：我不吃辣，一吃就胃疼",
+    locale="zh-Hans",
+))
+my_store.apply(result.mutations)                       # 落库是你的事
+```
+
+装完也能直接敲命令：
+
+```bash
+memgarden manifest                                     # 这东西会做什么
+memgarden capture --window-file chat.txt --locale zh-Hans --model-cmd "llm -m gpt-4o"
 ```
 
 ---
@@ -141,12 +166,13 @@ result = policy.select(cards, query="我的狗是什么品种", limit=8)
 >           —— 判断逻辑全程还是这个库的：卡还是按它的规矩写、
 >              桶还是它的桶、挑卡还是它的算法
 >
-> 换不掉    整套记忆系统。这个库**还没有**顶层组件接口，
->           宿主要接的话仍需直接调用内部模块
+> 换不掉    整套记忆系统。换掉整个 Garden 属于 Runtime 侧插件接口的事，
+>           不在这个库的第一阶段目标里
 > ```
 >
 > 换句话说：**这里证明的是「Garden 可以换数据库」，不是「宿主可以换记忆组件」。**
-> 后者是设计目标，见 §六。
+> 第一阶段的目标是前者 + 让 Garden 能快速插进任意 Runtime（见 §二的
+> `GardenComponent`），不是成为兼容所有第三方记忆系统的通用框架。
 
 ### 插口 1：存储
 
@@ -268,10 +294,10 @@ class MyPolicy:
 原因是具体的，不是谦虚：
 
 ```
-1  这个包**没有顶层组件接口**
-   __init__.py 至今零导出，宿主要用只能直接 import 内部模块
-   （prompts.capture / scoring / selection / …）
-   → 换一套记忆系统时，宿主的这些调用点全部作废
+1  ~~这个包没有顶层组件接口~~ —— 2026-08-29 已补上 ``GardenComponent``
+   （capture / build_context / tools / invoke_tool / run_maintenance），
+   顶层导出 16 个名字，配 CLI 和 MCP 外壳。
+   宿主 io 的调用点收口仍在进行中
 
 2  从来没有第二个真实实现接进来验证过
    两个参考存储（InMemory / SQLite）是同一个判断内核的两种保存方式，

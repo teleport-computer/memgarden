@@ -111,6 +111,65 @@ FULL_CAPABILITIES = Capabilities(
 CORRECTNESS_CRITICAL = frozenset({"supports_supersede", "supports_atomic_batch"})
 
 
+# --------------------------------------------------------------------------- #
+# 契约分层：必需 vs 可选
+# --------------------------------------------------------------------------- #
+#
+# ## 为什么要分
+#
+# 契约测试如果把「按元数据排序」这类动作也算成必需，那么**加密存储永远过不了**——
+# 卡片在客户端加密，服务端只看得见密文，`importance` 这个字段它根本读不出来，
+# 排序发生在解密之后的另一层。
+#
+# 硬跑的结果是：50 个用例 30 个跳过 20 个通过，报告是绿的，**但什么也没证明**。
+#
+# 所以拆开：
+#
+#     必需   任何存储都做得到。做不到就不是一个合格的 Garden 存储，直接拒绝
+#     可选   做不到很正常。**显式声明不支持**，由 Garden 在可证明正确时降级
+#
+# 关键区别在于「声明不支持」和「静默跳过」：前者是一条可读的信息
+# （宿主知道这个后端不能排序，会把候选拉回本地排），后者是一个洞。
+
+#: 必需能力 —— 缺任何一项，这个后端就不该被当作 Garden 存储。
+REQUIRED_CONTRACT = (
+    "stable_identity",   # id 稳定，且不会因为删除而回退撞号
+    "write",             # 能写
+    "read",              # 能读
+    "get_by_id",         # 能按 id 精确取
+    "idempotency",       # 同一个幂等键重放不写第二遍；同键不同内容要报冲突
+    "revision_conflict", # 版本不匹配要拒绝，而不是闷头覆盖
+    "atomic_batch",      # 一批改动要么全成要么全不成
+)
+
+#: 可选能力 —— 做不到就声明，Garden 会降级。
+OPTIONAL_CONTRACT = (
+    "metadata_sort",     # 按重要度/时间排序分页。加密存储做不到 → 拉回本地排
+    "metadata_filter",   # 按字段过滤
+    "full_text_search",  # 全文检索
+    "vector_search",     # 向量检索
+    "custom_fields",     # 原样保留 bucket / threads
+    "hard_delete",       # 真删（用户主动删除、合规删除）
+)
+
+
+def contract_report(caps: "Capabilities", *, optional: tuple[str, ...] = ()) -> dict:
+    """一个后端满足契约到什么程度。
+
+    返回内容无关的结构，供接入方在文档/CI 里展示。
+    **不支持的可选能力是「声明」不是「失败」** —— 报告里分开列。
+    """
+    supported_optional = set(optional)
+    return {
+        "required": {
+            name: bool(getattr(caps, f"supports_{name}", True))
+            if hasattr(caps, f"supports_{name}") else True
+            for name in REQUIRED_CONTRACT
+        },
+        "optional": {name: name in supported_optional for name in OPTIONAL_CONTRACT},
+    }
+
+
 @dataclass(frozen=True)
 class Degradation:
     """一条能力退化：少了什么、退化成什么、代价是什么。

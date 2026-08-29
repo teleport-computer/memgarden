@@ -39,6 +39,29 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.EVAL_DEEPSEEK_API_KEY }}
         run: uv run --extra dev python evals/capture.py --provider deepseek --model deepseek-chat
+      - name: 装完之后 CLI 真的能敲
+        # [project.scripts] 写错、入口 import 不到，只有真装一次才发现 ——
+        # 而「装完能不能用」正是别人愿不愿意继续读下去的门槛。
+        run: |
+          # 旧版本 wheel 留在 dist 里会让 pip 解析打架
+          rm -rf dist packages/agent-protocol-core/dist
+          # **两个包都要构建** —— 根目录的 uv build 只出主包，
+          # 而 memgarden 依赖同源的 agent-protocol-core。漏掉它就装不上。
+          uv build
+          (cd packages/agent-protocol-core && uv build)
+          mkdir -p /tmp/wheels
+          cp dist/*.whl /tmp/wheels/
+          cp packages/agent-protocol-core/dist/*.whl /tmp/wheels/
+          python -m venv /tmp/cli-check
+          # --no-index 是必须的：agent-protocol-core 没发到 PyPI，
+          # 不加的话 pip 会去索引上找它、找不到就整个装失败。
+          /tmp/cli-check/bin/pip install --no-index --find-links /tmp/wheels memgarden
+          # ① 命令能敲（[project.scripts] 写错只有真装一次才发现）
+          /tmp/cli-check/bin/memgarden manifest > /dev/null
+          # ② 能当库用，且**只 import 顶层** —— 这是对外承诺的接入方式
+          /tmp/cli-check/bin/python -c "from memgarden import GardenComponent, CaptureRequest"
+          echo "CLI + SDK OK"
+
       - name: wheel 能构建，且带许可证
         run: |
           uv build

@@ -19,6 +19,10 @@ dependencies = ["agent-protocol-core>=0.1.0"]
 sqlite = []          # 只用标准库 sqlite3，列在这里是为了让意图显式
 dev = ["pytest>=8.0"]
 
+[project.scripts]
+# 装完包就能敲命令 —— 这是「别人愿不愿意继续读下去」的最低门槛。
+memgarden = "memgarden.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/memgarden"]
 

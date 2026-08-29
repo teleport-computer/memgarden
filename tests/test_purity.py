@@ -81,12 +81,25 @@ def test_no_host_or_io_imports(kind):
     assert not offenders, "内核 import 了不该 import 的东西：\n" + "\n".join(offenders)
 
 
+#: 外壳包 —— **做 I/O 正是它们的职责**，所以不受判断层的无 I/O 约束。
+#: 但它们受另一条更严的约束：不许自己实现判断（见 test_cli / test_mcp 里的守卫）。
+SHELL_EXEMPT = ("cli/", "mcp/")
+
+
 def test_judgment_modules_do_no_io():
-    """判断部分不许碰网络/数据库/进程/线程。stores/ 是可选的参考实现，豁免。"""
+    """判断部分不许碰网络/数据库/进程/线程。
+
+    两类豁免，理由不同：
+      ``stores/``     可选的参考实现，本来就是存储
+      ``cli/`` ``mcp/`` 外壳，读文件、起子进程正是它们存在的意义
+
+    豁免的不是「随便干什么」—— 外壳受另一条更严的约束：
+    **不许自己实现判断**，只许调 GardenComponent（test_cli / test_mcp 守着）。
+    """
     offenders = []
     for f in _modules(SRC):
         rel = str(f.relative_to(SRC))
-        if any(rel.startswith(x) for x in STORE_EXEMPT):
+        if any(rel.startswith(x) for x in STORE_EXEMPT + SHELL_EXEMPT):
             continue
         hit = _top_level_imports(f.read_text(encoding="utf-8")) & FORBIDDEN
         if hit:
@@ -319,3 +332,30 @@ def test_the_top_level_actually_exports_something():
 
     assert getattr(memgarden, "__all__", None), "顶层没有导出任何东西"
     assert "GardenComponent" in memgarden.__all__
+
+
+def test_the_readme_install_command_matches_how_we_actually_publish():
+    """README 教的装法必须真的能用。
+
+    这条是拿实际问题换来的：README 一直写着 ``pip install memgarden``，
+    而这个包**从来没发到 PyPI**（连它依赖的 agent-protocol-core 也没有）。
+    照着做的人第一步就失败 —— 而这恰好是别人对这个项目的第一印象。
+
+    发到 PyPI 之后，把这条测试改成断言 ``pip install memgarden`` 就行。
+    """
+    import pathlib
+    import re
+
+    readme = (pathlib.Path(__file__).resolve().parent.parent / "README.md").read_text("utf-8")
+    install_block = re.search(r"```bash\n(.*?)```", readme, re.S)
+    assert install_block, "README 里没有安装说明"
+    body = install_block.group(1)
+
+    assert "pip install" in body
+    # 没发 PyPI 之前，装法必须指向 Release 的 wheel，而且**两个包都要提**
+    if "pypi" not in body.lower():
+        assert "releases" in body, "README 教的装法既不是 PyPI 也不是 Release wheel"
+        assert "agent_protocol_core" in body, (
+            "只写了 memgarden —— 但它依赖同源的 agent-protocol-core，"
+            "只装一个会以 ResolutionImpossible 失败"
+        )
