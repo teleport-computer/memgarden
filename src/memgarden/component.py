@@ -217,12 +217,26 @@ class _CapturePlan:
         )
 
         if self._stage == "semantic_retry":
-            # 语义重问只在**确实修好了**的时候采用；没修好就保留上一版，
-            # 别把一次失败的重问变成倒退。
-            if not err and not capture_semantic_retry_reasons(cards):
-                self.cards = cards
+            # 语义重问失败要**报失败**，不能退回上一版。
+            #
+            # 上一版正是「要覆盖旧卡但没说覆盖哪张」那种卡 —— 保留它等于
+            # 把一条执行不了的指令写出去：宿主会拿着空的 target_id 去 supersede，
+            # 结果要么静默无效、要么覆盖错东西。
+            #
+            # 这条是照宿主 io 的托管路径对齐的（它返回
+            # ``semantic_validation_failed_after_retry`）。组件原本的写法更宽松，
+            # 逐条比对两条路时发现的 —— 宽松在这儿是错的，
+            # 因为「写出一条执行不了的指令」比「这轮没落卡」严重得多。
             self.retried += 1
             self._stage = "done"
+            if err:
+                self.err = str(err)
+                return
+            if capture_semantic_retry_reasons(cards):
+                self.err = "semantic_validation_failed_after_retry"
+                self.cards = []
+                return
+            self.cards, self.err = cards, None
             return
 
         self.cards, self.err = cards, err

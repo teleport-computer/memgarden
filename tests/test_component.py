@@ -577,3 +577,39 @@ def test_a_session_with_a_bad_request_ends_immediately() -> None:
         CaptureRequest(window="x"))          # 没给 locale
     assert session.next_prompt() is None
     assert session.result().error == "locale_required"
+
+
+def test_a_supersede_that_still_has_no_target_after_the_retry_fails() -> None:
+    """重问之后还是没给 target_id 的话，**必须报失败**，不能退回上一版。
+
+    上一版正是那张「要覆盖旧卡但没说覆盖哪张」的卡。保留它等于把一条
+    执行不了的指令写出去：宿主拿着空的 target_id 去 supersede，
+    要么静默无效、要么覆盖错东西。
+
+    「这轮没落卡」远比「写出一条执行不了的指令」轻。
+    """
+    bad = _cards_reply({"action": "supersede", "target_id": "",
+                        "summary": "他改吃辣了",
+                        "content": "最近开始能吃一点辣了，上周还去吃了火锅。",
+                        "bucket": "偏好与边界"})
+    out = GardenComponent(model=FakeModel(bad, bad)).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    assert out.error == "semantic_validation_failed_after_retry"
+    assert not out.mutations
+    assert not out.nothing_worth_keeping
+
+
+def test_a_supersede_fixed_on_the_retry_is_accepted() -> None:
+    """修好了就照收 —— 别把重问机制变成「重问过就一律失败」。"""
+    bad = _cards_reply({"action": "supersede", "target_id": "",
+                        "summary": "他改吃辣了",
+                        "content": "最近开始能吃一点辣了，上周还去吃了火锅。",
+                        "bucket": "偏好与边界"})
+    good = _cards_reply({"action": "supersede", "target_id": "m_7",
+                         "summary": "他改吃辣了",
+                         "content": "最近开始能吃一点辣了，上周还去吃了火锅。",
+                         "bucket": "偏好与边界"})
+    out = GardenComponent(model=FakeModel(bad, good)).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    assert out.error is None
+    assert out.mutations[0]["target_id"] == "m_7"
