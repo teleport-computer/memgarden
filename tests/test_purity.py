@@ -277,3 +277,45 @@ def test_no_host_specific_env_var_names_in_the_kernel():
         "内核里读了宿主专属的环境变量，应该走 config.py 的 MEMGARDEN_* 命名空间："
         + ", ".join(offenders)
     )
+
+
+# --------------------------------------------------------------------------- #
+# 接入面：陌生 Runtime 不该需要认识内部模块
+# --------------------------------------------------------------------------- #
+
+def test_the_ten_minute_example_never_reaches_into_internals():
+    """「十分钟接入」的示例只许 import 顶层。
+
+    它是这个包**对外承诺的样子**：接入方要认识的东西越少，
+    Garden 内部越能自由改。示例一旦开始深挖 ``prompts.capture``，
+    抄它的人就会照做 —— 而那正是宿主 io 现在的处境
+    （23 个文件、15 个子模块、约 30 个符号直接依赖内部路径）。
+
+    例外：``memgarden.selection`` 的挑卡段是**公开插口**，
+    换挑卡策略本来就要用它们。
+    """
+    import ast
+    import pathlib
+
+    example = pathlib.Path(__file__).resolve().parent.parent / "examples" / "mount_in_ten_minutes.py"
+    tree = ast.parse(example.read_text("utf-8"))
+
+    ALLOWED_SUBMODULES = {"memgarden.selection"}
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("memgarden"):
+            if node.module != "memgarden" and node.module not in ALLOWED_SUBMODULES:
+                offenders.append(node.module)
+    assert not offenders, (
+        f"示例深挖了内部模块 {offenders} —— 抄它的人会照做。"
+        f"该用的是 from memgarden import GardenComponent, ..."
+    )
+
+
+def test_the_top_level_actually_exports_something():
+    """v0.1.0 到 v0.2.0 四个版本，``__init__.py`` 的导出一直是空的 ——
+    宿主想用只能直接 import 内部模块。这条守住它不再退回去。"""
+    import memgarden
+
+    assert getattr(memgarden, "__all__", None), "顶层没有导出任何东西"
+    assert "GardenComponent" in memgarden.__all__

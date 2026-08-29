@@ -17,4 +17,52 @@
 （宿主侧应当有一条守卫测试盯着这件事 —— io 用的是 AST 扫描）。
 
 边界与四个插口见 ``README.md``。
+
+## 从这里开始
+
+    from memgarden import GardenComponent, CaptureRequest
+
+    garden = GardenComponent(model=my_model)          # 模型由你提供，key 不给它
+    result = garden.capture(CaptureRequest(window=对话, locale="zh-Hans"))
+    my_store.apply(result.mutations)                   # 落库是你的事
+
+``GardenComponent`` 之下的模块（``prompts`` / ``scoring`` / ``selection`` /
+``dreaming`` / ``text``）是**内部零件**。它们仍然公开、可以直接用（高级用法、
+单元测试、想自己重新编排），但**普通接入不需要认识它们** —— 认识了就等于
+把编排知识抄进了你的代码，Garden 内部一改你就得跟着改。
 """
+
+from .component import GardenCapabilities, GardenComponent
+from .contracts import (
+    SCHEMA_VERSION,
+    Actor,
+    CaptureRequest,
+    CaptureResult,
+    ContextRequest,
+    ContextResult,
+    MaintenanceRequest,
+    MaintenanceResult,
+    ToolCall,
+    ToolDefinition,
+    ToolResult,
+)
+from .ports import ClockPort, ModelPort, SystemClock
+
+__all__ = [
+    "GardenComponent",
+    "GardenCapabilities",
+    "ModelPort",
+    "ClockPort",
+    "SystemClock",
+    "Actor",
+    "CaptureRequest",
+    "CaptureResult",
+    "ContextRequest",
+    "ContextResult",
+    "MaintenanceRequest",
+    "MaintenanceResult",
+    "ToolCall",
+    "ToolDefinition",
+    "ToolResult",
+    "SCHEMA_VERSION",
+]
