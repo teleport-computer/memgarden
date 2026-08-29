@@ -506,9 +506,20 @@ def select_context_memories_with_trace(
         return out[:cap], trace
 
     # Bucket 1 — turning points by occurred_at desc, max 3
+    # ⚠️ 每个排序键最后都要带 id 作**最终 tie-break**。
+    #
+    # 时间字段可能缺失、可能相同 —— 缺失时所有卡的排序键完全相等，
+    # Python 的稳定排序就退化成「保留输入顺序」，也就是**选中哪张取决于
+    # 宿主碰巧怎么排候选列表**。宿主改一下 SQL 的 ORDER BY、加个缓存，
+    # 召回结果就变，而且不报错、不可复现。
+    #
+    # 实测（evals 语料）：17 张卡全都没有 created_at，「最近」那段因此完全由
+    # 输入顺序决定 —— 候选列表反过来，选中的卡整批换掉。
+    #
+    # id 降序只是要一个**稳定**的顺序，不表示 id 大的更重要。
     turning = sorted(
         [m for m in moments if ROLE_TURNING_POINT in (m.get("roles") or [])],
-        key=lambda m: memory_timestamps.sort_key(m.get("occurred_at")),
+        key=lambda m: (memory_timestamps.sort_key(m.get("occurred_at")), str(m.get("id") or "")),
         reverse=True,
     )[:3]
     for m in turning:
@@ -518,7 +529,7 @@ def select_context_memories_with_trace(
     recent_pool = [m for m in moments if m.get("id") not in chosen_ids]
     recent = sorted(
         recent_pool,
-        key=lambda m: memory_timestamps.sort_key(m.get("created_at")),
+        key=lambda m: (memory_timestamps.sort_key(m.get("created_at")), str(m.get("id") or "")),
         reverse=True,
     )[:2]
     for m in recent:
@@ -533,9 +544,22 @@ def select_context_memories_with_trace(
             rel = _memory_relevance(latest_user_text, m)
             score = float(rel.get("score") or 0.0)
             if score > 0:
-                scored.append((score, m, rel))
-        scored.sort(key=lambda x: -x[0])
-        for _, m, rel in scored[:3]:
+                scored.append((score, memory_timestamps.sort_key(m.get("occurred_at")),
+                               str(m.get("id") or ""), m, rel))
+        # 分数并列时按 occurred_at 新的优先。
+        #
+        # ⚠️ **必须显式 tie-break。** 这里原本只按分数排（``key=lambda x: -x[0]``），
+        # 并列时靠 Python 稳定排序保留**输入顺序** —— 也就是说选中哪张
+        # 取决于宿主碰巧怎么排候选列表。同一个查询、同一批卡，换个读取顺序
+        # 结果就变，而且不报错。
+        #
+        # 实测（evals 语料，查询「深夜想换工作那次」）：两张都是 0.06 的弱相关卡
+        # 「不吃辣」和「换了个手机壳」并列，选中谁纯看谁在列表里靠前。
+        #
+        # 这也是 selection.RelevanceStage 与这条路产出不一致的**唯一**原因 ——
+        # 那边一直是显式 tie-break，这边不是。两处必须用同一条规则。
+        scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+        for _, __, ___, m, rel in scored[:3]:
             choose(m, rel, bucket="query")
 
     trace = {

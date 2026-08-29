@@ -31,6 +31,18 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
 
+def _ts_key(value):
+    """时间排序键 —— 和 ``scoring/relevance`` 用同一个归一化实现。
+
+    直接比裸字符串会在两处产生分歧：``sort_key`` 会把缺失和格式不一的时间
+    归一到可比较的形状，裸字符串不会。两条挑卡路必须用同一把尺子，
+    否则「换成 GardenComponent 之后召回变了」这种事只有用户能发现。
+    """
+    from . import timestamps
+
+    return timestamps.sort_key(value)
+
+
 @dataclass(frozen=True)
 class Pick:
     """选中一张卡的结果。**只带 id 和证据，不带卡本身。**"""
@@ -143,7 +155,11 @@ class RoleStage:
 
     def pick(self, remaining, query, *, budget) -> list[Pick]:
         matched = [c for c in remaining if self.role in (c.get("roles") or [])]
-        matched.sort(key=lambda c: str(c.get(self.order_by) or ""), reverse=True)
+        # 和 scoring/relevance 那条路用**同一条排序规则**：时间归一化 + id 兜底。
+        # 裸字符串比较对不上 sort_key 的归一（缺失/格式不一时结果不同），
+        # 而缺 id 兜底时并列会退化成「保留输入顺序」—— 两者都会让两条挑卡路分家。
+        matched.sort(key=lambda c: (_ts_key(c.get(self.order_by)), str(c.get("id") or "")),
+                     reverse=True)
         take = min(self.limit, budget)
         return [Pick(card_id=str(c.get("id")), stage=self.role, reason="role_match")
                 for c in matched[:take]]
@@ -157,7 +173,11 @@ class RecentStage:
     order_by: str = "created_at"
 
     def pick(self, remaining, query, *, budget) -> list[Pick]:
-        ordered = sorted(remaining, key=lambda c: str(c.get(self.order_by) or ""), reverse=True)
+        ordered = sorted(
+            remaining,
+            key=lambda c: (_ts_key(c.get(self.order_by)), str(c.get("id") or "")),
+            reverse=True,
+        )
         take = min(self.limit, budget)
         return [Pick(card_id=str(c.get("id")), stage="recent", reason="recency")
                 for c in ordered[:take]]
@@ -207,11 +227,14 @@ class RelevanceStage:
                 pass
             else:
                 continue
-            scored.append((score, str(card.get("occurred_at") or ""), card, rel))
-        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            # 最后一项是 id —— 时间缺失或相同时保证顺序确定，
+            # 否则结果取决于宿主碰巧怎么排候选列表（见 relevance.py 里的长注释）。
+            scored.append((score, _ts_key(card.get("occurred_at")),
+                           str(card.get("id") or ""), card, rel))
+        scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
         take = min(self.limit, budget)
         return [
             Pick(card_id=str(c.get("id")), stage="relevance", score=s,
                  reason=str(rel.get("reason") or ""), confidence=str(rel.get("confidence") or ""))
-            for s, _, c, rel in scored[:take]
+            for s, _, __, c, rel in scored[:take]
         ]
