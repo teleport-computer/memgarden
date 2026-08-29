@@ -61,7 +61,11 @@ from .prompts.capture import (
     capture_semantic_retry_reasons,
     parse_capture_cards,
 )
-from .prompts.dream import build_dream_prompt, parse_dream_consolidations
+from .prompts.dream import (
+    build_dream_prompt,
+    build_dream_retry_prompt,
+    parse_dream_consolidations,
+)
 from .text.card_text import build_truncation_retry_prompt
 from .selection import Chain
 from .text.card_text import is_retryable_parse_error
@@ -285,6 +289,141 @@ class _CapturePlan:
         )
 
 
+class _MaintenancePlan:
+    """整理的状态机 —— 和落卡同构：反复问「下一步问什么」，喂回复，取结果。
+
+    比落卡简单：整理只有格式重问一档（没有语义闸），但**截断这一档必须有** ——
+    整理的提示词把整个花园的卡都塞进去了，是所有 lane 里最容易被截的。
+    """
+
+    def __init__(self, owner: "GardenComponent", request: MaintenanceRequest) -> None:
+        self.owner = owner
+        self.request = request
+        self.rejected: MaintenanceResult | None = None
+        self.prompt = ""
+        self.consolidations: list[dict] = []
+        self.err: str | None = None
+        self.retried = 0
+        self.calls = 0
+        self._stage = "first"
+
+        snapshot = dream_snapshot(
+            available_cards=request.cards,
+            all_cards=request.all_cards or request.cards,
+        )
+        self.snapshot = snapshot
+        verdict = needs_dream(
+            snapshot,
+            DreamLedger(last_seed_card_count=request.last_seed_card_count,
+                        last_signature=request.last_signature),
+            min_new_cards=owner._min_new_cards,
+        )
+        self.verdict = verdict
+        if not verdict.needed or request.dry_run:
+            self.rejected = MaintenanceResult(
+                needed=verdict.needed,
+                trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
+                       "signature": snapshot.signature,
+                       "seed_card_count": snapshot.seed_card_count},
+            )
+            return
+
+        rendered = "\n".join(
+            f"- [{c.get('id')}] {c.get('summary','')}" for c in request.cards
+        )
+        self.prompt = build_dream_prompt(
+            ai_name=request.ai_name, user_name=request.user_name,
+            cards=rendered, recent_conversations=request.recent_conversations,
+            locale=request.locale,
+        )
+
+    def next_prompt(self) -> str | None:
+        if self._stage == "first":
+            self.owner._step(Step(
+                kind="prompt_built", purpose="dream", attempt=0,
+                detail={"prompt_chars": len(self.prompt),
+                        "cards": len(self.request.cards)},
+                prompt=self.prompt,
+            ))
+            return self.prompt
+        if self._stage == "format_retry":
+            return build_dream_retry_prompt(self.prompt, self.err or "")
+        if self._stage == "truncation_retry":
+            return build_truncation_retry_prompt(self.prompt)
+        return None
+
+    def feed(self, raw, *, truncated: bool = False) -> None:
+        self.calls += 1
+        text = raw if isinstance(raw, str) else str(raw)
+        self.owner._step(Step(
+            kind="model_called", purpose="dream", attempt=self.calls,
+            detail={"reply_chars": len(text), "stage": self._stage,
+                    "truncated": truncated},
+            reply=text,
+        ))
+        if truncated and self._stage != "truncation_retry" and self.retried < self.owner._max_retries:
+            self._stage = "truncation_retry"
+            self.retried += 1
+            self.owner._step(Step(kind="retrying", purpose="dream",
+                                  attempt=self.calls,
+                                  detail={"why": "output_truncated",
+                                          "kind": "truncation"}))
+            return
+
+        strict = self._stage == "first"
+        cons, _questions, err = parse_dream_consolidations(
+            text, strict=strict, signals=self.owner._signals
+        )
+        self.consolidations, self.err = cons, err
+        if self._stage == "format_retry":
+            self.retried += 1
+        self.owner._step(Step(kind="parsed", purpose="dream", attempt=self.calls,
+                              detail={"consolidations": len(cons), "error": err}))
+        if err and is_retryable_parse_error(err) and self.retried < self.owner._max_retries:
+            self._stage = "format_retry"
+            self.owner._step(Step(kind="retrying", purpose="dream",
+                                  attempt=self.calls,
+                                  detail={"why": err, "kind": "format"}))
+            return
+        self._stage = "done"
+
+    def finish(self) -> MaintenanceResult:
+        trace = {"reason": self.verdict.reason, "new_cards": self.verdict.new_cards,
+                 "consolidations": len(self.consolidations),
+                 "signature": self.snapshot.signature,
+                 "seed_card_count": self.snapshot.seed_card_count}
+        self.owner._step(Step(kind="done", purpose="dream", attempt=self.calls,
+                              detail={"consolidations": len(self.consolidations),
+                                      "retried": self.retried, "error": self.err}))
+        if self.err:
+            return MaintenanceResult(needed=True, error=self.err, trace=trace)
+        return MaintenanceResult(
+            needed=True,
+            mutations=[dict(c, mount=self.request.mount) for c in self.consolidations],
+            trace=trace,
+        )
+
+
+class MaintenanceSession:
+    """由宿主驱动的整理会话。用法和 :class:`CaptureSession` 一样。"""
+
+    def __init__(self, plan: "_MaintenancePlan") -> None:
+        self._plan = plan
+
+    def next_prompt(self) -> str | None:
+        if self._plan.rejected is not None:
+            return None
+        return self._plan.next_prompt()
+
+    def feed(self, reply, *, truncated: bool = False) -> None:
+        self._plan.feed(reply, truncated=truncated)
+
+    def result(self) -> MaintenanceResult:
+        if self._plan.rejected is not None:
+            return self._plan.rejected
+        return self._plan.finish()
+
+
 class CaptureSession:
     """由**宿主驱动**的落卡会话 —— 给自带 provider 机制的宿主用。
 
@@ -418,6 +557,11 @@ class GardenComponent:
                 return plan.finish()
             reply = await self._model.complete(ask, purpose="capture")
             plan.feed(reply, truncated=_is_truncated(reply))
+
+    def maintenance_session(self, request: MaintenanceRequest) -> MaintenanceSession:
+        """开一个由宿主驱动的整理会话。见 :class:`CaptureSession` 的理由，
+        两者同构 —— 自带 provider 机制的宿主两条 lane 用同一种形状接入。"""
+        return MaintenanceSession(_MaintenancePlan(self, request))
 
     def capture_session(self, request: CaptureRequest) -> CaptureSession:
         """开一个由宿主驱动的落卡会话。见 :class:`CaptureSession`。

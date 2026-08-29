@@ -613,3 +613,46 @@ def test_a_supersede_fixed_on_the_retry_is_accepted() -> None:
         CaptureRequest(window="x", locale="zh-Hans"))
     assert out.error is None
     assert out.mutations[0]["target_id"] == "m_7"
+
+
+# --------------------------------------------------- 整理的会话（同构）
+
+def _many(n: int) -> list[dict]:
+    return [{"id": f"m_{i}", "summary": f"卡{i}", "content": "x",
+             "created_at": "2026-08-01", "occurred_at": "2026-08-01"}
+            for i in range(n)]
+
+
+def test_maintenance_session_matches_the_built_in_loop() -> None:
+    """整理的两种形状也必须产出同一个结果 —— 和落卡同一条纪律。"""
+    reply = json.dumps({"consolidations": []})
+    built_in = GardenComponent(model=FakeModel(reply)).run_maintenance(
+        MaintenanceRequest(cards=_many(15), locale="zh-Hans"))
+
+    session = GardenComponent(model=FakeModel()).maintenance_session(
+        MaintenanceRequest(cards=_many(15), locale="zh-Hans"))
+    while (prompt := session.next_prompt()) is not None:
+        session.feed(reply)
+    driven = session.result()
+
+    assert driven.needed == built_in.needed
+    assert driven.mutations == built_in.mutations
+    assert driven.error == built_in.error
+
+
+def test_maintenance_session_ends_immediately_when_nothing_to_do() -> None:
+    """不该整理时不问模型 —— 调度器高频问这个，不该为此烧钱。"""
+    session = GardenComponent(model=FakeModel()).maintenance_session(
+        MaintenanceRequest(cards=_many(2), locale="zh-Hans"))
+    assert session.next_prompt() is None
+    assert session.result().needed is False
+
+
+def test_maintenance_session_handles_truncation() -> None:
+    """整理的提示词把整个花园都塞进去了，是所有 lane 里最容易被截的。"""
+    session = GardenComponent(model=FakeModel()).maintenance_session(
+        MaintenanceRequest(cards=_many(15), locale="zh-Hans"))
+    first = session.next_prompt()
+    session.feed("半截 JSON{", truncated=True)
+    second = session.next_prompt()
+    assert second is not None and second != first

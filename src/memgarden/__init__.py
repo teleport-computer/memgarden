@@ -32,7 +32,12 @@
 把编排知识抄进了你的代码，Garden 内部一改你就得跟着改。
 """
 
-from .component import CaptureSession, GardenCapabilities, GardenComponent
+from .component import (
+    CaptureSession,
+    GardenCapabilities,
+    GardenComponent,
+    MaintenanceSession,
+)
 from .contracts import (
     SCHEMA_VERSION,
     Actor,
@@ -59,6 +64,7 @@ __all__ = [
     "GardenComponent",
     "GardenCapabilities",
     "CaptureSession",
+    "MaintenanceSession",
     "ModelPort",
     "ClockPort",
     "SystemClock",
