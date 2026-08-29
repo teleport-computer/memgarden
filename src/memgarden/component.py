@@ -205,6 +205,7 @@ class _CapturePlan:
             return CaptureResult(error=self.err, retried=self.retried, trace=trace)
         return CaptureResult(
             mutations=[self.owner._to_mutation(c, self.request) for c in self.cards],
+            cards=list(self.cards),
             retried=self.retried,
             trace=trace,
         )

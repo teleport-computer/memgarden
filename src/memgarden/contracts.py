@@ -142,7 +142,18 @@ class CaptureResult:
     救回来了，这件事宿主要能看见 —— 否则「偶尔丢记忆」永远查不出原因。
     """
 
+    #: Garden 原生的改动指令。宿主没有自己的写入格式时直接用这个。
     mutations: list[dict] = field(default_factory=list)
+
+    #: 解析并过闸之后的**原始卡**（含 ``action`` / ``target_id``）。
+    #:
+    #: 为什么两个都给：宿主往往有自己的写入格式。宿主 io 的 action 里带加密信封和
+    #: 通话溯源，它需要从卡本身构造，而 ``mutations`` 已经把 action/target_id
+    #: 拆到外层了 —— 逼它拆回去再拼一遍是无谓的往返，还容易在往返里丢字段。
+    #:
+    #: 两者是同一批卡的两种表达，不是两批数据。
+    cards: list[dict] = field(default_factory=list)
+
     #: 打回重问了几次。>0 说明模型第一次的输出不合格。
     retried: int = 0
     #: 非 None = 这批彻底失败了，宿主应当让 job 失败而不是当成「没什么可记的」。

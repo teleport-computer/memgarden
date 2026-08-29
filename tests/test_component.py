@@ -377,3 +377,17 @@ def test_async_capture_reports_the_same_steps() -> None:
                          on_step=async_steps.append).acapture(
         CaptureRequest(window="x", locale="zh-Hans")))
     assert [s.kind for s in sync_steps] == [s.kind for s in async_steps]
+
+
+def test_capture_gives_both_mutations_and_raw_cards() -> None:
+    """两种表达同一批卡 —— 宿主有自己的写入格式时用 cards。
+
+    io 的 action 带加密信封和通话溯源，要从卡本身构造；而 mutations 已经把
+    action/target_id 拆到外层。逼它拆回去再拼一遍是无谓往返，还容易丢字段。
+    """
+    out = GardenComponent(model=FakeModel(_cards_reply(GOOD_CARD))).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    assert len(out.cards) == len(out.mutations) == 1
+    assert out.cards[0]["action"] == "add"          # 原始卡保留 action
+    assert "action" not in out.mutations[0]["card"]  # 指令里拆到了外层 op
+    assert out.cards[0]["summary"] == out.mutations[0]["card"]["summary"]
