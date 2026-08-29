@@ -34,6 +34,7 @@ from typing import Any
 
 from .contracts import (
     Actor,
+    Step,
     CaptureRequest,
     CaptureResult,
     ContextRequest,
@@ -126,6 +127,13 @@ class _CapturePlan:
     def next_prompt(self) -> str | None:
         """下一次该问模型什么；``None`` = 问完了。"""
         if self._stage == "first":
+            self.owner._step(Step(
+                kind="prompt_built", purpose="capture", attempt=0,
+                detail={"prompt_chars": len(self.prompt),
+                        "window_chars": len(self.request.window or ""),
+                        "locale": self.request.locale},
+                prompt=self.prompt,
+            ))
             return self.prompt
         if self._stage == "format_retry":
             return build_capture_retry_prompt(self.prompt, self.err or "")
@@ -138,6 +146,11 @@ class _CapturePlan:
     def feed(self, raw: str) -> None:
         """把模型这次的回复喂回来，并决定下一步。"""
         self.calls += 1
+        self.owner._step(Step(
+            kind="model_called", purpose="capture", attempt=self.calls,
+            detail={"reply_chars": len(raw or ""), "stage": self._stage},
+            reply=raw,
+        ))
         strict = self._stage == "first"
         cards, err = parse_capture_cards(
             raw, strict=strict, policy=self.request.policy, signals=self.owner._signals
@@ -156,20 +169,38 @@ class _CapturePlan:
         if self._stage == "format_retry":
             self.retried += 1
 
+        self.owner._step(Step(
+            kind="parsed", purpose="capture", attempt=self.calls,
+            detail={"cards": len(cards), "error": err},
+        ))
+
         if err:
             if is_retryable_parse_error(err) and self.retried < self.owner._max_retries:
                 self._stage = "format_retry"
+                self.owner._step(Step(
+                    kind="retrying", purpose="capture", attempt=self.calls,
+                    detail={"why": err, "kind": "format"},
+                ))
             else:
                 self._stage = "done"
             return
 
-        if capture_semantic_retry_reasons(cards) and self.retried < self.owner._max_retries:
+        reasons = capture_semantic_retry_reasons(cards)
+        if reasons and self.retried < self.owner._max_retries:
             self._stage = "semantic_retry"
+            self.owner._step(Step(
+                kind="retrying", purpose="capture", attempt=self.calls,
+                detail={"why": "semantic", "reasons": len(reasons)},
+            ))
         else:
             self._stage = "done"
 
     def finish(self) -> CaptureResult:
         trace = self.owner._trace(self.request, self.calls, cards=len(self.cards))
+        self.owner._step(Step(
+            kind="done", purpose="capture", attempt=self.calls,
+            detail={"cards": len(self.cards), "retried": self.retried, "error": self.err},
+        ))
         if self.err:
             return CaptureResult(error=self.err, retried=self.retried, trace=trace)
         return CaptureResult(
@@ -198,13 +229,26 @@ class GardenComponent:
         clock: ClockPort | None = None,
         min_new_cards_for_maintenance: int = 10,
         max_capture_retries: int = 1,
+        on_step=None,
     ) -> None:
+        #: 每一步都回调一次。宿主用它记轨迹 —— 不给就什么都不记。
+        #: 收进组件的编排不能让宿主的可观测性净退步，这是那条的落点。
+        self._on_step = on_step
         self._model = model
         self._policy = selection_policy
         self._signals = signals
         self._clock = clock or SystemClock()
         self._min_new_cards = min_new_cards_for_maintenance
         self._max_retries = max(0, max_capture_retries)
+
+    def _step(self, step: Step) -> None:
+        """汇报一步。回调抛异常不许影响主流程 —— 记轨迹失败不该让落卡失败。"""
+        if self._on_step is None:
+            return
+        try:
+            self._on_step(step)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -- 声明 ------------------------------------------------------------ #
 

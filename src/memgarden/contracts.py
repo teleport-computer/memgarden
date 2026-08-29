@@ -35,6 +35,42 @@ DEFAULT_MOUNT: Mount = "agent-private"
 
 
 # --------------------------------------------------------------------------- #
+# 过程可观测
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Step:
+    """编排过程里的一步 —— 供宿主记轨迹。
+
+    ## 为什么必须有这个
+
+    把编排收进组件之后，宿主**会丢掉它原本看得见的东西**：第一次问了什么、
+    模型回了什么、为什么要重问。宿主 io 现在就在记这些（trajectory_recorder），
+    换成组件之后如果看不到，可观测性就是净退步 —— 那样这层门面是亏的。
+
+    所以组件必须能把每一步汇报出来。宿主传一个回调，想记什么记什么。
+
+    ## 内容无关
+
+    ``detail`` 里只放长度、计数、错误码这类**内容无关**的量。
+    提示词和模型回复本身通过 ``prompt`` / ``reply`` 单独给 —— 它们含用户内容，
+    宿主自己决定要不要落库、要不要脱敏。**默认不会被塞进 trace。**
+    """
+
+    kind: str                      # prompt_built / model_called / parsed / retrying / done
+    purpose: str = ""              # capture / dream / migrate
+    attempt: int = 0
+    detail: dict = field(default_factory=dict)
+    #: 含用户内容 —— 宿主自己决定怎么处理，内核不落库。
+    prompt: str | None = None
+    reply: str | None = None
+
+
+#: 宿主传进来的步骤回调。
+StepSink = Any
+
+
+# --------------------------------------------------------------------------- #
 # 谁在操作
 # --------------------------------------------------------------------------- #
 
@@ -235,7 +271,7 @@ class ToolResult:
 
 
 __all__ = [
-    "SCHEMA_VERSION", "Mount", "DEFAULT_MOUNT", "Actor",
+    "SCHEMA_VERSION", "Mount", "DEFAULT_MOUNT", "Actor", "Step", "StepSink",
     "CaptureRequest", "CaptureResult",
     "ContextRequest", "ContextResult",
     "MaintenanceRequest", "MaintenanceResult",

@@ -306,3 +306,74 @@ def test_async_capture_separates_empty_from_failed() -> None:
     broken = _run(GardenComponent(model=AsyncFakeModel("这不是 JSON")).acapture(
         CaptureRequest(window="重要的话", locale="zh-Hans")))
     assert broken.error and not broken.nothing_worth_keeping
+
+
+# --------------------------------------------------------------- 过程可观测
+
+def test_the_host_can_see_every_step() -> None:
+    """把编排收进组件之后，宿主**不能因此丢掉它原本看得见的东西**。
+
+    io 现在记着「第一次问了什么、模型回了什么、为什么重问」。换成组件之后
+    如果看不到，可观测性就是净退步 —— 那样这层门面是亏的。
+    """
+    steps = []
+    bad = _cards_reply({"action": "add", "summary": "[摘要]", "content": "...",
+                        "bucket": "工作"})
+    garden = GardenComponent(model=FakeModel(bad, _cards_reply(GOOD_CARD)),
+                             on_step=steps.append)
+    garden.capture(CaptureRequest(window="用户：我不吃辣", locale="zh-Hans"))
+
+    kinds = [s.kind for s in steps]
+    assert kinds == ["prompt_built", "model_called", "parsed", "retrying",
+                     "model_called", "parsed", "done"]
+    # 重问的**原因**要说得出来，否则查不出「为什么这轮多花了一次调用」
+    assert any(s.kind == "retrying" and s.detail.get("why") for s in steps)
+
+
+def test_step_details_carry_no_user_content() -> None:
+    """``detail`` 会进日志 —— 只放长度、计数、错误码。
+
+    提示词和模型回复通过单独的字段给，宿主自己决定要不要落库、要不要脱敏。
+    """
+    steps = []
+    secret = "他在国贸三期上班，女儿叫朵朵"
+    GardenComponent(model=FakeModel(_cards_reply(GOOD_CARD)),
+                    on_step=steps.append).capture(
+        CaptureRequest(window=secret, locale="zh-Hans"))
+    blob = json.dumps([s.detail for s in steps], ensure_ascii=False)
+    for fragment in ("国贸", "朵朵"):
+        assert fragment not in blob
+
+
+def test_the_raw_prompt_is_available_but_separate() -> None:
+    """宿主要记完整轨迹时得拿得到原文 —— 但它不在 detail 里，是显式的另一个字段。"""
+    steps = []
+    GardenComponent(model=FakeModel(_cards_reply(GOOD_CARD)),
+                    on_step=steps.append).capture(
+        CaptureRequest(window="用户：我不吃辣", locale="zh-Hans"))
+    built = next(s for s in steps if s.kind == "prompt_built")
+    assert built.prompt and "不吃辣" in built.prompt
+    assert "不吃辣" not in json.dumps(built.detail, ensure_ascii=False)
+
+
+def test_a_broken_step_callback_never_breaks_capture() -> None:
+    """记轨迹失败不该让落卡失败 —— 观测是附加品，不是前置条件。"""
+    def explode(step):
+        raise RuntimeError("宿主的日志系统挂了")
+
+    result = GardenComponent(model=FakeModel(_cards_reply(GOOD_CARD)),
+                             on_step=explode).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    assert result.mutations and result.error is None
+
+
+def test_async_capture_reports_the_same_steps() -> None:
+    """异步版不能少报步骤 —— 否则 V2 换过去之后轨迹会缺。"""
+    reply = _cards_reply(GOOD_CARD)
+    sync_steps, async_steps = [], []
+    GardenComponent(model=FakeModel(reply), on_step=sync_steps.append).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    _run(GardenComponent(model=AsyncFakeModel(reply),
+                         on_step=async_steps.append).acapture(
+        CaptureRequest(window="x", locale="zh-Hans")))
+    assert [s.kind for s in sync_steps] == [s.kind for s in async_steps]
