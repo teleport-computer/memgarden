@@ -367,7 +367,12 @@ class MaintenanceResult:
     """整理的结果。同样是**指令**，不是已经改完了。"""
 
     needed: bool = False
+    #: Garden 原生的改动指令。
     mutations: list[dict] = field(default_factory=list)
+    #: 解析并过闸之后的**原始合并方案**（含 op / card_ids / rationale / result）。
+    #: 和 :class:`CaptureResult` 的 ``cards`` 同一个道理 —— 宿主有自己的写入
+    #: 格式时用这个，别逼它从 mutations 拆回去再拼一遍。
+    consolidations: list[dict] = field(default_factory=list)
     error: str | None = None
     trace: dict = field(default_factory=dict)
     schema_version: int = SCHEMA_VERSION

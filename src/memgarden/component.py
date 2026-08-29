@@ -401,6 +401,7 @@ class _MaintenancePlan:
         return MaintenanceResult(
             needed=True,
             mutations=[dict(c, mount=self.request.mount) for c in self.consolidations],
+            consolidations=list(self.consolidations),
             trace=trace,
         )
 
@@ -796,6 +797,7 @@ class GardenComponent:
         return MaintenanceResult(
             needed=True,
             mutations=[dict(c, mount=request.mount) for c in consolidations],
+            consolidations=list(consolidations),
             trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
                    "consolidations": len(consolidations),
                    "signature": snapshot.signature,
