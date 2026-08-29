@@ -347,6 +347,15 @@ class MaintenanceRequest:
     user_name: str = ""
     #: 最近的对话，渲染好的。整理时用来判断哪些记忆已经过时。
     recent_conversations: str = ""
+    #: 喂进提示词的那批卡的 id。
+    #:
+    #: **整理结果里不许出现任何一个** —— 出现了就是模型把整理注记
+    #: （「已被 c42ebb98 取代」）当成了内容本身写进卡里，用户会在记忆列表里
+    #: 看到一串卡 id。宿主 io 踩过这个（usr_a40e 墓碑卡）。
+    #:
+    #: 留空则不做这项检查 —— 但只要你喂了卡进去，就该把它们的 id 也给出来。
+    known_ids: tuple[str, ...] = ()
+
     #: 只看要不要整理、不真的整理。宿主的调度器用它决定要不要排这个活。
     dry_run: bool = False
     idempotency_key: str = ""

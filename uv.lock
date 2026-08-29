@@ -4,7 +4,7 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "agent-protocol-core"
-version = "0.9.1"
+version = "0.10.0"
 source = { editable = "packages/agent-protocol-core" }
 
 [[package]]
@@ -39,7 +39,7 @@ wheels = [
 
 [[package]]
 name = "memgarden"
-version = "0.9.1"
+version = "0.10.0"
 source = { editable = "." }
 dependencies = [
     { name = "agent-protocol-core" },

@@ -656,3 +656,41 @@ def test_maintenance_session_handles_truncation() -> None:
     session.feed("半截 JSON{", truncated=True)
     second = session.next_prompt()
     assert second is not None and second != first
+
+
+def test_maintenance_rejects_a_result_that_quotes_a_card_id() -> None:
+    """整理结果里出现喂进去的卡 id = 模型把整理注记当成了内容本身。
+
+    用户会在记忆列表里看到「已被 c42ebb98 取代」这种东西。
+    宿主 io 踩过（usr_a40e 墓碑卡），所以两种形状都要带上这道守卫。
+    """
+    # 真实卡 id 是长 hex；短 id（m_3）会被 _MIN_ID_LEN 挡掉，那是为了避免
+    # 「用户恰好聊到一串一样的字符」的误伤。
+    real_id = "c42ebb98a1d2e7f0"
+    tomb = json.dumps({"consolidations": [{
+        "op": "merge", "card_ids": [real_id, "m_2"], "rationale": "两张说的是同一件事",
+        "result": {"summary": f"已被 {real_id} 取代",
+                   "content": f"这条已经被 {real_id} 取代了，见那张。", "bucket": "工作"},
+    }]}, ensure_ascii=False)
+    out = GardenComponent(model=FakeModel(tomb)).run_maintenance(
+        MaintenanceRequest(cards=_many(15), locale="zh-Hans",
+                           known_ids=(real_id,)))
+    assert out.error, "引用了卡 id 的整理结果应该被打回"
+
+
+def test_maintenance_session_carries_the_same_guard() -> None:
+    """两种形状的守卫必须一致 —— 少一边等于那条路上的墓碑卡照样落库。"""
+    # 真实卡 id 是长 hex；短 id（m_3）会被 _MIN_ID_LEN 挡掉，那是为了避免
+    # 「用户恰好聊到一串一样的字符」的误伤。
+    real_id = "c42ebb98a1d2e7f0"
+    tomb = json.dumps({"consolidations": [{
+        "op": "merge", "card_ids": [real_id, "m_2"], "rationale": "两张说的是同一件事",
+        "result": {"summary": f"已被 {real_id} 取代",
+                   "content": f"这条已经被 {real_id} 取代了，见那张。", "bucket": "工作"},
+    }]}, ensure_ascii=False)
+    session = GardenComponent(model=FakeModel()).maintenance_session(
+        MaintenanceRequest(cards=_many(15), locale="zh-Hans",
+                           known_ids=(real_id,)))
+    while session.next_prompt() is not None:
+        session.feed(tomb)
+    assert session.result().error

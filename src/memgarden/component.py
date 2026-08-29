@@ -372,7 +372,8 @@ class _MaintenancePlan:
 
         strict = self._stage == "first"
         cons, _questions, err = parse_dream_consolidations(
-            text, strict=strict, signals=self.owner._signals
+            text, strict=strict, signals=self.owner._signals,
+            known_ids=frozenset(self.request.known_ids),
         )
         self.consolidations, self.err = cons, err
         if self._stage == "format_retry":
@@ -787,7 +788,7 @@ class GardenComponent:
         )
         raw = self._model.complete(prompt, purpose="dream")
         consolidations, _questions, err = parse_dream_consolidations(
-            raw, signals=self._signals
+            raw, signals=self._signals, known_ids=frozenset(request.known_ids),
         )
         if err:
             return MaintenanceResult(needed=True, error=err,
