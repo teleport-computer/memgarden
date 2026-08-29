@@ -531,3 +531,49 @@ def test_browse_projection_survives_a_component_without_buckets() -> None:
     assert all(i.record_ref and i.display_text and i.mount for i in items)
     assert items[0].group_label == "偏好与边界"
     assert items[1].group_label == "", "没有桶时留空，由 UI 平铺或显示「未分类」"
+
+
+# --------------------------------------------- 宿主驱动的形状（自带 provider）
+
+def test_a_host_driven_session_matches_the_built_in_loop() -> None:
+    """自带循环和宿主驱动必须产出同一个结果。
+
+    各写一份状态机的话，两种形状会**悄悄**产出不同的卡 —— 而宿主以为
+    它们是同一个东西。共用一份，这条测试守着没分家。
+    """
+    replies = [_cards_reply({"action": "add", "summary": "[摘要]",
+                             "content": "...", "bucket": "工作"}),
+               _cards_reply(GOOD_CARD)]
+
+    built_in = GardenComponent(model=FakeModel(*replies)).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+
+    session = GardenComponent(model=FakeModel()).capture_session(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    i = 0
+    while (prompt := session.next_prompt()) is not None:
+        session.feed(replies[min(i, len(replies) - 1)])
+        i += 1
+    driven = session.result()
+
+    assert driven.cards == built_in.cards
+    assert driven.error == built_in.error
+    assert driven.retried == built_in.retried
+
+
+def test_a_host_driven_session_can_report_truncation() -> None:
+    """截断只有宿主看得见（要看 finish_reason）—— 组件收到通知后换一版
+    更简短的提示词重问，而不是原样重问（原样多半还是被截在同一处）。"""
+    session = GardenComponent(model=FakeModel()).capture_session(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    first = session.next_prompt()
+    session.feed("半截 JSON{", truncated=True)
+    second = session.next_prompt()
+    assert second is not None and second != first, "截断后应该换一版提示词"
+
+
+def test_a_session_with_a_bad_request_ends_immediately() -> None:
+    session = GardenComponent(model=FakeModel()).capture_session(
+        CaptureRequest(window="x"))          # 没给 locale
+    assert session.next_prompt() is None
+    assert session.result().error == "locale_required"

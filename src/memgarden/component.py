@@ -271,6 +271,55 @@ class _CapturePlan:
         )
 
 
+class CaptureSession:
+    """由**宿主驱动**的落卡会话 —— 给自带 provider 机制的宿主用。
+
+    ## 为什么需要这个
+
+    ``capture()`` 和 ``acapture()`` 自带循环：组件问模型、拿回复、决定重问。
+    对多数接入方这是最省事的。
+
+    但有的宿主自己管着一整套 provider 机制 —— 截断检测（要看 finish_reason）、
+    用量统计、失败分类、退避、轨迹。宿主 io 的托管 worker 就是这样。
+    让组件把 provider 调用抢过去，等于要求宿主**放弃这些能力**，
+    那是净退步，这层门面就不值得接。
+
+    所以给第二种形状：**组件只回答「下一步该问什么」和「拿到回复之后怎么办」，
+    provider 那一步仍归宿主。**
+
+        session = garden.capture_session(request)
+        while (prompt := session.next_prompt()) is not None:
+            reply, truncated = my_provider.call(prompt)      # 宿主自己的机制
+            session.feed(reply, truncated=truncated)
+        result = session.result()
+
+    两种形状**共用同一个状态机**，判断逻辑是同一份 —— 各写一份的话，
+    自带循环和宿主驱动会悄悄产出不同的卡。
+    """
+
+    def __init__(self, plan: "_CapturePlan") -> None:
+        self._plan = plan
+
+    def next_prompt(self) -> str | None:
+        """下一次该问模型什么；``None`` = 问完了，可以取结果。"""
+        if self._plan.rejected is not None:
+            return None
+        return self._plan.next_prompt()
+
+    def feed(self, reply: str, *, truncated: bool = False) -> None:
+        """把这次的模型回复交回来。
+
+        ``truncated`` 由宿主判断 —— 回复有没有被 provider 截断，
+        只有拿到原始响应元数据的那一层看得见。
+        """
+        self._plan.feed(reply, truncated=truncated)
+
+    def result(self) -> CaptureResult:
+        if self._plan.rejected is not None:
+            return self._plan.rejected
+        return self._plan.finish()
+
+
 class GardenComponent:
     """完整的 Memory Garden 能力，注入式依赖。
 
@@ -355,6 +404,14 @@ class GardenComponent:
                 return plan.finish()
             reply = await self._model.complete(ask, purpose="capture")
             plan.feed(reply, truncated=_is_truncated(reply))
+
+    def capture_session(self, request: CaptureRequest) -> CaptureSession:
+        """开一个由宿主驱动的落卡会话。见 :class:`CaptureSession`。
+
+        自带 provider 机制的宿主用这个；其余用 :meth:`capture` /
+        :meth:`acapture` 更省事。三者共用同一个状态机。
+        """
+        return CaptureSession(_CapturePlan(self, request))
 
     # -- 另外两种写入来源 ------------------------------------------------ #
 
