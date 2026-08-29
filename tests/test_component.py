@@ -18,6 +18,10 @@ import pytest
 
 from memgarden import (
     CaptureRequest,
+    CuratedWriteRequest,
+    ExportRequest,
+    ImportRequest,
+    PromoteRequest,
     ContextRequest,
     GardenComponent,
     MaintenanceRequest,
@@ -436,3 +440,94 @@ def test_a_plain_string_reply_still_works() -> None:
     out = GardenComponent(model=FakeModel(_cards_reply(GOOD_CARD))).capture(
         CaptureRequest(window="x", locale="zh-Hans"))
     assert out.mutations and out.error is None
+
+
+# --------------------------------------------------- 三种写入来源语义不同
+
+def test_curated_write_never_judges_whether_it_is_worth_keeping() -> None:
+    """用户明说「记一下」时，我们的活是记好，不是评估该不该记。
+
+    拿自动落卡那把克制的尺子来量，模型会判「这不值得」然后什么都不发生 ——
+    用户以为记住了，其实没有，而且没有任何错误可查。
+    所以这条路**根本不调模型做筛选**。
+    """
+    model = FakeModel(_cards_reply())          # 模型说「没什么可记」
+    out = GardenComponent(model=model).write_one(CuratedWriteRequest(
+        text="我不吃辣，一吃就胃疼，点菜都得避开", locale="zh-Hans"))
+    assert model.calls == 0, "用户明说的事不该拿去问模型值不值得记"
+    assert len(out.cards) == 1 and out.error is None
+
+
+def test_curated_write_still_passes_the_content_gate() -> None:
+    """不判断「值不值得」，但仍然要是**真内容** —— 空白和占位符照样拦。"""
+    out = GardenComponent(model=FakeModel()).write_one(
+        CuratedWriteRequest(text="   ", locale="zh-Hans"))
+    assert out.error == "empty_text"
+
+
+def test_import_declares_it_lacks_its_own_ruler() -> None:
+    """能力声明必须说实话。
+
+    ``policies`` 里有 history_import 档，但提示词模板只实现了
+    conversation_capture 的结构。声明成 False 而不是假装支持 ——
+    后者的表现是「导入成功但几乎没记住什么」，用户和宿主都查不出原因。
+    """
+    caps = GardenComponent(model=FakeModel()).capabilities()
+    assert caps.history_import is False
+
+
+def test_import_refuses_an_unsupported_ruler_instead_of_silently_downgrading() -> None:
+    out = GardenComponent(model=FakeModel()).import_history(
+        ImportRequest(material="x", locale="zh-Hans", policy="history_import"))
+    assert out.error and out.error.startswith("policy_not_supported")
+
+
+def test_import_failure_is_never_reported_as_nothing_to_keep() -> None:
+    """导入失败必须是失败。报成「没什么可记」的话，用户交出三年记录、
+    看到「导入完成」、然后一条都没有 —— 且没有任何错误可查。"""
+    many = _cards_reply(*[{
+        "action": "add", "summary": f"第 {i} 件事",
+        "content": f"这是第 {i} 段有实质内容的正文，长度足够通过内容闸。",
+        "bucket": "工作"} for i in range(60)])
+    out = GardenComponent(model=FakeModel(many)).import_history(
+        ImportRequest(material="三年的聊天记录", locale="zh-Hans"))
+    assert out.error is not None
+    assert not out.nothing_worth_keeping
+
+
+# --------------------------------------------------------------- 导出 / 提升
+
+def test_export_includes_archived_by_default() -> None:
+    """导出是用户的权利。「你删掉的那条我还留着」和「你看不到自己删过什么」
+    都是不该有的状态。"""
+    out = GardenComponent(model=FakeModel()).export(
+        ExportRequest(),
+        [{"record_id": "m_1", "lifecycle": "active"},
+         {"record_id": "m_2", "lifecycle": "archived"},
+         {"record_id": "m_3", "superseded_by": "m_4"}])
+    assert out.counts == {"total": 3, "archived": 1, "superseded": 1}
+
+
+def test_promote_requires_the_host_to_have_authorized_it() -> None:
+    """内核不自行授予权限。没有宿主的校验结论就拒绝，而不是「大概可以吧」。"""
+    garden = GardenComponent(model=FakeModel())
+    denied = garden.promote(PromoteRequest(record_id="m_1", to_mount="family-shared"))
+    assert not denied.ok and denied.error == "not_authorized_by_host"
+
+    ok = garden.promote(PromoteRequest(record_id="m_1", to_mount="family-shared",
+                                       authorized=True))
+    assert ok.ok and ok.mutations[0]["changes"]["mount"] == "family-shared"
+
+
+# --------------------------------------------------------------- 展示投影
+
+def test_browse_projection_survives_a_component_without_buckets() -> None:
+    """一个不产出桶的组件接进来，通用列表页**不能是空白** ——
+    那看起来像数据丢了。没有分组就平铺。"""
+    items = GardenComponent(model=FakeModel()).browse([
+        {"id": "m_1", "summary": "他不吃辣", "bucket": "偏好与边界", "threads": ["饮食"]},
+        {"id": "x_9", "summary": "某条向量记忆"},          # 没有桶
+    ])
+    assert all(i.record_ref and i.display_text and i.mount for i in items)
+    assert items[0].group_label == "偏好与边界"
+    assert items[1].group_label == "", "没有桶时留空，由 UI 平铺或显示「未分类」"

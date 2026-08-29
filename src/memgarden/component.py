@@ -34,7 +34,14 @@ from typing import Any
 
 from .contracts import (
     Actor,
+    BrowseItem,
+    CuratedWriteRequest,
+    ExportRequest,
+    ExportResult,
+    ImportRequest,
+    PromoteRequest,
     Step,
+    to_browse_item,
     CaptureRequest,
     CaptureResult,
     ContextRequest,
@@ -73,6 +80,21 @@ class GardenCapabilities:
     turn_context: bool = True
     maintenance: bool = True
     model_tools: bool = True
+    #: 用户明说要记的一件事（不做「值不值得记」的判断）。
+    curated_write: bool = True
+    #: 导出这个人的全部记忆。
+    export: bool = True
+    #: private → shared 的显式提升。
+    promote: bool = True
+    #: 历史导入**专用的判断尺子**。
+    #:
+    #: ⚠️ 现在是 ``False``：``policies`` 里有 ``history_import`` 档，但
+    #: ``build_capture_prompt`` 只实现了 ``conversation_capture`` 的模板结构。
+    #: ``import_history()`` 仍可用，只是会用日常聊天那把（偏保守）的尺子。
+    #:
+    #: 声明成 False 而不是假装支持 —— 后者的表现是「导入成功但几乎没记住
+    #: 什么」，用户和宿主都查不出原因。
+    history_import: bool = False
     #: 逻辑可见范围。第一阶段只保证 agent-private —— 声明清楚，
     #: 别让宿主以为写进 shared 会生效。
     mounts: tuple[str, ...] = ("agent-private",)
@@ -333,6 +355,138 @@ class GardenComponent:
                 return plan.finish()
             reply = await self._model.complete(ask, purpose="capture")
             plan.feed(reply, truncated=_is_truncated(reply))
+
+    # -- 另外两种写入来源 ------------------------------------------------ #
+
+    def import_history(self, request: ImportRequest) -> CaptureResult:
+        """历史导入：用户主动交出的一批过去材料。
+
+        走同一条落卡链路，**但该换一把尺子** —— 这是他自己给的东西，宁可多记；
+        自动落卡那把「克制」的尺子在这里是错的。
+
+        ## ⚠️ 当前状态：尺子有，模板没有
+
+        ``policies`` 里有 ``history_import`` 档（判据写好了），但
+        ``build_capture_prompt`` 只实现了 ``conversation_capture`` 的模板结构，
+        其余档位的动作偏好/日期/输出 schema **尚未策略化**。
+
+        所以这条路现在**只能用日常聊天那把尺子**，判断会偏保守 ——
+        用户交出三年记录，可能只蒸出很少几张。
+
+        这件事写在 ``capabilities().history_import`` 里（值是 ``False``），
+        不靠调用方读源码发现。**宁可明说不支持，也不要悄悄用错的尺子** ——
+        后者的表现是「导入成功但几乎没记住什么」，而且没有任何错误可查。
+
+        ``max_cards`` 仍然必要：三年的聊天记录一次能蒸出几百张，
+        之后的召回会被这批淹没，而用户看不出发生了什么。
+        """
+        policy = request.policy
+        if policy and policy != "conversation_capture":
+            # 明确拒绝，而不是退回默认档假装做了。
+            return CaptureResult(
+                error=f"policy_not_supported_by_prompt_template:{policy}",
+                trace={"supported": ["conversation_capture"]},
+            )
+        result = self.capture(CaptureRequest(
+            window=request.material,
+            actor=request.actor, mount=request.mount, locale=request.locale,
+            ai_name=request.ai_name, user_name=request.user_name,
+            policy=None,   # 见上：其余档位的模板结构尚未策略化
+            idempotency_key=request.idempotency_key,
+        ))
+        if len(result.mutations) > request.max_cards:
+            kept = request.max_cards
+            result.trace = {**result.trace, "capped_from": len(result.mutations),
+                            "cap": kept}
+            # 截断要**说出来**。悄悄丢掉一半，用户看到的是「导入成功」，
+            # 实际少了一半，且没有任何痕迹。
+            result.mutations = result.mutations[:kept]
+            result.cards = result.cards[:kept]
+        return result
+
+    def write_one(self, request: CuratedWriteRequest) -> CaptureResult:
+        """用户明说要记的一件事。
+
+        ⚠️ **这条路不做「值不值得记」的判断。** 他说了「记一下我不吃辣」，
+        我们的活是把它记好，不是评估该不该记。拿克制那把尺子来量，
+        模型会判「这不值得」然后什么都不发生 —— 用户以为记住了，其实没有。
+
+        所以这里**不调模型做筛选**，直接成卡；只有归类和清洗还走内核。
+        """
+        text = str(request.text or "").strip()
+        if not text:
+            return CaptureResult(error="empty_text")
+        from .text.card_text import card_text_rejection
+        from .prompts.buckets import normalize_bucket_language
+
+        summary = text if len(text) <= 40 else text[:38] + "…"
+        bucket = normalize_bucket_language(request.bucket, text) if request.bucket else ""
+        rejection = card_text_rejection(summary=summary, content=text,
+                                        signals=self._signals)
+        if rejection:
+            return CaptureResult(error=f"invalid_card_content:{rejection}")
+        card = {"action": "add", "summary": summary, "content": text,
+                "bucket": bucket, "threads": [], "source": "curated"}
+        return CaptureResult(
+            mutations=[self._to_mutation(card, CaptureRequest(
+                window="", locale=request.locale, mount=request.mount,
+                idempotency_key=request.idempotency_key))],
+            cards=[card],
+            trace={"source": "curated", "chars": len(text), "mount": request.mount},
+        )
+
+    # -- 导出 / 提升 ------------------------------------------------------ #
+
+    def export(self, request: ExportRequest, records: list[dict]) -> ExportResult:
+        """把这个人的记忆整理成可交付的形状。
+
+        **记录由宿主给** —— 内核不读库、也不知道谁有权看哪个 mount。
+        这里只负责整理成一致的形状和给出计数（供宿主核对完整性）。
+
+        默认含已归档、已被取代的：「你删掉的那条我还留着」和
+        「你看不到自己删过什么」都是不该有的状态。
+        """
+        out = []
+        counts = {"total": 0, "archived": 0, "superseded": 0}
+        for r in records:
+            lifecycle = str(r.get("lifecycle") or "active")
+            archived = lifecycle == "archived" or bool(r.get("archived"))
+            superseded = bool(r.get("superseded_by"))
+            if not request.include_archived and (archived or superseded):
+                continue
+            counts["total"] += 1
+            counts["archived"] += int(archived)
+            counts["superseded"] += int(superseded)
+            out.append(r)
+        return ExportResult(records=out, counts=counts)
+
+    def promote(self, request: PromoteRequest) -> ToolResult:
+        """把一条私有记忆提升到共享范围 —— **必须是显式操作**。
+
+        内核不自行授予权限：``authorized`` 由宿主的权限校验填。
+        没有它就拒绝，而不是「大概可以吧」。
+        """
+        if not request.authorized:
+            return ToolResult(ok=False, error="not_authorized_by_host")
+        if not request.record_id:
+            return ToolResult(ok=False, error="record_id_required")
+        return ToolResult(
+            content="ok",
+            mutations=[{
+                "op": "update", "record_id": request.record_id,
+                "changes": {"mount": request.to_mount},
+                "mount": request.to_mount,
+                "reason": request.reason or "promoted_by_user",
+            }],
+        )
+
+    def browse(self, records: list[dict]) -> list[BrowseItem]:
+        """投影成通用记忆列表项 —— 供 Runtime 的跨组件 Browse 页面用。
+
+        Garden 自己的界面照常用 bucket/threads；这层只是让**别家组件**
+        也能进同一个列表。
+        """
+        return [to_browse_item(r) for r in records]
 
     # -- 想起来 ---------------------------------------------------------- #
 

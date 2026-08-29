@@ -170,6 +170,122 @@ class CaptureResult:
 
 
 # --------------------------------------------------------------------------- #
+# 三种写入来源 —— 语义不同，不能混成一个
+# --------------------------------------------------------------------------- #
+#
+# ## 为什么必须分开
+#
+# 「这段对话里有什么值得记」和「把我三年的聊天记录导进来」和「帮我记一下我不吃辣」
+# 看起来都是写记忆，但**三者的判断尺子完全不同**：
+#
+#     自动落卡   要克制 —— 什么都记 = 真正重要的卡被噪声挤出召回名额
+#     历史导入   要宽 —— 用户主动给的三年记录，漏掉才是失职；
+#                但也最容易一次灌进几百张、把花园淹掉
+#     用户明说   **不许判断** —— 他说「记一下」，我们的活是记下来，不是评估值不值得
+#
+# 混成一个接口的后果很具体：用同一把「克制」的尺子去处理用户明说的请求，
+# 模型会自作主张判定「这不值得记」，然后什么都没发生、也不报错。
+
+@dataclass
+class ImportRequest:
+    """历史导入：用户主动交出一批过去的材料。
+
+    和自动落卡的区别在**判断尺度**：这是用户交出来的东西，宁可多记；
+    但也要防一次灌爆花园，所以 ``max_cards`` 由宿主定上限。
+    """
+
+    material: str
+    actor: Actor = field(default_factory=Actor)
+    mount: Mount = DEFAULT_MOUNT
+    locale: str = ""
+    #: 这批材料是什么（聊天记录 / 日记 / 备忘录…）。只作提示词里的背景交代。
+    material_kind: str = ""
+    #: 用哪把尺子。留空 = ``history_import``（比日常聊天宽：用户主动交出来的
+    #: 东西，漏掉才是失职）。``curated_archive`` 是「几乎全收」那一档。
+    policy: str | None = None
+    #: 一次最多产出多少张。**必须有上限** —— 三年的聊天记录一次蒸出几百张，
+    #: 之后的召回会被这批淹没，而用户看不出发生了什么。
+    max_cards: int = 50
+    ai_name: str = ""
+    user_name: str = ""
+    idempotency_key: str = ""
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass
+class CuratedWriteRequest:
+    """用户明说要记的一件事。
+
+    ⚠️ **这条路不做「值不值得记」的判断。** 用户说了「记一下我不吃辣」，
+    我们的活是把它记好（写清楚、归对桶），不是评估该不该记。
+    拿自动落卡那把克制的尺子来量，模型会判「这不值得」然后什么都不发生 ——
+    用户以为记住了，其实没有，而且没有任何错误可查。
+    """
+
+    text: str
+    actor: Actor = field(default_factory=Actor)
+    mount: Mount = DEFAULT_MOUNT
+    locale: str = ""
+    #: 用户指定的桶；留空则由组件归类。
+    bucket: str = ""
+    idempotency_key: str = ""
+    schema_version: int = SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# 导出与用户删除
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class ExportRequest:
+    """把这个人的记忆导出来给他。
+
+    **这是用户的权利，不是我们的功能。** 所以默认导出**全部** mount 里
+    他有权访问的内容，包括已归档和已被取代的 —— 「你删掉的那条我还留着」
+    和「你看不到自己删过什么」都是不该有的状态。
+    """
+
+    actor: Actor = field(default_factory=Actor)
+    mounts: tuple[Mount, ...] = ()
+    #: 含已归档 / 已被取代的。默认**含** —— 导出是给用户看他的全部数据。
+    include_archived: bool = True
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass
+class ExportResult:
+    records: list[dict] = field(default_factory=list)
+    #: 内容无关的统计，供宿主核对完整性。
+    counts: dict = field(default_factory=dict)
+    schema_version: int = SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------- #
+# private → shared 的提升
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class PromoteRequest:
+    """把一条私有记忆提升到共享范围。
+
+    **必须是显式操作，不能是副作用。** 「我跟这个助手说的悄悄话」变成
+    「全家都能看到」是一次不可逆的可见性变更 —— 用户必须是主动做的，
+    而且宿主必须先做完权限校验（内核不自行授予权限）。
+
+    反方向（shared 收回 private）刻意不提供：内容一旦共享出去，
+    收回是安全幻觉 —— 别人可能已经看过、记住、转述了。要真收回只能删。
+    """
+
+    record_id: str
+    to_mount: Mount
+    actor: Actor = field(default_factory=Actor)
+    #: 宿主的权限校验结论。内核不自行判断谁能写哪个 mount。
+    authorized: bool = False
+    reason: str = ""
+    schema_version: int = SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------- #
 # 想起来（recall + context）
 # --------------------------------------------------------------------------- #
 
@@ -249,6 +365,60 @@ class MaintenanceResult:
 
 
 # --------------------------------------------------------------------------- #
+# 展示投影 —— 给 Runtime 的通用记忆列表用
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class BrowseItem:
+    """一条记忆在**通用**记忆列表里长什么样。
+
+    ## 为什么要有这层投影
+
+    Garden 自己的界面可以完整用 bucket / threads / supersede 那套。
+    但 Runtime 的通用 Browse 页面要能显示**任何**记忆组件的内容 ——
+    别人可能没有「桶」这个概念。
+
+    所以投影只要三个必需字段。没有 ``group_label`` 时 UI **平铺或显示
+    「未分类」，不能空白** —— 一个不产出桶的组件接进来，用户看到的不该是
+    一个空页面，那看起来像数据丢了。
+
+    ⚠️ 这是**展示协议**，不是要求 Garden 删掉 bucket/thread。
+    Garden 原生展示照常用它们（sevenfloor §10）。
+    """
+
+    record_ref: str          # 必需：稳定 id，宿主据此回填内容
+    display_text: str        # 必需：一行能看懂的话
+    mount: str               # 必需：这条属于哪个可见范围
+    occurred_at: str = ""    # 建议
+    updated_at: str = ""     # 建议
+    provider: str = ""       # 建议：哪个组件产出的
+    group_label: str = ""    # 可选：能分组就分，不能就平铺
+    tags: tuple[str, ...] = ()   # 可选
+
+    def as_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v not in ("", (), None)}
+
+
+def to_browse_item(record: dict, *, provider: str = "memgarden") -> BrowseItem:
+    """把一张 Garden 卡投影成通用展示项。
+
+    ``bucket`` 落到 ``group_label``、``threads`` 落到 ``tags`` —— 但那只是
+    Garden 这一家的映射；别的组件有别的映射，UI 只认投影后的字段。
+    """
+    card = record.get("card") if isinstance(record.get("card"), dict) else record
+    return BrowseItem(
+        record_ref=str(record.get("record_id") or record.get("id") or ""),
+        display_text=str(card.get("summary") or ""),
+        mount=str(record.get("mount") or DEFAULT_MOUNT),
+        occurred_at=str(card.get("occurred_at") or ""),
+        updated_at=str(record.get("updated_at") or ""),
+        provider=provider,
+        group_label=str(card.get("bucket") or ""),
+        tags=tuple(str(x) for x in (card.get("threads") or [])),
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 给模型的工具
 # --------------------------------------------------------------------------- #
 
@@ -284,7 +454,10 @@ class ToolResult:
 __all__ = [
     "SCHEMA_VERSION", "Mount", "DEFAULT_MOUNT", "Actor", "Step", "StepSink",
     "CaptureRequest", "CaptureResult",
+    "ImportRequest", "CuratedWriteRequest",
+    "ExportRequest", "ExportResult", "PromoteRequest",
     "ContextRequest", "ContextResult",
     "MaintenanceRequest", "MaintenanceResult",
     "ToolDefinition", "ToolCall", "ToolResult",
+    "BrowseItem", "to_browse_item",
 ]
