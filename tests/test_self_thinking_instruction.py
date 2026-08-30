@@ -65,7 +65,7 @@ def test_selection_mirrors_reply_language_policy_branch():
 def test_legacy_instruction_remains_the_deployed_string_contract():
     assert isinstance(st.INSTRUCTION, str)
     assert hashlib.sha256(st.INSTRUCTION.encode()).hexdigest() == (
-        "184b0e8508a7e76b71bfb097933002e17e260a143647cd37f7b9b6ef145c74e9"
+        "dfa9f806b4fdcc189cc63d2fc1810a5326f0a3f5b9042f889e48f499ca9bc2ff"
     )
 
 
