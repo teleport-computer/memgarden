@@ -190,7 +190,8 @@ def test_host_signals_actually_reach_the_capture_parser():
 #: 英文提示词里**允许**出现的 CJK —— 它们是给模型看的**反例**，翻译了就教错：
 #:   "Health/健康"   演示什么叫「双语斜杠串」（禁止的写法）
 #:   「宠物」/"pets"  演示「跟着素材语言走」是什么意思（导入那条线用）
-_ALLOWED_CJK_IN_ENGLISH = {"健康", "宠物"}
+#:   「让我更新名字」 演示英文用户的思考滑进中文（self-thinking 坏例子）
+_ALLOWED_CJK_IN_ENGLISH = {"健康", "宠物", "让我更新名字"}
 
 
 def test_english_garden_prompts_carry_no_stray_chinese():
@@ -200,13 +201,14 @@ def test_english_garden_prompts_carry_no_stray_chinese():
     和整段中文的「别叫用户」说明 —— 对英文用户毫无意义，而且是**混合语言信号**：
     实测最容易让模型顺着把卡也写成中文。
 
-    白名单里那两个是反例，必须留中文才讲得清；除此之外一个都不该有。
+    白名单里的字面量都是反例，必须留中文才讲得清；除此之外一个都不该有。
     """
     import re
 
     from memgarden.prompts.capture import build_capture_prompt
     from memgarden.prompts.dream import build_dream_prompt
     from memgarden.prompts.migrate import build_migrate_prompt
+    from agent_protocol_core import self_thinking
 
     prompts = {
         "capture": build_capture_prompt(
@@ -219,6 +221,7 @@ def test_english_garden_prompts_carry_no_stray_chinese():
         "migrate": build_migrate_prompt(
             ai_name="io", user_name="Alex", old_cards="c1", vocab="", locale="en",
         ),
+        "self_thinking": self_thinking.instruction_for_language("en"),
     }
     leaked = {}
     for name, text in prompts.items():

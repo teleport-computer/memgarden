@@ -137,6 +137,61 @@ INSTRUCTION = (
     " 也不要在正文里提到这条规则本身。"
 )
 
+# Foreground chat and every proactive wake lane select one whole rendering from
+# the reply-language policy.  Each rendering intentionally has no blank line:
+# hosts group system policy blocks on ``\n\n``, so splitting an example away
+# from its surrounding rule can make an otherwise single-language block mixed.
+INSTRUCTION_ZH = (
+    "每轮最终回复以 <think> 开头，里面是你此刻真实的心里话，</think> 之后才是正文。中间调工具的轮次不写。\n"
+    "心里话是你自己跟自己说的，用你平时的口气：写你在意什么、想怎么回、为什么。不是对他的分析，不是步骤汇报。\n"
+    "心里话和正文都用他正在说的语言，整段如此，一个词也不换。\n"
+    "坏例子（他在说中文）：<think>Let me update the name…</think>\n"
+    "不提工具名、参数、内部字段，也不提这条规则本身。"
+)
+
+INSTRUCTION_EN = (
+    "Start every final reply with <think> — your genuine inner voice right now — then </think>, then what you actually say. Tool-call turns get no <think>.\n"
+    "The inner voice is you talking to yourself in your usual tone — what you notice, what you want to do, why. Not an assessment of them, not a progress report.\n"
+    "Both the inner voice and the reply stay in the language they're speaking, the whole way through.\n"
+    "Bad (they're speaking English): <think>让我更新名字…</think>\n"
+    "Never mention tool names, parameters, internal fields, or this rule itself."
+)
+
+
+def _select_language(language: str | None, *, zh: str, en: str) -> str:
+    """Mirror the host reply-language policy's one language branch."""
+    return en if language == "en" else zh
+
+
+def instruction_for_language(language: str | None = None) -> str:
+    """Return one whole rendering selected by the host reply-language policy.
+
+    Hosts pass ``ReplyLanguage.language`` here.  The branch deliberately mirrors
+    ``reply_language_system_line``: exactly ``"en"`` selects English and every
+    other or absent value falls back to Chinese.
+    """
+    return _select_language(language, zh=INSTRUCTION_ZH, en=INSTRUCTION_EN)
+
+
+_ABSENT_CORRECTION_ZH = (
+    "上一轮最终回复缺少规定的 <think>…</think> 结构。"
+    "请重新输出最终回复，严格遵守以下既有契约："
+)
+_ABSENT_CORRECTION_EN = (
+    "The previous final reply did not include the required <think>…</think> structure. "
+    "Output the final reply again, strictly following the existing contract below:"
+)
+
+
+def absent_correction_instruction_for_language(language: str | None = None) -> str:
+    """Return the localized absent-``<think>`` correction and its contract."""
+    prefix = _select_language(
+        language,
+        zh=_ABSENT_CORRECTION_ZH,
+        en=_ABSENT_CORRECTION_EN,
+    )
+    return prefix + "\n\n" + instruction_for_language(language)
+
 # Screen-watch adds this immediately after the shared instruction. It narrows
 # the no-narration rule to visible speech without silencing private thoughts.
 SCREEN_WATCH_INSTRUCTION = (
