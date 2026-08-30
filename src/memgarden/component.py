@@ -35,6 +35,8 @@ from typing import Any
 from .contracts import (
     Actor,
     BrowseItem,
+    MigrateRequest,
+    MigrateResult,
     CuratedWriteRequest,
     ExportRequest,
     ExportResult,
@@ -61,6 +63,7 @@ from .prompts.capture import (
     capture_semantic_retry_reasons,
     parse_capture_cards,
 )
+from .prompts.migrate import build_migrate_prompt, parse_migrated_cards
 from .prompts.dream import (
     build_dream_prompt,
     build_dream_retry_prompt,
@@ -90,6 +93,8 @@ class GardenCapabilities:
     export: bool = True
     #: private → shared 的显式提升。
     promote: bool = True
+    #: 把老格式的卡升级成当前形状。
+    migrate: bool = True
     #: 历史导入**专用的判断尺子**。
     #:
     #: ⚠️ 现在是 ``False``：``policies`` 里有 ``history_import`` 档，但
@@ -650,6 +655,69 @@ class GardenComponent:
                 idempotency_key=request.idempotency_key))],
             cards=[card],
             trace={"source": "curated", "chars": len(text), "mount": request.mount},
+        )
+
+    def migrate(self, request: MigrateRequest) -> MigrateResult:
+        """把一批老格式的卡升级成当前的形状。
+
+        **不判断「值不值得记」** —— 这批已经是用户的记忆了，拿落卡那把
+        克制的尺子来量会把它们判掉。要判断的是怎么翻译成现在的结构。
+
+        ``allowed_ids`` 是必须的：模型可能凭空造 id，那会把不存在的卡
+        「升级」成新内容，或者覆盖别的卡。
+        """
+        if not str(request.locale or "").strip():
+            return MigrateResult(error="locale_required")
+        if not request.allowed_ids:
+            # 空白名单等于「随便升级什么都行」—— 拒绝，而不是放行。
+            return MigrateResult(error="allowed_ids_required")
+
+        prompt = build_migrate_prompt(
+            ai_name=request.ai_name,
+            user_name=request.user_name,
+            old_cards=request.old_cards,
+            vocab=request.vocab,
+            locale=request.locale,
+        )
+        self._step(Step(kind="prompt_built", purpose="migrate", attempt=0,
+                        detail={"prompt_chars": len(prompt),
+                                "cards": len(request.allowed_ids)},
+                        prompt=prompt))
+        raw = self._model.complete(prompt, purpose="migrate")
+        self._step(Step(kind="model_called", purpose="migrate", attempt=1,
+                        detail={"reply_chars": len(raw or "")}, reply=raw))
+        upgrades, unmigrated, err = parse_migrated_cards(
+            raw, allowed_ids=set(request.allowed_ids), signals=self._signals
+        )
+        self._step(Step(kind="done", purpose="migrate", attempt=1,
+                        detail={"upgrades": len(upgrades),
+                                "unmigrated": len(unmigrated), "error": err}))
+        return MigrateResult(
+            upgrades=upgrades,
+            unmigrated_ids=list(unmigrated),
+            error=err,
+            trace={"batch": len(request.allowed_ids), "upgraded": len(upgrades),
+                   "unmigrated": len(unmigrated), "locale": request.locale},
+        )
+
+    async def amigrate(self, request: MigrateRequest) -> MigrateResult:
+        """:meth:`migrate` 的异步版。判断逻辑同一份 —— 只有等模型的方式不同。"""
+        if not str(request.locale or "").strip():
+            return MigrateResult(error="locale_required")
+        if not request.allowed_ids:
+            return MigrateResult(error="allowed_ids_required")
+        prompt = build_migrate_prompt(
+            ai_name=request.ai_name, user_name=request.user_name,
+            old_cards=request.old_cards, vocab=request.vocab, locale=request.locale,
+        )
+        raw = await self._model.complete(prompt, purpose="migrate")
+        upgrades, unmigrated, err = parse_migrated_cards(
+            raw, allowed_ids=set(request.allowed_ids), signals=self._signals
+        )
+        return MigrateResult(
+            upgrades=upgrades, unmigrated_ids=list(unmigrated), error=err,
+            trace={"batch": len(request.allowed_ids), "upgraded": len(upgrades),
+                   "unmigrated": len(unmigrated), "locale": request.locale},
         )
 
     # -- 导出 / 提升 ------------------------------------------------------ #

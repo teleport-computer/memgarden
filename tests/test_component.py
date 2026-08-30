@@ -25,6 +25,7 @@ from memgarden import (
     ContextRequest,
     GardenComponent,
     MaintenanceRequest,
+    MigrateRequest,
     ToolCall,
 )
 from memgarden.selection import Chain, RecentStage
@@ -694,3 +695,71 @@ def test_maintenance_session_carries_the_same_guard() -> None:
     while session.next_prompt() is not None:
         session.feed(tomb)
     assert session.result().error
+
+
+# --------------------------------------------------------------- 迁移
+
+def _upgrades(*rows: dict) -> str:
+    return json.dumps({"upgrades": list(rows)}, ensure_ascii=False)
+
+
+OLD_CARD_UPGRADE = {
+    "id": "m_1", "bucket": "工作", "threads": ["面试"],
+    "summary": "面试第三次挂在算法题",
+    "content": "今年第三次没过，都卡在算法题上，他开始怀疑自己适不适合这行。",
+}
+
+
+def test_migrate_upgrades_old_cards() -> None:
+    out = GardenComponent(model=FakeModel(_upgrades(OLD_CARD_UPGRADE))).migrate(
+        MigrateRequest(old_cards="- [m_1] 面试挂了", allowed_ids=("m_1",),
+                       locale="zh-Hans"))
+    assert out.error is None
+    assert out.upgrades[0]["id"] == "m_1"
+    assert out.upgrades[0]["bucket"] == "工作"
+
+
+def test_migrate_refuses_an_empty_allowlist() -> None:
+    """空白名单等于「随便升级什么都行」。
+
+    模型可能凭空造 id —— 那会把不存在的卡「升级」成新内容，或者覆盖别的卡。
+    拒绝，而不是放行。
+    """
+    out = GardenComponent(model=FakeModel()).migrate(
+        MigrateRequest(old_cards="x", locale="zh-Hans"))
+    assert out.error == "allowed_ids_required"
+
+
+def test_migrate_drops_ids_that_were_not_in_the_batch() -> None:
+    """模型返回了不该动的卡 —— 那张必须被丢掉，不能跟着升级。"""
+    out = GardenComponent(model=FakeModel(_upgrades(
+        OLD_CARD_UPGRADE, {**OLD_CARD_UPGRADE, "id": "m_999"}))).migrate(
+        MigrateRequest(old_cards="- [m_1] x", allowed_ids=("m_1",), locale="zh-Hans"))
+    assert [u["id"] for u in out.upgrades] == ["m_1"]
+
+
+def test_migrate_reports_cards_it_could_not_upgrade() -> None:
+    """模型对某几张没把握 —— 这**不是错误**，是「下一轮再试」。
+
+    和整批失败必须分得开：整批失败时 error 非空，宿主据此让 job 失败；
+    个别没升级只是下轮重试，游标照常推进。
+    """
+    out = GardenComponent(model=FakeModel(_upgrades(OLD_CARD_UPGRADE))).migrate(
+        MigrateRequest(old_cards="- [m_1] x\n- [m_2] y",
+                       allowed_ids=("m_1", "m_2"), locale="zh-Hans"))
+    assert out.error is None
+    assert out.unmigrated_ids == ["m_2"]
+
+
+def test_migrate_needs_a_locale_too() -> None:
+    out = GardenComponent(model=FakeModel()).migrate(
+        MigrateRequest(old_cards="x", allowed_ids=("m_1",)))
+    assert out.error == "locale_required"
+
+
+def test_async_migrate_matches_sync() -> None:
+    reply = _upgrades(OLD_CARD_UPGRADE)
+    req = dict(old_cards="- [m_1] x", allowed_ids=("m_1",), locale="zh-Hans")
+    sync = GardenComponent(model=FakeModel(reply)).migrate(MigrateRequest(**req))
+    a = _run(GardenComponent(model=AsyncFakeModel(reply)).amigrate(MigrateRequest(**req)))
+    assert a.upgrades == sync.upgrades and a.unmigrated_ids == sync.unmigrated_ids

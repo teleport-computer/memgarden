@@ -233,6 +233,52 @@ class CuratedWriteRequest:
 
 
 # --------------------------------------------------------------------------- #
+# 迁移：把老格式的卡升级成现在的形状
+# --------------------------------------------------------------------------- #
+
+@dataclass
+class MigrateRequest:
+    """把一批老卡升级成当前的卡片形状。
+
+    和落卡的区别：**这批卡已经是记忆了**，不需要判断「值不值得记」——
+    要判断的是「怎么把它翻译成现在的结构」（归哪个桶、拉哪些线索、
+    摘要怎么写）。拿落卡那把「什么值得记」的尺子来量是错的，
+    会把用户已有的记忆判掉。
+    """
+
+    old_cards: str
+    #: 只许升级这批 id。**必填** —— 模型可能凭空造 id，
+    #: 那会把不存在的卡「升级」成新内容，或者覆盖别的卡。
+    allowed_ids: tuple[str, ...] = ()
+    #: 已有的桶名和线索，渲染好的。让升级后的卡向现有词汇收敛，
+    #: 而不是每张自己发明一个桶。
+    vocab: str = ""
+    actor: Actor = field(default_factory=Actor)
+    mount: Mount = DEFAULT_MOUNT
+    locale: str = ""
+    ai_name: str = ""
+    user_name: str = ""
+    idempotency_key: str = ""
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass
+class MigrateResult:
+    """升级结果。
+
+    ``unmigrated_ids`` 不是错误 —— 模型可能对某几张没把握。这些卡
+    **下一轮再试**，宿主据此决定重试还是标记跳过。
+    但它必须和「整批失败」分得开：整批失败时 ``error`` 非空。
+    """
+
+    upgrades: list[dict] = field(default_factory=list)
+    unmigrated_ids: list[str] = field(default_factory=list)
+    error: str | None = None
+    trace: dict = field(default_factory=dict)
+    schema_version: int = SCHEMA_VERSION
+
+
+# --------------------------------------------------------------------------- #
 # 导出与用户删除
 # --------------------------------------------------------------------------- #
 
@@ -470,6 +516,7 @@ __all__ = [
     "CaptureRequest", "CaptureResult",
     "ImportRequest", "CuratedWriteRequest",
     "ExportRequest", "ExportResult", "PromoteRequest",
+    "MigrateRequest", "MigrateResult",
     "ContextRequest", "ContextResult",
     "MaintenanceRequest", "MaintenanceResult",
     "ToolDefinition", "ToolCall", "ToolResult",
