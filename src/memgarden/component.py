@@ -282,7 +282,11 @@ class _CapturePlan:
             self._stage = "semantic_retry"
             self.owner._step(Step(
                 kind="retrying", purpose="capture", attempt=self.calls,
-                detail={"why": "semantic", "reasons": len(reasons)},
+                # ``kind`` 必须和 format 那条同样标出来 —— 宿主靠它区分
+                # 「这次重问是被什么触发的」。漏了就会退回默认值 format，
+                # 一次语义打回在宿主的指标里就成了格式打回。
+                detail={"kind": "semantic", "why": "semantic",
+                        "reasons": len(reasons)},
             ))
         else:
             self._stage = "done"
