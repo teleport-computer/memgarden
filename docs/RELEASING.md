@@ -72,3 +72,17 @@ CI 里 `packages-dir: out/` 一次上传两个，PyPI 按依赖解析，不用�
 
 看起来严苛，但代价对比很清楚：多发一个版本号 vs 用户装到不匹配的组合、
 在运行时才炸。
+
+## 🔴 发布顺序闸：不要给 publish 步骤加 `continue-on-error`
+
+`publish-memgarden` 的 `needs` 指向 `publish-core`，用意是 **core 一定先上 PyPI**
+（memgarden 依赖它的精确版本）。
+
+但 `continue-on-error: true` 会让 job 在步骤失败时仍判定为 success，
+`needs` 照样放行 —— **顺序闸被直接架空**。
+
+v0.12.2 就是这么翻车的：core 因为 PyPI 侧还没注册而发布失败，job 却是绿的，
+memgarden 照发不误，结果 PyPI 上躺了一个 `pip install memgarden` 装不上的版本
+（依赖 `agent-protocol-core==0.12.2` 不存在）。
+
+让它红是安全的：GitHub Release 在 `build` job 里已经发完了，publish 失败不影响它。
