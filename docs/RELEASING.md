@@ -18,19 +18,35 @@ git commit -am "v0.13.0: ..." && git tag v0.13.0 && git push origin HEAD --tags
 > 装的时候不会去核对是谁发的。OIDC 每次签发短期凭证，作用域限定到
 > 「这个仓库的这个 workflow」。
 
-在 <https://pypi.org/manage/account/publishing/> 各加一次，**两个包都要**：
+在 <https://pypi.org/manage/account/publishing/> 各加一次，**两个包都要**，
+注意 Environment name **两条不一样**：
 
-| 字段 | 值 |
-|---|---|
-| PyPI Project Name | `memgarden`（另一次填 `agent-protocol-core`） |
-| Owner | `teleport-computer` |
-| Repository name | `memgarden` |
-| Workflow name | `release.yml` |
-| Environment name | 留空 |
+| 字段 | memgarden | agent-protocol-core |
+|---|---|---|
+| PyPI Project Name | `memgarden` | `agent-protocol-core` |
+| Owner | `teleport-computer` | `teleport-computer` |
+| Repository name | `memgarden` | `memgarden` |
+| Workflow name | `release.yml` | `release.yml` |
+| **Environment name** | **`pypi-memgarden`** | **`pypi-core`** |
 
-配之前 PyPI 那一步会失败，但**失败方向是安全的**：发不出去，
-而不是用一份错凭据发出去。GitHub Release 那步在它后面，不受影响
-（`continue-on-error: true`）。
+### ⚠️ Environment 不能留空，两条也不能一样
+
+PyPI 的 Trusted Publisher 按「owner + 仓库 + workflow + environment」匹配。
+两个包在**同一个仓库、同一个 workflow**里 —— 都不填 environment 的话，
+两条配置除了项目名完全一样，PyPI 判为歧义，直接拒绝注册第二条：
+
+```
+A pending trusted publisher matching this configuration has already been
+registered for a different project name.
+```
+
+这就是为什么 `release.yml` 把 PyPI 发布拆成了 `publish-core` 和
+`publish-memgarden` 两个 job，各带一个 environment。改 environment 名字的话
+两边要一起改，否则匹配不上（表现是 `invalid-publisher`）。
+
+顺带解决了发布顺序：`publish-memgarden` 的 `needs` 指向 `publish-core`，
+core 一定先上 PyPI —— memgarden 依赖它的精确版本，反过来的话
+PyPI 上会短暂存在一个装不上的 memgarden。
 
 ### 第一次发成功之后
 

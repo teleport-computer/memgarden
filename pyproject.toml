@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memgarden"
-version = "0.12.1"
+version = "0.12.2"
 description = "记忆的编辑判断：什么值得记、归哪个桶、几张卡、什么时候该整理。不调模型、不碰存储。"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ classifiers = [
 # 聊天与记忆两边共用 —— 见它的 __init__ 说明为什么不并进来。
 # 两个包**锁步发版**（发布闸强制版本一致），所以这里也锁到同一个次版本 ——
 # 宽约束会让人装到不匹配的组合，而它们共享内部约定，不保证跨版本兼容。
-dependencies = ["agent-protocol-core==0.12.1"]
+dependencies = ["agent-protocol-core==0.12.2"]
 
 [project.urls]
 Homepage = "https://github.com/teleport-computer/memgarden"
