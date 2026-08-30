@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from .contracts import (
     Actor,
@@ -554,6 +554,50 @@ class GardenComponent:
                 return plan.finish()
             reply = self._model.complete(ask, purpose="capture")
             plan.feed(reply, truncated=_is_truncated(reply))
+
+    def recapture_with_feedback(
+        self, request: CaptureRequest, reasons: Sequence[str],
+    ) -> CaptureResult:
+        """拿宿主才知道的理由，再问模型一次。
+
+        ## 为什么内核自己做不到
+
+        ``capture()`` 里的语义重问只用**本地可证**的理由：「你说要覆盖旧卡，
+        却没给 target_id」—— 这个不用查库就知道是错的。
+
+        但还有一类只有宿主知道：卡里给的 target_id **指向一张不属于这个人、
+        或已经不存在的卡**。内核没有库、也不该有，判不了。宿主试着落库、
+        被自己的所有权闸挡回来之后，才拿到这个事实。
+
+        这个方法就是那条回路：宿主把被挡回的理由交回来，内核照原来的提示词
+        再问一次，并做同样的解析和过闸。
+
+        ## 为什么不让宿主自己拼这个提示词
+
+        它就会变成第二份编排 —— 提示词怎么措辞、重问几次、解析用不用严格模式，
+        全都得在宿主那边再写一遍，然后和内核这份慢慢漂开。
+        宿主该交的是「发生了什么」，不是「该怎么问」。
+
+        只问一次，不再递归重问：宿主那边已经有自己的重问预算了。
+        """
+        plan = _CapturePlan(self, request)
+        if plan.rejected is not None:
+            return plan.rejected
+        reasons = [str(r) for r in reasons if str(r).strip()]
+        if not reasons:
+            return plan.finish()
+        ask = build_capture_semantic_retry_prompt(plan.prompt, reasons)
+        self._step(Step(
+            kind="prompt_built", purpose="capture", attempt=0,
+            detail={"prompt_chars": len(ask), "why": "host_feedback",
+                    "reasons": len(reasons)},
+            prompt=ask,
+        ))
+        reply = self._model.complete(ask, purpose="capture")
+        plan._stage = "semantic_retry"
+        plan.feed(reply, truncated=_is_truncated(reply))
+        plan._stage = "done"
+        return plan.finish()
 
     async def acapture(self, request: CaptureRequest) -> CaptureResult:
         """:meth:`capture` 的异步版 —— 逐步等价，**判断逻辑是同一份**。

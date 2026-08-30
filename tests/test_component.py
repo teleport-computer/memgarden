@@ -38,10 +38,12 @@ class FakeModel:
         self.replies = list(replies) or ["{}"]
         self.calls = 0
         self.purposes: list[str] = []
+        self.prompts: list[str] = []
 
     def complete(self, prompt: str, *, purpose: str = "") -> str:
         self.calls += 1
         self.purposes.append(purpose)
+        self.prompts.append(prompt)
         return self.replies[min(self.calls - 1, len(self.replies) - 1)]
 
 
@@ -785,3 +787,36 @@ def test_async_migrate_matches_sync() -> None:
     sync = GardenComponent(model=FakeModel(reply)).migrate(MigrateRequest(**req))
     a = _run(GardenComponent(model=AsyncFakeModel(reply)).amigrate(MigrateRequest(**req)))
     assert a.upgrades == sync.upgrades and a.unmigrated_ids == sync.unmigrated_ids
+
+
+def test_the_host_can_hand_back_a_reason_only_it_knows() -> None:
+    """服务端所有权闸挡回来之后，宿主能把理由交回内核再问一次。
+
+    这类理由内核判不了：卡里给的 target_id 指向一张不属于这个人、或已经不
+    存在的卡 —— 没有库就无从知道。宿主试着落库被挡回，才拿到这个事实。
+
+    交回来的是「发生了什么」，不是「该怎么问」—— 提示词怎么措辞、解析用不用
+    严格模式，仍然归内核。宿主自己拼的话就是第二份编排，慢慢和这份漂开。
+    """
+    fixed = _cards_reply({"action": "add", "bucket": "健康", "threads": ["体检"],
+                          "summary": "下周三体检",
+                          "content": "预约了下周三上午的体检。"})
+    model = FakeModel(fixed)
+    out = GardenComponent(model=model).recapture_with_feedback(
+        CaptureRequest(window="x", locale="zh-Hans"),
+        ["target_id 指向的卡不属于这个用户，请改成 action=add。"],
+    )
+    assert not out.error
+    assert len(out.mutations) == 1
+    assert out.mutations[0]["op"] == "add"
+    # 重问用的是内核自己的语义重问提示词，宿主给的理由要出现在里面
+    assert "不属于这个用户" in model.prompts[0]
+
+
+def test_no_reasons_means_no_model_call() -> None:
+    """宿主没给理由就别问模型 —— 白烧一次调用，还可能把好卡问坏。"""
+    model = FakeModel(_cards_reply(GOOD_CARD))
+    out = GardenComponent(model=model).recapture_with_feedback(
+        CaptureRequest(window="x", locale="zh-Hans"), [])
+    assert not out.mutations
+    assert model.calls == 0
