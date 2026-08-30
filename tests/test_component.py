@@ -580,14 +580,13 @@ def test_a_session_with_a_bad_request_ends_immediately() -> None:
     assert session.result().error == "locale_required"
 
 
-def test_a_supersede_that_still_has_no_target_after_the_retry_fails() -> None:
-    """重问之后还是没给 target_id 的话，**必须报失败**，不能退回上一版。
+def test_a_supersede_that_still_has_no_target_after_the_retry_is_dropped() -> None:
+    """重问之后还是没给 target_id 的那张卡，**丢掉它**——不是整轮作废。
 
-    上一版正是那张「要覆盖旧卡但没说覆盖哪张」的卡。保留它等于把一条
-    执行不了的指令写出去：宿主拿着空的 target_id 去 supersede，
-    要么静默无效、要么覆盖错东西。
+    这张卡不能留：它是「要覆盖旧卡但没说覆盖哪张」，交出去宿主会拿着空的
+    target_id 去 supersede，要么静默无效、要么覆盖错东西。
 
-    「这轮没落卡」远比「写出一条执行不了的指令」轻。
+    但也不能因为它就把整轮扔了 —— 见下一条用例：同一个窗口里的好卡必须活下来。
     """
     bad = _cards_reply({"action": "supersede", "target_id": "",
                         "summary": "他改吃辣了",
@@ -595,9 +594,32 @@ def test_a_supersede_that_still_has_no_target_after_the_retry_fails() -> None:
                         "bucket": "偏好与边界"})
     out = GardenComponent(model=FakeModel(bad, bad)).capture(
         CaptureRequest(window="x", locale="zh-Hans"))
-    assert out.error == "semantic_validation_failed_after_retry"
+    assert not out.error
     assert not out.mutations
-    assert not out.nothing_worth_keeping
+    # 关键：绝不能吐出 target_id 为空的 supersede
+    assert not [m for m in out.mutations if m.get("op") == "supersede"]
+
+
+def test_one_bad_supersede_does_not_take_the_good_cards_down_with_it() -> None:
+    """一张坏卡不许连累同一窗口里的好卡。
+
+    我一度把这里写成「整轮作废」，代价是用户看到「这段对话什么都没记住」，
+    而且不报错 —— 丢一张和丢一整轮差一个量级。
+    """
+    both = _cards_reply(
+        {"action": "supersede", "target_id": "",
+         "summary": "他改吃辣了", "content": "最近开始能吃一点辣了。",
+         "bucket": "偏好与边界"},
+        {"action": "add",
+         "summary": "下周三体检", "content": "预约了下周三上午的体检。",
+         "bucket": "健康"},
+    )
+    out = GardenComponent(model=FakeModel(both, both)).capture(
+        CaptureRequest(window="x", locale="zh-Hans"))
+    assert not out.error
+    assert len(out.mutations) == 1, "好卡应该活下来"
+    assert out.mutations[0]["op"] == "add"
+    assert out.mutations[0]["card"]["summary"] == "下周三体检"
 
 
 def test_a_supersede_fixed_on_the_retry_is_accepted() -> None:

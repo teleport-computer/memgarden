@@ -61,6 +61,7 @@ from .prompts.capture import (
     build_capture_retry_prompt,
     build_capture_semantic_retry_prompt,
     capture_semantic_retry_reasons,
+    card_fails_semantic_check,
     parse_capture_cards,
 )
 from .prompts.migrate import build_migrate_prompt, parse_migrated_cards
@@ -226,26 +227,34 @@ class _CapturePlan:
         )
 
         if self._stage == "semantic_retry":
-            # 语义重问失败要**报失败**，不能退回上一版。
+            # 重问之后还是坏的 → **只丢坏的那几张，其余照收**。
             #
-            # 上一版正是「要覆盖旧卡但没说覆盖哪张」那种卡 —— 保留它等于
-            # 把一条执行不了的指令写出去：宿主会拿着空的 target_id 去 supersede，
-            # 结果要么静默无效、要么覆盖错东西。
+            # 坏卡不能留：它是「要覆盖旧卡但没说覆盖哪张」，照原样交出去
+            # 宿主会拿着空的 target_id 去 supersede —— 要么静默无效，
+            # 要么覆盖错东西。（`_to_mutation` 会老老实实生成
+            # `{"op": "supersede", "target_id": ""}`，这是逐条比对宿主两条
+            # 运行时时发现的真 bug。）
             #
-            # 这条是照宿主 io 的托管路径对齐的（它返回
-            # ``semantic_validation_failed_after_retry`）。组件原本的写法更宽松，
-            # 逐条比对两条路时发现的 —— 宽松在这儿是错的，
-            # 因为「写出一条执行不了的指令」比「这轮没落卡」严重得多。
+            # 但整轮作废也不对，我一度就是这么写的：同一个窗口里另外三张好卡
+            # 跟着一起没了，用户看到的是「这段对话什么都没记住」，还不报错。
+            # 丢一张和丢一整轮，对用户的代价差一个量级。
+            #
+            # ⚠️ 宿主 io 的两条运行时在这件事上**本来就不一致**（V1 丢卡继续、
+            # V2 整轮失败），那是它那边的既有分歧，不该由这个组件替它拍板。
+            # 组件取更保守的那个：不丢用户的记忆，也不吐出执行不了的指令。
             self.retried += 1
             self._stage = "done"
             if err:
                 self.err = str(err)
                 return
-            if capture_semantic_retry_reasons(cards):
-                self.err = "semantic_validation_failed_after_retry"
-                self.cards = []
-                return
-            self.cards, self.err = cards, None
+            kept = [c for c in cards if not card_fails_semantic_check(c)]
+            dropped = len(cards) - len(kept)
+            if dropped:
+                self.owner._step(Step(
+                    kind="dropped", purpose="capture", attempt=self.calls,
+                    detail={"why": "semantic", "cards": dropped},
+                ))
+            self.cards, self.err = kept, None
             return
 
         self.cards, self.err = cards, err

@@ -231,20 +231,36 @@ def build_capture_semantic_retry_prompt(prompt: str, reasons: list[str]) -> str:
     )
 
 
+def card_fails_semantic_check(card: object) -> bool:
+    """这一张卡是不是「要覆盖旧卡但没说覆盖哪张」。
+
+    单独拎出来是为了让宿主能**只丢这一张**，而不是整轮作废 —— 见
+    ``capture_semantic_retry_reasons`` 的说明。
+    """
+    if not isinstance(card, dict):
+        return False
+    action = str(card.get("action") or "").strip().lower()
+    return action in {"merge", "supersede"} and not str(card.get("target_id") or "").strip()
+
+
 def capture_semantic_retry_reasons(cards: list[dict]) -> list[str]:
     """Return content-free prompt feedback for locally provable bad actions.
 
     Only a missing target is knowable before the durable commit.  A stale or
     foreign target is deliberately left to the server-side ownership check;
     guessing from a bounded prompt index could reject a valid older card.
+
+    ## 重问之后还是坏的，该怎么办
+
+    **丢掉那几张，留下其余的** —— 不要整轮作废。
+
+    一张「要覆盖但没说覆盖哪张」的卡如果照原样交出去，宿主会拿着空的
+    target_id 去 supersede：要么静默无效，要么覆盖错东西。所以它必须被丢掉。
+
+    但整轮作废是另一个极端：同一个窗口里另外三张好卡也一起没了，用户看到的是
+    「这段对话我什么都没记住」，而且不报错。丢一张和丢一整轮，对用户的代价差很多。
     """
-    if any(
-        str(card.get("action") or "").strip().lower()
-        in {"merge", "supersede"}
-        and not str(card.get("target_id") or "").strip()
-        for card in cards or []
-        if isinstance(card, dict)
-    ):
+    if any(card_fails_semantic_check(card) for card in cards or []):
         return [
             "你要求覆盖旧卡，但没有给 target_id；"
             "请从上方记忆索引复制确切 ID，或改成 action=add。"

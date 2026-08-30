@@ -19,8 +19,8 @@ pip install memgarden
 想验来源的话，每次发版的 wheel 都同时挂在 GitHub Release 上，带**构建出处凭证**：
 
 ```bash
-gh release download v0.12.3 --repo teleport-computer/memgarden --pattern '*.whl'
-gh attestation verify memgarden-0.12.3-py3-none-any.whl --repo teleport-computer/memgarden
+gh release download v0.12.5 --repo teleport-computer/memgarden --pattern '*.whl'
+gh attestation verify memgarden-0.12.5-py3-none-any.whl --repo teleport-computer/memgarden
 ```
 
 > 每个 wheel 都由 GitHub Actions 从公开 tag 构建，PyPI 走 Trusted Publishing，
