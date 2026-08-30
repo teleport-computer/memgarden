@@ -340,11 +340,13 @@ def test_the_top_level_actually_exports_something():
 def test_the_readme_install_command_matches_how_we_actually_publish():
     """README 教的装法必须真的能用。
 
-    这条是拿实际问题换来的：README 一直写着 ``pip install memgarden``，
-    而这个包**从来没发到 PyPI**（连它依赖的 agent-protocol-core 也没有）。
+    这条是拿实际问题换来的：README 一度写着 ``pip install memgarden``，
+    而这个包当时**根本没发到 PyPI**（连它依赖的 agent-protocol-core 也没有）。
     照着做的人第一步就失败 —— 而这恰好是别人对这个项目的第一印象。
 
-    发到 PyPI 之后，把这条测试改成断言 ``pip install memgarden`` 就行。
+    0.12.2 起两个包都在 PyPI 上了，所以现在断言的是正过来的那一面：
+    README 必须教 ``pip install memgarden``，别再退回 Release wheel 的
+    长 URL（那串带死版本号，改版本就烂）。
     """
     import pathlib
     import re
@@ -354,14 +356,12 @@ def test_the_readme_install_command_matches_how_we_actually_publish():
     assert install_block, "README 里没有安装说明"
     body = install_block.group(1)
 
-    assert "pip install" in body
-    # 没发 PyPI 之前，装法必须指向 Release 的 wheel，而且**两个包都要提**
-    if "pypi" not in body.lower():
-        assert "releases" in body, "README 教的装法既不是 PyPI 也不是 Release wheel"
-        assert "agent_protocol_core" in body, (
-            "只写了 memgarden —— 但它依赖同源的 agent-protocol-core，"
-            "只装一个会以 ResolutionImpossible 失败"
-        )
+    assert "pip install memgarden" in body, (
+        "两个包都在 PyPI 上了，README 的第一条装法就该是 pip install memgarden"
+    )
+    assert "releases/latest/download" not in body, (
+        "别把 Release wheel 的长 URL 当主装法 —— 里面带死版本号，改版本就烂"
+    )
 
 
 def test_the_demo_agent_only_touches_the_top_level():
