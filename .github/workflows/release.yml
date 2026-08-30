@@ -65,9 +65,21 @@ jobs:
         run: |
           uv build
           (cd packages/agent-protocol-core && uv build)
-          mkdir -p out
+          # out/ 给 Release 和 attestation（两个包一起）；
+          # out-core/ 和 out-mem/ 给 PyPI —— **必须分开**，见下面 publish 那两个 job。
+          mkdir -p out out-core out-mem
           cp dist/* out/
           cp packages/agent-protocol-core/dist/* out/
+          cp packages/agent-protocol-core/dist/* out-core/
+          cp dist/* out-mem/
+
+      - name: 传产物给发布 job
+        uses: actions/upload-artifact@v4
+        with:
+          name: dists
+          path: |
+            out-core/
+            out-mem/
 
       - name: 生成构建出处凭证
         uses: actions/attest-build-provenance@v1
@@ -83,28 +95,6 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           sha256sum out/*
 
-      - name: 发布到 PyPI
-        # ⚠️ **Trusted Publishing（OIDC），仓库里不存任何 token。**
-        #
-        # 用 token 的话它就是一份长期有效的发布凭据，躺在 GitHub secrets 里：
-        # 泄露一次，任何人都能往这两个包名下推任意代码，而下游是靠包名信任的。
-        # OIDC 每次签发短期凭证，作用域限定到「这个仓库的这个 workflow」。
-        #
-        # 需要在 PyPI 那边先配一次（每个包各一次，见 README 的发布一节）：
-        #   Owner: teleport-computer / Repo: memgarden
-        #   Workflow: release.yml / Environment: pypi
-        #
-        # 没配之前这一步会失败 —— **失败方向是安全的**（发不出去，
-        # 而不是用一份错凭据发出去）。Release 那步在下面，不受影响。
-        #
-        # 顺序：core 必须先发。memgarden 依赖它的精确版本，
-        # 反过来的话 PyPI 上会短暂存在一个装不上的 memgarden。
-        continue-on-error: true
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: out/
-          skip-existing: true
-
       - name: 发布到 Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -115,3 +105,63 @@ jobs:
           else
             gh release create "$TAG" out/* --title "memgarden $TAG" --generate-notes
           fi
+
+  # --------------------------------------------------------------------------
+  # PyPI 发布拆成两个 job，各带一个 environment
+  #
+  # ## 为什么必须拆
+  #
+  # PyPI 的 Trusted Publisher 是按「owner + 仓库 + workflow + environment」匹配的。
+  # 两个包在**同一个仓库、同一个 workflow**里，如果都不填 environment，
+  # 两条配置除了项目名完全一样 —— PyPI 判为歧义，直接拒绝注册第二条：
+  #
+  #     A pending trusted publisher matching this configuration has already
+  #     been registered for a different project name.
+  #
+  # 加上不同的 environment，两条配置就能区分开了。
+  #
+  # ## 顺带解决了发布顺序
+  #
+  # memgarden 依赖 agent-protocol-core 的**精确版本**。core 先发（needs 保证），
+  # 否则 PyPI 上会短暂存在一个装不上的 memgarden。
+  #
+  # ## 仓库里仍然不存 token
+  #
+  # 走 OIDC。id-token: write 是每个 job 各自声明的 —— 顶层的 permissions
+  # 不会自动传给这里。
+
+  publish-core:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi-core
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dists
+      - name: 发布 agent-protocol-core 到 PyPI
+        # 没配 PyPI 侧时这一步会失败，**失败方向是安全的**：发不出去，
+        # 而不是用错凭据发出去。Release 已经在 build job 里发完了，不受影响。
+        continue-on-error: true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: out-core/
+          skip-existing: true
+
+  publish-memgarden:
+    needs: publish-core      # core 必须先在 PyPI 上，否则 memgarden 装不上
+    runs-on: ubuntu-latest
+    environment: pypi-memgarden
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dists
+      - name: 发布 memgarden 到 PyPI
+        continue-on-error: true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: out-mem/
+          skip-existing: true
