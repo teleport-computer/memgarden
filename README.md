@@ -8,16 +8,24 @@
 它**不调模型、不碰存储、不做加密** —— 那些是宿主的事。
 整个包是纯函数，零第三方依赖。
 
+从 Release 装（两个包一起 —— memgarden 依赖同源的 core），
+wheel 带**构建出处凭证**，可以自己验：
+
 ```bash
-# 还没发到 PyPI。从 Release 装（两个包一起 —— memgarden 依赖同源的 core）：
 pip install \
-  https://github.com/teleport-computer/memgarden/releases/latest/download/memgarden-0.2.0-py3-none-any.whl \
-  https://github.com/teleport-computer/memgarden/releases/latest/download/agent_protocol_core-0.2.0-py3-none-any.whl
+  https://github.com/teleport-computer/memgarden/releases/latest/download/memgarden-0.12.0-py3-none-any.whl \
+  https://github.com/teleport-computer/memgarden/releases/latest/download/agent_protocol_core-0.12.0-py3-none-any.whl
+
+gh attestation verify memgarden-0.12.0-py3-none-any.whl --repo teleport-computer/memgarden
 ```
 
-> 每个 Release 的 wheel 都由 GitHub Actions 从公开 tag 构建，
-> 带 build provenance，可以自己验：
-> `gh attestation verify <wheel> --repo teleport-computer/memgarden`
+> 每个 wheel 都由 GitHub Actions 从公开 tag 构建。凭证证明的是
+> **「这份字节确实由那个仓库的那个 workflow 编出来」** —— 有仓库写权限的人
+> 换掉一个 Release 附件，验证会失败。
+>
+> PyPI 发布已接好流水线（Trusted Publishing，仓库不存 token），
+> 等 PyPI 侧配置完成后第一次发版即生效，届时这里改成 `pip install memgarden`。
+> 见 `docs/RELEASING.md`。
 
 ```python
 from memgarden import GardenComponent, CaptureRequest

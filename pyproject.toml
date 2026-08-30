@@ -4,16 +4,35 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memgarden"
-version = "0.12.0"
+version = "0.12.1"
 description = "记忆的编辑判断：什么值得记、归哪个桶、几张卡、什么时候该整理。不调模型、不碰存储。"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 keywords = ["memory", "llm", "agent", "long-term-memory"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 
 # 内核零第三方依赖。agent-protocol-core 是同源的纯标准库小包，
 # 聊天与记忆两边共用 —— 见它的 __init__ 说明为什么不并进来。
-dependencies = ["agent-protocol-core>=0.1.0"]
+# 两个包**锁步发版**（发布闸强制版本一致），所以这里也锁到同一个次版本 ——
+# 宽约束会让人装到不匹配的组合，而它们共享内部约定，不保证跨版本兼容。
+dependencies = ["agent-protocol-core==0.12.1"]
+
+[project.urls]
+Homepage = "https://github.com/teleport-computer/memgarden"
+Source = "https://github.com/teleport-computer/memgarden"
+Issues = "https://github.com/teleport-computer/memgarden/issues"
 
 [project.optional-dependencies]
 sqlite = []          # 只用标准库 sqlite3，列在这里是为了让意图显式

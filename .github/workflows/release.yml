@@ -83,6 +83,28 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           sha256sum out/*
 
+      - name: 发布到 PyPI
+        # ⚠️ **Trusted Publishing（OIDC），仓库里不存任何 token。**
+        #
+        # 用 token 的话它就是一份长期有效的发布凭据，躺在 GitHub secrets 里：
+        # 泄露一次，任何人都能往这两个包名下推任意代码，而下游是靠包名信任的。
+        # OIDC 每次签发短期凭证，作用域限定到「这个仓库的这个 workflow」。
+        #
+        # 需要在 PyPI 那边先配一次（每个包各一次，见 README 的发布一节）：
+        #   Owner: teleport-computer / Repo: memgarden
+        #   Workflow: release.yml / Environment: pypi
+        #
+        # 没配之前这一步会失败 —— **失败方向是安全的**（发不出去，
+        # 而不是用一份错凭据发出去）。Release 那步在下面，不受影响。
+        #
+        # 顺序：core 必须先发。memgarden 依赖它的精确版本，
+        # 反过来的话 PyPI 上会短暂存在一个装不上的 memgarden。
+        continue-on-error: true
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: out/
+          skip-existing: true
+
       - name: 发布到 Release
         env:
           GH_TOKEN: ${{ github.token }}
