@@ -820,3 +820,28 @@ def test_no_reasons_means_no_model_call() -> None:
         CaptureRequest(window="x", locale="zh-Hans"), [])
     assert not out.mutations
     assert model.calls == 0
+
+
+def test_a_bad_supersede_never_escapes_even_when_the_retry_budget_is_gone() -> None:
+    """重问预算被格式打回用光之后，坏卡照样不许漏出去。
+
+    这个漏洞是宿主 io 的一条既有用例抓到的：第一次回复格式不对 → 格式重问
+    用掉预算 → 第二次回复里有一张「要覆盖但没说覆盖哪张」→ **没预算再问了**。
+    丢弃逻辑当时只写在语义重问那一支里，而这条路根本不走那一支。
+
+    一个不变量只在一条路径上成立，就等于不成立 —— 所以丢弃收口在 finish()。
+    """
+    # 必须是**可重问**的那种坏（占位符被内容闸打回），不是 "not json at all"
+    # —— 后者直接判死，根本走不到第二次回复。
+    format_bad = _cards_reply({"action": "add", "bucket": "工作",
+                               "summary": "...", "content": "[thickened summary]"})
+    bad_supersede = _cards_reply({"action": "supersede", "target_id": "",
+                                  "summary": "他改吃辣了",
+                                  "content": "最近开始能吃一点辣了。",
+                                  "bucket": "偏好与边界"})
+    out = GardenComponent(
+        model=FakeModel(format_bad, bad_supersede), max_capture_retries=1,
+    ).capture(CaptureRequest(window="x", locale="zh-Hans"))
+    assert not [m for m in out.mutations if m.get("op") == "supersede"], (
+        "预算耗尽这条路上漏出了 target_id 为空的 supersede"
+    )

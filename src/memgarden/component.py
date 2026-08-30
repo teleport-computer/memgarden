@@ -247,14 +247,9 @@ class _CapturePlan:
             if err:
                 self.err = str(err)
                 return
-            kept = [c for c in cards if not card_fails_semantic_check(c)]
-            dropped = len(cards) - len(kept)
-            if dropped:
-                self.owner._step(Step(
-                    kind="dropped", purpose="capture", attempt=self.calls,
-                    detail={"why": "semantic", "cards": dropped},
-                ))
-            self.cards, self.err = kept, None
+            # 丢弃统一收口在 finish() —— 这里只管把结果放下,
+            # 别在两处各判一次。
+            self.cards, self.err = cards, None
             return
 
         self.cards, self.err = cards, err
@@ -292,6 +287,26 @@ class _CapturePlan:
             self._stage = "done"
 
     def finish(self) -> CaptureResult:
+        # 🔴 不变量:**绝不吐出没过本地语义检查的卡**,不管是走哪条路到这儿的。
+        #
+        # 「要覆盖旧卡却没给 target_id」的卡交出去,_to_mutation 会老实生成
+        # {"op": "supersede", "target_id": ""} —— 宿主拿它去 supersede,
+        # 要么静默无效、要么覆盖错东西。
+        #
+        # 收口在这里而不是重问那一支:重问预算耗尽时**根本不走那一支**,
+        # 坏卡就原样漏出去了。这个漏洞是宿主 io 的一条既有用例抓到的
+        # (格式打回先用掉预算 → 第二次回复里有坏 supersede → 没预算再问了)。
+        # 一个不变量只在一条路径上成立,就等于不成立。
+        #
+        # 丢的是那几张,不是整轮 —— 同窗口的好卡必须活下来。
+        kept = [c for c in self.cards if not card_fails_semantic_check(c)]
+        dropped = len(self.cards) - len(kept)
+        if dropped:
+            self.cards = kept
+            self.owner._step(Step(
+                kind="dropped", purpose="capture", attempt=self.calls,
+                detail={"why": "semantic", "cards": dropped},
+            ))
         trace = self.owner._trace(self.request, self.calls, cards=len(self.cards))
         self.owner._step(Step(
             kind="done", purpose="capture", attempt=self.calls,
