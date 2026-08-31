@@ -126,6 +126,7 @@ def writing_language(texts: str | Iterable[str], *, default: str = DEFAULT_LOCAL
 def decide_garden_language(
     *,
     explicit: str | None = None,
+    established: str | None = None,
     written: str | Iterable[str] = (),
     locale: str | None = None,
     default: str = DEFAULT_LOCALE,
@@ -140,9 +141,39 @@ def decide_garden_language(
     不出现在返回值里。
 
     ⚠️ 签名里**没有 buckets**。这是设计，不是遗漏 —— 见模块开头。
+
+    ## 优先级
+
+        explicit      用户自己设的        → 一定听他的
+        established   这个花园已定的语言  → **压过单轮书写**
+        written       他这轮写的字
+        locale        客户端语言
+        default
+
+    ## established 为什么要压过 written（2026-08-31 hx 拍板）
+
+    「他这轮写的字」曾经是最高的证据。问题是**「这轮」有多宽是偶然的** ——
+    宿主的取证窗口决定了它。实测：同一个中文花园、同一句英文抱怨，
+
+        V1 判成中文（窗口里恰好还含着之前那句中文）
+        V2 判成英文（增量窗口里只有新增的英文那句）
+
+    两条 runtime 结果相反，而它们跑的是同一份判定逻辑。用户看到的就是
+    「我用英文说了一句话，我的中文记忆开始变英文了」。
+
+    所以定成：**花园一旦有确定语言，单轮说话压不动它**，要换语言得显式设置
+    （``explicit``）。这样结果不再取决于宿主的窗口有多宽。
+
+    ⚠️ ``established`` 必须来自**不构成回环**的源头 —— 账号的存档语言这类
+    「人自己定的」。**绝不能是桶名或卡的正文**：那些是 AI 之前的输出，拿输出
+    当输入就是自我强化的环，2026-08-24 的事故正是这么放大的。
     """
     if explicit:
         return {"locale": str(explicit), "basis": "explicit_preference",
+                "evidence_units": 0, "confidence": 1.0}
+
+    if established:
+        return {"locale": str(established), "basis": "established_language",
                 "evidence_units": 0, "confidence": 1.0}
 
     lang, confidence, chars = writing_language(written, default=default)

@@ -845,3 +845,34 @@ def test_a_bad_supersede_never_escapes_even_when_the_retry_budget_is_gone() -> N
     assert not [m for m in out.mutations if m.get("op") == "supersede"], (
         "预算耗尽这条路上漏出了 target_id 为空的 supersede"
     )
+
+
+def test_an_established_garden_language_is_not_flipped_by_one_window() -> None:
+    """花园定了语言之后，说一句别的语言不该把它翻掉。
+
+    2026-08-31 实测的真实症状：同一个中文花园、同一句英文抱怨，V1 判成中文、
+    V2 判成英文 —— 因为两条 runtime 的取证窗口宽窄不同，而不是判定逻辑不同。
+    用户看到的是「我用英文说了一句话，我的中文记忆开始变英文」。
+    """
+    from memgarden.garden_language import decide_garden_language
+
+    english_turn = (
+        "Rough week at work - manager kept changing specs, "
+        "stayed until 11pm three nights in a row."
+    )
+    # 没有 established：跟着他这轮写的字走（旧行为，仍然保留）
+    assert decide_garden_language(written=english_turn)["locale"] == "en"
+
+    # 有 established：压过单轮书写
+    got = decide_garden_language(established="zh-Hans", written=english_turn)
+    assert got["locale"] == "zh-Hans"
+    assert got["basis"] == "established_language"
+
+
+def test_the_person_can_still_change_it_explicitly() -> None:
+    """显式设置仍然最高 —— 否则「定了就再也改不了」。"""
+    from memgarden.garden_language import decide_garden_language
+
+    got = decide_garden_language(explicit="en", established="zh-Hans", written="我今天很累")
+    assert got["locale"] == "en"
+    assert got["basis"] == "explicit_preference"
