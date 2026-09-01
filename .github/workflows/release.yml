@@ -71,8 +71,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: dists
-          path: |
-            out-mem/
+          path: out-mem/
 
       - name: 生成构建出处凭证
         uses: actions/attest-build-provenance@v1
@@ -123,6 +122,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: dists
+          # 🔴 必须显式给 path。
+          #
+          # upload-artifact 只有**一个** path 时，压进产物的是那个目录的
+          # **内容**，不带目录名本身；给多个 path 时才保留目录结构。
+          # 原来这里传的是 out-core/ 和 out-mem/ 两个，下载出来自然有
+          # out-mem/；2026-09-02 去掉 out-core/ 之后只剩一个，下载出来就成了
+          # 散在根目录的 whl，而下面还在找 out-mem/ —— 直接
+          # FileNotFoundError: '/github/workspace/out-mem'（v0.13.0 实测）。
+          #
+          # 显式指定落地目录，就跟上游给几个 path 无关了。
+          path: out-mem
       - name: 发布 memgarden 到 PyPI
         # 同上，不加 continue-on-error —— 发布失败就该红。
         uses: pypa/gh-action-pypi-publish@release/v1
