@@ -426,3 +426,51 @@ def test_the_demo_agent_holds_the_api_key_not_the_kernel():
     assert not offenders, (
         "内核碰了模型凭据或某家 provider 的 SDK：\n" + "\n".join(offenders)
     )
+
+
+def test_no_host_user_identifiers_leak_into_the_public_package():
+    """公开包里不许出现真实用户 id。
+
+    这个包是 `pip install` 装的、源码任何人可读。把事故编号写成宿主的用户
+    标识（``usr_`` 前缀 + 十六进制）等于把它带进公共分发物 —— 就算截断了
+    也不该。引用事故用「日期 + 症状」，一样可追溯，还更好读。
+
+    （这条守卫扫的是字面形状，所以本文件里也不能出现那个形状的例子。）
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    pattern = re.compile(r"usr_[0-9a-f]{4,}")
+    offenders = []
+    for path in list(root.glob("src/**/*.py")) + list(root.glob("tests/**/*.py")) \
+            + list(root.glob("examples/**/*.py")) + list(root.glob("*.md")):
+        for i, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+            if pattern.search(line):
+                offenders.append(f"{path.relative_to(root)}:{i}")
+    assert not offenders, (
+        "这些地方带着宿主的用户 id —— 换成「日期 + 症状」：\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_kernel_reads_no_host_specific_env_prefix():
+    """内核只认 ``MEMGARDEN_*``，不许回退到宿主专属的前缀。
+
+    曾经为了稳妥保留过 ``FEEDLING_`` 回退。它违反公共包的边界要求，而且
+    核实过宿主一处都没设 —— 留着不解决任何问题。宿主要沿用旧名，在自己
+    那边读 env、把值当参数传进来。
+    """
+    import pathlib
+    import re
+
+    src = (pathlib.Path(__file__).resolve().parent.parent / "src").rglob("*.py")
+    offenders = []
+    for path in src:
+        for i, line in enumerate(path.read_text("utf-8").splitlines(), 1):
+            stripped = line.strip()
+            # 只看**代码**，注释里解释「为什么不用它」是应该保留的
+            if stripped.startswith("#") or stripped.startswith('"'):
+                continue
+            if re.search(r'["\']FEEDLING_?', line):
+                offenders.append(f"{path.name}:{i} {stripped[:70]}")
+    assert not offenders, "内核代码里出现了宿主专属前缀：\n  " + "\n  ".join(offenders)

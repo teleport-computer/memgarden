@@ -51,7 +51,7 @@ _PLACEHOLDER_WORD_RE = re.compile(
     re.IGNORECASE,
 )
 
-# 墓碑注记(2026-08-05 usr_a40e 事故):弱模型把 supersede 语义理解反,往用户可见
+# 墓碑注记(2026-08-05 2026-08-05 墓碑卡事故):弱模型把 supersede 语义理解反,往用户可见
 # 字段里写「已被 <卡id> 取代——原文」这类记账文。**短语+hex 组合判**——裸判
 # 「已被…取代」会误伤正常散文(「旧手机已被新手机取代」),跟上一串 ≥8 位 hex
 # 才是系统 id 泄漏的强证据。花园内真实 id 的精确匹配在 dream_gates.known_id_in_text

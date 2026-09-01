@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import re
 import threading
 from pathlib import Path
 
@@ -22,6 +23,13 @@ from ..storage import (
     Snapshot,
     mutations_digest,
 )
+
+#: schema 版本。**加字段/加表就要 +1**,并在 _migrate 里补上对应的升级动作 ——
+#: 只改 _SCHEMA 里的 CREATE TABLE IF NOT EXISTS 对旧库一点作用都没有。
+_SCHEMA_VERSION = 1
+
+#: 这个 store 自己分配的 id 形状。宿主塞进来的 id 不长这样,也不该被计数器管。
+_NUMERIC_ID = re.compile(r"m_(\d+)")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
@@ -58,6 +66,79 @@ class SqliteStore:
         self._lock = threading.RLock()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
+
+    # -- 升级旧库 -------------------------------------------------------- #
+
+    def _migrate(self, conn: sqlite3.Connection) -> None:
+        """把早期版本建的库补齐到当前 schema。
+
+        ## 为什么 ``CREATE TABLE IF NOT EXISTS`` 不够
+
+        它只在表**不存在**时建表。表已经存在但**少一列**、或者某张表是后来
+        才加的，它一概不管 —— 于是旧库能打开、能读，一写就出问题。
+
+        v0.2.0 的库升上来实测有两个坑，**第二个会静默丢数据**：
+
+            ① applied 表没有 digest 列
+               → 一写就 sqlite3.OperationalError: no such column: digest
+               崩得很响，至少不会悄悄错
+
+            ② id_counters 是后加的表，旧库里是空的 → 计数从 1 开始
+               → 生成 m_1，而旧库里已经有 m_1 → _put 是 upsert
+               → **静默覆盖掉那张旧卡，不报错，总数还不变**
+
+               实测:
+                   升级前  {m_1: 不吃辣, m_2: 周末看医生}
+                   写一张  {m_1: 新加的一张, m_2: 周末看医生}   ← 「不吃辣」没了
+
+        ②正是 :meth:`_next_id` 文档里警告的那个「计数回退撞上已有 id」——
+        只是这次让计数回退的不是删除，而是**升级**。
+
+        ## 为什么用 PRAGMA user_version 而不是自己建张表
+
+        它是 sqlite 内建的、每个库一个整数，读写都不需要额外的表，也不会
+        和用户自己的表撞名。
+        """
+        version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= _SCHEMA_VERSION:
+            return
+
+        # ① 补 applied.digest。旧行的 digest 留 NULL —— 幂等检查会把 NULL
+        #    当作「没记过摘要」，退回到「同键即命中」的旧行为,而不是误报冲突。
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(applied)")}
+        if "digest" not in cols:
+            conn.execute("ALTER TABLE applied ADD COLUMN digest TEXT")
+
+        # ② 给每个已有卡片、但还没有计数行的 tenant 播种计数器。
+        #    从**已有 id 的最大编号**往后接,而不是从 1 开始。
+        for (tenant,) in conn.execute(
+            "SELECT DISTINCT tenant FROM cards WHERE tenant NOT IN "
+            "(SELECT tenant FROM id_counters)"
+        ).fetchall():
+            conn.execute(
+                "INSERT INTO id_counters(tenant, next_id) VALUES(?,?)",
+                (tenant, self._seed_next_id(conn, tenant)),
+            )
+
+        conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+
+    @staticmethod
+    def _seed_next_id(conn: sqlite3.Connection, tenant: str) -> int:
+        """从已有卡片 id 推出「下一个安全编号」。
+
+        只认 ``m_<数字>`` 这一种形状 —— 宿主自己塞的 id(ULID/UUID/业务号)
+        本来就不由这个计数器分配,把它们算进来毫无意义。一张都认不出来时
+        返回 1,这和空库是同一个状态。
+        """
+        biggest = 0
+        for (card_id,) in conn.execute(
+            "SELECT id FROM cards WHERE tenant=?", (tenant,)
+        ):
+            m = _NUMERIC_ID.fullmatch(str(card_id))
+            if m:
+                biggest = max(biggest, int(m.group(1)))
+        return biggest + 1
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, isolation_level=None)
@@ -183,7 +264,9 @@ class SqliteStore:
         row = conn.execute(
             "SELECT next_id FROM id_counters WHERE tenant=?", (tenant,)
         ).fetchone()
-        n = int(row[0]) if row else 1
+        # 没有计数行时**不能默认从 1 开始** —— 这个 tenant 可能已经有卡了
+        # (旧库升上来、或者别处直接写过库)。从已有 id 往后接,别撞上去。
+        n = int(row[0]) if row else self._seed_next_id(conn, tenant)
         conn.execute(
             "INSERT INTO id_counters(tenant, next_id) VALUES(?,?) "
             "ON CONFLICT(tenant) DO UPDATE SET next_id=excluded.next_id",

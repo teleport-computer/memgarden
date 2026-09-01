@@ -1,6 +1,6 @@
 """Dream 出口的确定性硬闸 —— 只判「明显不对」,绝不判内容质量。
 
-背景(2026-08-05,usr_a40e 墓碑卡事故):deepseek-v4-pro 把 supersede 语义理解反了,
+背景(2026-08-05,2026-08-05 墓碑卡事故 墓碑卡事故):deepseek-v4-pro 把 supersede 语义理解反了,
 在 result.summary/content 里写「已被 <卡id> 取代——原文」的记账注记,三道旧防线
 (占位符闸/语义审查员/15% 增量栅栏)全没拦住。复盘定的产品哲学:
 
@@ -80,7 +80,7 @@ def blast_radius_exceeded(retiring_count: int, active_count: int) -> bool:
     部分执行会把「哪些做了哪些没做」变成排查噩梦。
 
     env 可调:``MEMGARDEN_DREAM_FUSE_RATIO``(默认 0.8)、
-    ``MEMGARDEN_DREAM_FUSE_MIN_CARDS``(默认 10)。旧的 FEEDLING_* 前缀仍读,但已弃用。
+    ``MEMGARDEN_DREAM_FUSE_MIN_CARDS``(默认 10)。
     """
     retiring = max(0, int(retiring_count or 0))
     active = max(0, int(active_count or 0))

@@ -9,32 +9,30 @@
 所以：内核只认 ``MEMGARDEN_*``。宿主要沿用自己的名字，在自己的适配层转换
 （读自己的 env，把值当参数传进来），不要指望内核认识它。
 
-## 为什么还读旧名
+## 旧的 FEEDLING_ 回退已经删掉（2026-08-31）
 
-``memgarden`` 已经公开发布过几个版本，宿主 io 的部署里可能有人临时设过旧名。
-直接改名会让「设了但不生效」——**这是最难查的一类问题：没有报错，只是行为
-和你预期不一样**。所以旧名继续读，但排在新名之后，并且在文档里标成弃用。
+曾经为了稳妥保留过「MEMGARDEN_ 取不到就退回 FEEDLING_」。删掉的理由：
 
-（实际核实过：io 的 deploy / CI / 代码里一处都没设这三个，全在吃默认值。
-保留旧名读取纯属稳妥，不是必需。）
+- 核实过 io 的 deploy / CI / 代码里**一处都没设**这几个名字，全在吃默认值 ——
+  留着不解决任何实际问题；
+- 而它直接违反公共包的边界要求（公共接口里不许有宿主专属的配置行为）。
+
+宿主真要沿用旧名，在自己那边读 env、把值当参数传进来即可。
 """
 from __future__ import annotations
 
 import os
 
-#: 旧的宿主专属前缀 → 弃用，仅为兼容保留。新代码一律用 MEMGARDEN_*。
-_LEGACY_PREFIX = "FEEDLING_"
 _PREFIX = "MEMGARDEN_"
 
 _FALSEY = frozenset({"0", "false", "off", "no"})
 
 
 def _raw(name: str) -> str | None:
-    """按 ``MEMGARDEN_<name>`` → ``FEEDLING_<name>`` 的顺序取值。"""
-    for prefix in (_PREFIX, _LEGACY_PREFIX):
-        value = os.environ.get(prefix + name)
-        if value is not None and value.strip() != "":
-            return value.strip()
+    """只认 ``MEMGARDEN_<name>``。宿主专属的名字请在宿主那边转换。"""
+    value = os.environ.get(_PREFIX + name)
+    if value is not None and value.strip() != "":
+        return value.strip()
     return None
 
 
