@@ -19,9 +19,8 @@ from __future__ import annotations
 import re
 import unicodedata
 
-from . import card_guard
+from . import card_guard, reasoning
 from .leak_signals import GENERIC_SIGNALS, LeakSignals
-from agent_protocol_core import self_thinking
 from ..prompts.buckets import normalize_bucket_language
 
 # 卡上会被用户亲眼看到的文字字段(bucket/threads 也显示在花园里)。
@@ -109,10 +108,8 @@ def extract_json_block(raw: str) -> str:
     the legacy extractor could parse.
     """
     text = str(raw or "")
-    status, _thinking, reply = self_thinking.strip_all_thinking(
-        text, sanitize=False
-    )
-    if status != self_thinking.FAILED:
+    ok, reply = reasoning.strip_reasoning(text)
+    if ok:
         extracted = _first_balanced_json_object(reply)
         if extracted:
             return extracted

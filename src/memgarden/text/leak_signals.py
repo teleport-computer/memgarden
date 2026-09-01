@@ -37,6 +37,8 @@ harmony / 工具路由残片一个都拦不住。
 """
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -73,15 +75,42 @@ class LeakSignals:
         return out
 
 
+# 结尾连着两个闭括号 —— 被截断的 JSON 尾巴最常见的形状。
+_TAIL_CLOSE_RE = re.compile(r"\s*[}\]]\s*[}\]]")
+
+
+def _naive_min_depth(text: str) -> int:
+    """括号平衡的最低点，**故意不认字符串上下文**。
+
+    被撕断的尾巴会闭掉自己没开过的括号 → 平衡值跌到负数。
+    不做「字符串感知」的计数是刻意的：一段从字符串中间开始的尾巴
+    （``active.sleep","reason":...``）会让引号奇偶错位、读起来反而是配平的，
+    正好把我们要抓的那种泄漏藏起来。
+    """
+    depth = 0
+    lowest = 0
+    for ch in text:
+        if ch in "{[":
+            depth += 1
+        elif ch in "}]":
+            depth -= 1
+            lowest = min(lowest, depth)
+    return lowest
+
+
+def _looks_like_torn_json(text: str) -> bool:
+    if _naive_min_depth(text) >= 0:
+        return False
+    return ('":' in text) or bool(_TAIL_CLOSE_RE.search(text))
+
+
 def _orphan_json_tail(text: str) -> str | None:
     """结构性 JSON 残尾：闭括号比开括号多，且带 JSON 记号。
 
     纯括号配平，不认任何协议键名 —— 所以对任何宿主都成立。
     高召回（用户在正文里贴 JSON 也会命中），因此只作弱证据。
     """
-    from agent_protocol_core import protocol_leak
-
-    return "torn_json_tail" if protocol_leak.is_orphan_json_tail(text) else None
+    return "torn_json_tail" if _looks_like_torn_json(text) else None
 
 
 #: 与协议无关的最小集合。宿主应当在此之上叠加自己的识别器。

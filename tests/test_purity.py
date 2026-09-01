@@ -17,20 +17,15 @@ import pytest
 
 # 跟 test_store_contract 一样自己接 sys.path：pytest 的 rootdir 处理下，
 # 装进 venv 的包不一定在 import 路径上。
-for _p in (
-    str(pathlib.Path(__file__).resolve().parent.parent / "src"),
-    str(pathlib.Path(__file__).resolve().parent.parent
-        / "packages" / "agent-protocol-core" / "src"),
-):
-    if _p not in sys.path:
-        sys.path.insert(0, _p)
+_SRC_PATH = str(pathlib.Path(__file__).resolve().parent.parent / "src")
+if _SRC_PATH not in sys.path:
+    sys.path.insert(0, _SRC_PATH)
 
 SRC = pathlib.Path(__file__).resolve().parent.parent / "src" / "memgarden"
-PROTOCOL = (pathlib.Path(__file__).resolve().parent.parent
-            / "packages" / "agent-protocol-core" / "src" / "agent_protocol_core")
 
-#: 唯一允许的非标准库依赖 —— 同源发布、同样是纯的。
-ALLOWED_THIRD_PARTY = frozenset({"agent_protocol_core"})
+#: 一个都不允许。2026-09-02 起内核零第三方依赖 —— 原来那个同源的
+#: agent-protocol-core 已经搬回 io（它装的是宿主的思维链产品实现）。
+ALLOWED_THIRD_PARTY: frozenset[str] = frozenset()
 
 #: 内核不许碰的东西。纯函数意味着：给同样的输入，永远得到同样的输出。
 FORBIDDEN = frozenset({
@@ -62,13 +57,11 @@ def _top_level_imports(src: str) -> set[str]:
 def test_source_tree_is_not_empty():
     """守卫本身要有牙 —— 路径写错就变成空扫，永远绿。"""
     assert len(list(_modules(SRC))) > 15
-    assert len(list(_modules(PROTOCOL))) >= 2
 
 
-@pytest.mark.parametrize("kind", ["kernel", "protocol"])
-def test_no_host_or_io_imports(kind):
-    root = SRC if kind == "kernel" else PROTOCOL
-    selfname = "memgarden" if kind == "kernel" else "agent_protocol_core"
+def test_no_host_or_io_imports():
+    root = SRC
+    selfname = "memgarden"
     import sys
     stdlib = set(sys.stdlib_module_names)
     offenders = []
@@ -105,12 +98,6 @@ def test_judgment_modules_do_no_io():
         if hit:
             offenders.append(f"{rel}: {sorted(hit)}")
     assert not offenders, "判断内核里出现了 I/O：\n" + "\n".join(offenders)
-
-
-def test_protocol_core_does_not_depend_on_the_kernel():
-    """依赖方向单向：内核可以用协议原语，反过来不行。"""
-    for f in _modules(PROTOCOL):
-        assert "memgarden" not in _top_level_imports(f.read_text(encoding="utf-8")), f.name
 
 
 # --------------------------------------------------------------------------- #
@@ -208,7 +195,6 @@ def test_english_garden_prompts_carry_no_stray_chinese():
     from memgarden.prompts.capture import build_capture_prompt
     from memgarden.prompts.dream import build_dream_prompt
     from memgarden.prompts.migrate import build_migrate_prompt
-    from agent_protocol_core import self_thinking
 
     prompts = {
         "capture": build_capture_prompt(
@@ -221,7 +207,6 @@ def test_english_garden_prompts_carry_no_stray_chinese():
         "migrate": build_migrate_prompt(
             ai_name="io", user_name="Alex", old_cards="c1", vocab="", locale="en",
         ),
-        "self_thinking": self_thinking.instruction_for_language("en"),
     }
     leaked = {}
     for name, text in prompts.items():

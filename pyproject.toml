@@ -23,11 +23,15 @@ classifiers = [
     "Typing :: Typed",
 ]
 
-# 内核零第三方依赖。agent-protocol-core 是同源的纯标准库小包，
-# 聊天与记忆两边共用 —— 见它的 __init__ 说明为什么不并进来。
-# 两个包**锁步发版**（发布闸强制版本一致），所以这里也锁到同一个次版本 ——
-# 宽约束会让人装到不匹配的组合，而它们共享内部约定，不保证跨版本兼容。
-dependencies = ["agent-protocol-core==0.12.10"]
+# 零依赖，只用标准库。**别往这里加东西** —— 「装了 memgarden 会连带装上什么」
+# 是接入方对这个包的第一印象，多一个他不认识的包就多一分困惑。
+#
+# 2026-09-02 去掉了 agent-protocol-core。内核对「思考」只有一个需求：
+# 会思考的模型会把推理和 JSON 混在同一段输出里，要先剥掉推理再解析
+# （见 src/memgarden/text/reasoning.py，约 60 行，纯标准库）。
+# 而那个包里装的是**宿主的思维链产品实现** —— 人格文案、屏幕监看说辞、
+# 宿主专属的开关。接入方装 Garden 不该连带拿到别人产品的这些东西。
+dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/teleport-computer/memgarden"
@@ -48,7 +52,5 @@ packages = ["src/memgarden"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# 未发布前用本地路径解析同源的 agent-protocol-core。
 # 两个包都发布之后，删掉这一节即可 —— 上面的 dependencies 不用改。
 [tool.uv.sources]
-agent-protocol-core = { path = "packages/agent-protocol-core", editable = true }
