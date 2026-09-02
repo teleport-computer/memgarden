@@ -2,8 +2,7 @@
 context_memories selection — pure helpers, no native deps.
 ============================================================
 
-Lives outside enclave_app.py so it can be unit-tested without the full
-nacl / cryptography stack. enclave_app.py imports from here.
+纯函数，不依赖任何加解密栈 —— 所以可以直接单测。宿主在自己那边引用它。
 
 Default resident/MCP selection keeps the historical behavior:
   · Up to 3 turning-point cards (title prefix `转折｜`), newest first
@@ -471,7 +470,7 @@ def select_context_memories_with_trace(
         # model can naturally "recall" one of these if it is relevant to the
         # current message even though it didn't lexically match — the model
         # decides, instead of the keyword filter hard-dropping it. Built from the
-        # already-decrypted `moments`, so it costs no extra provider/enclave call.
+        # 传进来的 `moments` 已经是明文，所以这一步不产生额外的模型或存储调用。
         # Turning points first, then most recent. Existing `selected` cards are
         # excluded (they're already passed in full).
         index_ids = {item.get("id") for item in selected_trace}

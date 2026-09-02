@@ -2,7 +2,7 @@
 
 只用标准库 `sqlite3`，没有第三方依赖。
 
-⚠️ 它**不做加密**。io 的加密（信封、enclave 解密、AAD 绑定）是宿主的事，
+⚠️ 它**不做加密**。全链路按明文设计；传输和磁盘层面的安全由部署环境决定，
 不在这个包里 —— 内核连密文长什么样都不知道。谁要在别处用，
 自己决定要不要加密，以及在哪一层加。
 """
@@ -222,18 +222,42 @@ class SqliteStore:
             self._put(conn, tenant, card)
             return {"id": card["id"], "status": "written"}
         if op == "supersede":
-            old_id = str(m.get("target_id") or "")
-            row = conn.execute(
-                "SELECT doc FROM cards WHERE tenant=? AND id=?", (tenant, old_id)
-            ).fetchone()
-            if not row:
-                raise KeyError(f"supersede target not found: {old_id}")
+            # 一张新卡可以取代**多张**旧卡 —— 整理(merge/thicken)就是这个形状：
+            # N 张收敛成 1 张。只认单个 target_id 的话，一次 merge 得拆成多条
+            # mutation，而后面几条要引用前一条刚生成的新卡 id，那个 id 在批次
+            # 提交前根本不存在。
+            targets = [
+                str(i).strip()
+                for i in ([m.get("target_id")] + list(m.get("target_ids") or ()))
+                if str(i or "").strip()
+            ]
+            seen: list[str] = []
+            for t_id in targets:
+                if t_id not in seen:
+                    seen.append(t_id)
+            if not seen:
+                raise KeyError("supersede without a target")
+            rows = {}
+            for t_id in seen:
+                row = conn.execute(
+                    "SELECT doc FROM cards WHERE tenant=? AND id=?", (tenant, t_id)
+                ).fetchone()
+                # 一张找不到就整条失败 —— 半成功会留下「旧卡还活着、新卡也活着」
+                # 的双活状态，那是整理最不该产生的结果。
+                if not row:
+                    raise KeyError(f"supersede target not found: {t_id}")
+                rows[t_id] = row
             new_card = dict(m.get("card") or {})
             new_card.setdefault("id", self._next_id(conn, tenant))
-            old = {**json.loads(row[0]), "superseded_by": new_card["id"], "archived": True}
-            self._put(conn, tenant, old)
+            for t_id, row in rows.items():
+                self._put(conn, tenant, {
+                    **json.loads(row[0]),
+                    "superseded_by": new_card["id"],
+                    "archived": True,
+                })
             self._put(conn, tenant, new_card)
-            return {"id": new_card["id"], "status": "superseded", "replaced": old_id}
+            return {"id": new_card["id"], "status": "superseded",
+                    "replaced": seen[0] if len(seen) == 1 else list(seen)}
         if op == "delete":
             target = str(m.get("target_id") or "")
             conn.execute("DELETE FROM cards WHERE tenant=? AND id=?", (tenant, target))

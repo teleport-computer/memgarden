@@ -1,152 +1,166 @@
-"""十分钟把 Memory Garden 挂进一个陌生的 Agent Runtime。
+"""十分钟把 Memory Garden 挂到一个陌生 Runtime 上。
 
-这个例子**不 import 任何内部模块** —— 只用 ``from memgarden import ...`` 顶层那几个。
-这是刻意的：接入方需要认识的东西越少，Garden 内部越能自由改。
+真接的时候只换一样：``EchoModel`` 换成你真的调模型。存储用官方的
+``SqliteStore``（一个文件），不需要你自己写。
 
-跑：
+    python examples/mount_in_ten_minutes.py
 
-    python examples/mount_in_ten_minutes.py          # 假模型，不花钱，不联网
+## 这个示例证明什么
 
-真接的时候只换两样：``EchoModel`` 换成你真的调模型，``DictStore`` 换成你的库。
+不是「每个 API 都能调通」，而是**整条链路真的闭合**：
+
+    落卡 → 落库 → 想起来 → 模型自己搜 → 模型自己写 → 整理 → 换个进程还在
+
+以前这个示例用一个手写的 `DictStore`，并且每一步的落库都由示例自己做 ——
+那证明的是「零件都在」，不是「插件能用」。接入方照着抄，就得把 tenant、
+权限、幂等、CAS、整理的写回全部自己实现一遍，而这些写错了不会报错，
+只会悄悄丢记忆。
+
+## 你需要提供的只有两样
+
+    ModelPort     一个 `complete(prompt, *, purpose) -> str`
+    Scope         这次调用的可信作用域：租户是谁、agent 是谁、能碰哪些 mount
+                  🔴 它必须来自你的可信上下文，**绝不能来自模型的工具参数**
 """
 from __future__ import annotations
 
 import json
+import pathlib
+import tempfile
 
 from memgarden import (
+    Actor,
     CaptureRequest,
-    ContextRequest,
-    GardenComponent,
     MaintenanceRequest,
+    MountedGarden,
+    Scope,
+    SqliteStore,
+    ToolCall,
 )
+# 挑卡策略是可换的插口，所以它的零件在自己的模块里 —— 这是唯一需要往下取的东西。
 from memgarden.selection import Chain, RecentStage, RoleStage
 
 
-# --------------------------------------------------------------------------- #
-# 你要提供的两样东西
-# --------------------------------------------------------------------------- #
-
 class EchoModel:
-    """① 模型。**你的 API key 在你手里，Garden 拿不到。**
+    """假模型：按 purpose 返回预设 JSON。**你要换掉的就是这一个类。**
 
-    真实实现里这就是一次 provider 调用。``purpose`` 告诉你这次是干嘛的
-    （capture / dream），想给不同用途分不同模型就在这儿分流。
+    真接的时候这里是你的 provider 调用 —— API key 归你，Garden 不碰。
     """
 
     def complete(self, prompt: str, *, purpose: str = "") -> str:
-        print(f"    [模型被调用：{purpose}，提示词 {len(prompt)} 字]")
         if purpose == "dream":
-            return json.dumps({"consolidations": []})
+            return json.dumps({"consolidations": [{
+                "op": "merge",
+                "card_ids": ["m_1", "m_2"],
+                "rationale": "这两条讲的是同一件事，合起来更完整。",
+                "result": {"bucket": "偏好与边界", "threads": ["饮食"],
+                           "summary": "不吃辣，点菜要避开",
+                           "content": "对方不吃辣，一吃就胃疼，点菜需避开辣味。"},
+            }]}, ensure_ascii=False)
         return json.dumps({"cards": [{
-            "action": "add",
-            "bucket": "偏好与边界",
-            "threads": ["饮食"],
-            "summary": "他不吃辣",
-            "content": "一吃辣就胃疼，所以点菜会避开辣的。",
-            "importance": 0.6,
-            "pulse": 0.3,
+            "action": "add", "bucket": "偏好与边界", "threads": ["饮食"],
+            "summary": "不吃辣，一吃就胃疼",
+            "content": "对方不吃辣，一吃就胃疼，点菜需要避开辣味。",
         }]}, ensure_ascii=False)
 
 
-class DictStore:
-    """② 存储。这里用字典演示；真实里是你的 Postgres / SQLite / 别的什么。
-
-    **Garden 不碰它。** 它只告诉你「该这么改」，落库、加密、权限都是你的事。
-    """
-
-    def __init__(self) -> None:
-        self.cards: dict[str, dict] = {}
-        self._n = 0
-
-    def apply(self, mutations: list[dict]) -> list[str]:
-        written = []
-        for m in mutations:
-            if m["op"] == "add":
-                self._n += 1
-                cid = f"m_{self._n}"
-                self.cards[cid] = {"id": cid, **m["card"]}
-                written.append(cid)
-            elif m["op"] == "supersede":
-                old = m.get("target_id", "")
-                self._n += 1
-                cid = f"m_{self._n}"
-                self.cards[cid] = {"id": cid, **m["card"]}
-                if old in self.cards:
-                    self.cards[old]["superseded_by"] = cid
-                written.append(cid)
-        return written
-
-    def all(self) -> list[dict]:
-        return [c for c in self.cards.values() if not c.get("superseded_by")]
-
-
-# --------------------------------------------------------------------------- #
-# 挂载
-# --------------------------------------------------------------------------- #
-
-def main() -> None:
-    store = DictStore()
-
-    garden = GardenComponent(
+def _garden(db_path: str) -> MountedGarden:
+    return MountedGarden(
         model=EchoModel(),
-        # 挑卡策略是可换的插口。不传就没有 turn_context 能力 —— 会在
-        # capabilities() 里如实声明，而不是假装能挑然后返回空。
+        store=SqliteStore(db_path),
+        # 挑卡策略是可换的插口。不传就没有 turn_context 能力 ——
+        # capabilities() 会如实声明，而不是假装能挑然后返回空。
         selection_policy=Chain(stages=(
             RoleStage("turning_point", limit=2, order_by="occurred_at"),
-            RecentStage(limit=3, order_by="created_at"),
+            RecentStage(limit=5, order_by="created_at"),
         )),
+        min_new_cards_for_maintenance=1,
+    )
+
+
+def main() -> None:
+    db = str(pathlib.Path(tempfile.mkdtemp()) / "garden.db")
+    garden = _garden(db)
+
+    # 🔴 作用域来自你的可信上下文，不来自模型
+    me = Scope(
+        tenant_id="user-42",
+        actor=Actor(user_id="user-42", agent_id="assistant-1"),
+        allowed_mounts=("agent-private",),
     )
 
     print("这个组件会做什么：")
-    for k, v in garden.capabilities().as_dict().items():
+    for k, v in garden.component.capabilities().as_dict().items():
         print(f"    {k:16} {v}")
 
-    # ---- ① 落卡：这段对话里有什么值得记 ------------------------------- #
-    print("\n① 落卡")
-    result = garden.capture(CaptureRequest(
+    # ---- ① 落卡并落库 ------------------------------------------------- #
+    print("\n① 落卡（判断 + 写库一步完成）")
+    receipt = garden.capture_and_store(me, CaptureRequest(
         window="用户：我不吃辣，一吃就胃疼\n我：那以后点菜避开",
-        # locale 必填，没有默认值 —— 默认成某种语言等于把一套分类法
-        # 硬塞给使用者，而他不会知道自己的库里为什么长出了中文桶。
+        # locale 必填，没有默认值 —— 默认成某种语言等于把一套分类法硬塞给
+        # 使用者，而他不会知道自己的库里为什么长出了中文桶。
         locale="zh-Hans",
         ai_name="io",
         user_name="老王",
+        # 幂等键由你给：你知道「同一个 turn」这个业务边界，Garden 不知道。
+        idempotency_key="turn-1",
     ))
-    print(f"    产出 {len(result.mutations)} 条改动指令，重问 {result.retried} 次")
-    print(f"    观测：{result.trace}")
+    print(f"    写进去了：{receipt.written}，记录 {receipt.record_ids}")
 
-    # Garden 不写库 —— 这一步是你的。
-    ids = store.apply(result.mutations)
-    print(f"    落库（这一步在你这边）：{ids}")
+    # 重放同一个 turn —— 不会写第二遍。
+    # ⚠️ 看回执的 record_ids 判断不了：幂等命中时它返回的是**上一次的结果**，
+    #    看起来一样有 id。要看库里到底有几张。
+    before = len(SqliteStore(db).load(me.tenant_id).cards)
+    garden.capture_and_store(me, CaptureRequest(
+        window="用户：我不吃辣，一吃就胃疼\n我：那以后点菜避开",
+        locale="zh-Hans", idempotency_key="turn-1"))
+    after = len(SqliteStore(db).load(me.tenant_id).cards)
+    print(f"    重放同一个 turn：库里 {before} 张 → {after} 张（幂等，应当不变）")
 
-    # ---- ② 想起来：这一轮该带哪几张记忆 ------------------------------- #
+    # ---- ② 想起来（候选由 Garden 自己从库里取）------------------------ #
     print("\n② 想起来")
-    ctx = garden.build_context(ContextRequest(
-        query="晚饭吃什么",
-        # 候选由你给：生命周期过滤、权限过滤都在你那边做完。
-        # Garden 不认识你的 is_archived，也没资格替你判断谁能看什么。
-        candidates=store.all(),
-        limit=3,
+    ctx = garden.context_for_turn(me, "晚饭吃什么")
+    for block in ctx.blocks:
+        print(f"    [{block['stage']}] {block['text']}")
+
+    # ---- ③ 模型自己调工具 --------------------------------------------- #
+    print("\n③ 模型自己调工具")
+    wrote = garden.invoke_tool(me, ToolCall(
+        name="memory_write",
+        arguments={"summary": "周末要去看医生",
+                   "content": "答应自己这周末一定去看医生。"},
     ))
-    print(f"    挑中 {ctx.record_ids}")
-    for b in ctx.blocks:
-        print(f"    [{b['stage']}] {b['text']}")
+    print(f"    memory_write → {wrote.ok}，回执 {wrote.mutations}")
 
-    # ---- ③ 整理：该不该合并一遍 --------------------------------------- #
-    print("\n③ 整理")
-    check = garden.run_maintenance(MaintenanceRequest(
-        cards=store.all(), locale="zh-Hans",
-        dry_run=True,      # 只问「该整理了吗」，不烧模型调用
-    ))
-    print(f"    该整理了吗：{check.needed}（{check.trace['reason']}）")
-    print("    ↑ 调度什么时候跑、失败怎么退避，是你的事；Garden 只回答该不该")
+    found = garden.invoke_tool(me, ToolCall(
+        name="memory_search", arguments={"query": "医生"}))
+    print(f"    memory_search → {found.content!r}")
 
-    # ---- ④ 给模型的工具 ------------------------------------------------ #
-    print("\n④ 给模型的工具")
-    for tool in garden.tools():
-        print(f"    {tool.name}: {tool.description}")
+    # ---- ④ 整理（非空，真的改动库）------------------------------------ #
+    print("\n④ 整理")
+    check = garden.check_maintenance(me)
+    print(f"    要不要整理：{check.needed}（{check.reason}）")
+    if check.needed:
+        tidy = garden.run_and_store_maintenance(
+            me, MaintenanceRequest(locale="zh-Hans"))
+        print(f"    整理写回：{tidy.written}，"
+              f"{tidy.reason or ''}{tidy.error or ''}")
+        print(f"    账本（存回你自己的库）：signature="
+              f"{str(tidy.trace.get('signature'))[:12]}… "
+              f"seed_card_count={tidy.trace.get('seed_card_count')}")
 
-    print("\n完。全程只 import 了 memgarden 顶层的几个名字，")
-    print("没有碰 prompts / scoring / selection 里面任何一个函数。")
+    # ---- ⑤ 换个进程，记忆还在 ----------------------------------------- #
+    print("\n⑤ 换个进程再来（重新打开同一个库）")
+    reopened = _garden(db)
+    again_ctx = reopened.context_for_turn(me, "晚饭吃什么")
+    print(f"    仍然想得起来：{[b['text'] for b in again_ctx.blocks]}")
+
+    # ---- ⑥ 别人读不到 ------------------------------------------------- #
+    print("\n⑥ 别人读不到")
+    someone_else = Scope(tenant_id="user-99", actor=Actor(user_id="user-99"))
+    print(f"    另一个用户召回到：{reopened.context_for_turn(someone_else, '晚饭').record_ids}")
+
+    print("\n完。真接的时候只换 EchoModel，其余照抄。")
 
 
 if __name__ == "__main__":

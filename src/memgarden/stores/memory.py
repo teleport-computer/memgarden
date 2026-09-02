@@ -84,15 +84,33 @@ class InMemoryStore:
                     staged[card["id"]] = card
                     results.append({"id": card["id"], "status": "written"})
                 elif op == "supersede":
-                    old_id = str(m.get("target_id") or "")
+                    # 一张新卡可以取代**多张**旧卡 —— 整理(merge/thicken)就是这个
+                    # 形状。两个参考 Store 必须表现一致,否则接入方换一个 store
+                    # 就断,而这正是「可替换存储」要保证的东西。
+                    targets: list[str] = []
+                    for candidate in ([m.get("target_id")]
+                                      + list(m.get("target_ids") or ())):
+                        value = str(candidate or "").strip()
+                        if value and value not in targets:
+                            targets.append(value)
+                    if not targets:
+                        raise KeyError("supersede without a target")
+                    for old_id in targets:
+                        # 一张找不到就整条失败 —— 半成功会留下「旧卡还活着、
+                        # 新卡也活着」的双活状态。
+                        if old_id not in staged:
+                            raise KeyError(f"supersede target not found: {old_id}")
                     new_card = dict(m.get("card") or {})
-                    if old_id not in staged:
-                        raise KeyError(f"supersede target not found: {old_id}")
                     new_card.setdefault("id", f"m_{next(self._ids)}")
-                    staged[old_id] = {**staged[old_id], "superseded_by": new_card["id"],
-                                      "archived": True}
+                    for old_id in targets:
+                        staged[old_id] = {**staged[old_id],
+                                          "superseded_by": new_card["id"],
+                                          "archived": True}
                     staged[new_card["id"]] = new_card
-                    results.append({"id": new_card["id"], "status": "superseded", "replaced": old_id})
+                    results.append({
+                        "id": new_card["id"], "status": "superseded",
+                        "replaced": targets[0] if len(targets) == 1 else list(targets),
+                    })
                 elif op == "delete":
                     target = str(m.get("target_id") or "")
                     staged.pop(target, None)

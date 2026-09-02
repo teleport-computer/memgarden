@@ -130,7 +130,7 @@ def index_item_to_relevance_memory(item: dict) -> dict:
         "summary": summary,
         "bucket": buckets,
         # 私有搜索语料放进 content 位 —— 正文里的关键词才搜得到。
-        # 索引本身仍是「无原话」的表面：这个 dict 只在 enclave 内用于打分，
+        # 索引本身仍是「无原话」的表面：这个 dict 只在打分过程中用，
         # 用完即弃，不会被序列化。
         "content": _text(item.get("_search_content"), 5000),
         "occurred_at": _text(item.get("occurred_at"), 80),
@@ -163,7 +163,7 @@ def _topic_match(query: str, item: dict) -> bool:
     query_text = str(query or "").lower()
     haystack = " ".join([
         str(item.get("summary") or "").lower(),
-        # 私有搜索语料：正文只在 enclave 内参与匹配，序列化前由出口剥掉。
+        # 私有搜索语料：正文只参与匹配，序列化前由出口剥掉。
         # 这道关口和下面的词法打分**必须同时**认它 —— 只接一处的话，
         # 卡会分别卡在 no_index_topic_match 或 no_query_overlap 上（codex 2026-08-16）。
         str(item.get("_search_content") or "").lower(),

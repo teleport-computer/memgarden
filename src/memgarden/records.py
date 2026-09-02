@@ -131,16 +131,43 @@ class Update(Mutation):
 
 @dataclass
 class Supersede(Mutation):
-    """用新卡取代旧卡，旧卡留着并指向新卡。
+    """用一张新卡取代**一张或多张**旧卡，旧卡留着并指向新卡。
 
-    **这是编辑动作，不是删除。** 用户查历史时应该还能看到旧的那张，
-    以及它被什么取代了 —— 记忆的演变本身是有价值的信息。
+    **这是编辑动作，不是删除。** 用户查历史时应该还能看到旧的那几张，
+    以及它们被什么取代了 —— 记忆的演变本身是有价值的信息。
+
+    ## 为什么要支持多个 target
+
+    整理(Dream)提出的三种动作 —— merge / thicken / supersede —— 落到存储上
+    **是同一个形状**：N 张旧卡收敛成 1 张新卡，旧的全部标记为被这张新卡取代。
+
+        merge      讲同一件事的几张卡 → 合成更完整的一张
+        thicken    零散的小提及 → 并进它们本来该属于的那张
+        supersede  内容矛盾 → 新的取代旧的
+
+    只有单个 ``target_id`` 的话，一次 merge 要拆成多条 mutation，而后面几条
+    需要引用前一条**才刚生成的新卡 id** —— 那个 id 在批次提交前根本不存在。
+    结果要么让调用方自己造 id（各家造法不同，撞 id 只是时间问题），要么放弃
+    原子性。所以让一条 mutation 直接表达「这 N 张收敛成这 1 张」。
+
+    ``target_id`` 保留，等价于 ``target_ids`` 只有一个元素 —— 老调用方不受影响。
     """
 
     target_id: str = ""
+    #: 多张旧卡收敛成一张时用这个。与 ``target_id`` 二选一，同时给则合并去重。
+    target_ids: tuple[str, ...] = ()
     card: Card | None = None
     op: str = "supersede"
     requires: tuple[str, ...] = ("supersede",)
+
+    def targets(self) -> tuple[str, ...]:
+        """规范化之后的目标列表 —— 调用方只认这一个入口，别自己拼两个字段。"""
+        out: list[str] = []
+        for candidate in (self.target_id, *self.target_ids):
+            value = str(candidate or "").strip()
+            if value and value not in out:
+                out.append(value)
+        return tuple(out)
 
 
 @dataclass

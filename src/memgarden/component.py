@@ -54,7 +54,12 @@ from .contracts import (
     ToolDefinition,
     ToolResult,
 )
-from .dreaming import DreamLedger, dream_snapshot, needs_dream
+from .dreaming import (
+    DreamLedger,
+    consolidations_to_mutations,
+    dream_snapshot,
+    needs_dream,
+)
 from .ports import ClockPort, ModelPort, SystemClock
 from .prompts.capture import (
     build_capture_prompt,
@@ -936,7 +941,18 @@ class GardenComponent:
                                      trace={"reason": verdict.reason})
         return MaintenanceResult(
             needed=True,
-            mutations=[dict(c, mount=request.mount) for c in consolidations],
+            # 🔴 这里必须转换,不能把建议原样当 mutation 返回。
+            #
+            # 建议侧的 op 是 merge/thicken/supersede,存储侧是 add/update/
+            # supersede/… —— 两套词汇表。2026-09-02 之前这行写的是
+            # `[dict(c, mount=…) for c in consolidations]`,交给官方 Store 就是
+            # `ValueError: unknown op: merge`,用户那头的症状是「说整理好了,
+            # 但记忆没变」。转换归 Garden,见 dreaming.consolidations_to_mutations。
+            mutations=consolidations_to_mutations(
+                consolidations, mount=request.mount
+            ),
+            # 原始建议照旧给出去 —— 宿主有自己的写入格式时要从这里构造
+            # (io 的 action 带加密信封和溯源,mutations 表达不了)。
             consolidations=list(consolidations),
             trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
                    "consolidations": len(consolidations),

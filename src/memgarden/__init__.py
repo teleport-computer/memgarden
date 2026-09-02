@@ -9,7 +9,7 @@
 
 不在这里的（由调用方提供）：
 
-  加解密与 enclave · 身份装配 · 所有权校验 · gates · 审计 ·
+  加解密 · 身份装配 · 所有权校验 · gates · 审计 ·
   锁与事务 · 捞聊天记录 · 定时器 · 真正调模型
 
 硬指标：**本包只依赖标准库和同源的 agent-protocol-core**，不 import 任何宿主模块。
@@ -60,10 +60,26 @@ from .contracts import (
     ToolDefinition,
     ToolResult,
 )
+from .mounted import (
+    MaintenanceCheck,
+    MountPermissionError,
+    MountedGarden,
+    OperationReceipt,
+    Scope,
+)
 from .ports import ClockPort, ModelPort, SystemClock
+# 官方参考存储。放在顶层是**刻意的**：接入方需要一个能直接用的 store，
+# 逼他们去 `memgarden.stores.sqlite` 挖，等于告诉他们「内部模块可以随便进」。
+from .stores.sqlite import SqliteStore
 
 __all__ = [
     "GardenComponent",
+    "MountedGarden",
+    "Scope",
+    "OperationReceipt",
+    "MaintenanceCheck",
+    "MountPermissionError",
+    "SqliteStore",
     "GardenCapabilities",
     "CaptureSession",
     "MaintenanceSession",
