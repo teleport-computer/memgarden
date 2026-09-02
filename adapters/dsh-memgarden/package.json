@@ -1,0 +1,21 @@
+{
+  "name": "@teleport-computer/dsh-memgarden",
+  "version": "0.0.1-alpha.0",
+  "private": true,
+  "description": "把 Memory Garden 挂到 DeepSeek Harness 上的薄 Adapter（未经真实 Runtime 验证）",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "_note": "DSH 的包名/版本待定 —— 之前这里写的 @deepseek/harness@0.1.2-alpha.4 是照文档猜的，npm 上不存在。拿到真实环境后按实际包名 pin 确切 tag+commit。"
+}
