@@ -203,7 +203,67 @@ def build_parser() -> argparse.ArgumentParser:
     tls = sub.add_parser("tools", help="给模型的工具定义")
     tls.set_defaults(func=_cmd_tools)
 
+    srv = sub.add_parser("serve", help="长驻服务：一行一个 JSON 请求，走 stdio")
+    srv.add_argument("--storage", default="sqlite:///memgarden.db",
+                     help="sqlite:///路径 或 memory://（后者进程退出即丢）")
+    srv.add_argument("--model", default="",
+                     help="调模型的命令；留空则只提供不需要模型的方法")
+    srv.set_defaults(func=_cmd_serve)
+
+    schema = sub.add_parser("schema", help="导出 JSON Schema（给非 Python 接入方）")
+    schema.set_defaults(func=_cmd_schema)
+
     return p
+
+
+def _open_store(dsn: str):
+    """按 DSN 开存储。**只认这两种** —— 别的后端由接入方自己注入。"""
+    if dsn.startswith("sqlite:///"):
+        from ..stores.sqlite import SqliteStore
+
+        return SqliteStore(dsn[len("sqlite:///"):])
+    if dsn.startswith("memory://"):
+        from ..stores.memory import InMemoryStore
+
+        return InMemoryStore()
+    raise ValueError(f"不认识的存储 DSN：{dsn!r}（支持 sqlite:/// 和 memory://）")
+
+
+def _cmd_serve(args) -> int:
+    from ..mounted import MountedGarden
+    from ..selection import Chain, RecentStage, RelevanceStage
+    from ..service import Service
+
+    model = SubprocessModel(args.model) if args.model else _NoModel()
+    garden = MountedGarden(
+        model=model,
+        store=_open_store(args.storage),
+        selection_policy=Chain(stages=(RelevanceStage(limit=8),
+                                       RecentStage(limit=4))),
+    )
+    Service(garden).serve()
+    return 0
+
+
+class _NoModel:
+    """没给 --model 时的占位。
+
+    不需要模型的方法（context / browse / export / 工具搜索）照常可用；
+    真要调模型时给出一句**说得清**的错，而不是 AttributeError。
+    """
+
+    def complete(self, prompt: str, *, purpose: str = "") -> str:
+        raise RuntimeError(
+            "这个服务没有配模型（启动时加 --model），"
+            f"但 {purpose or '这次调用'} 需要它"
+        )
+
+
+def _cmd_schema(args) -> int:
+    from ..schema import dump
+
+    print(dump())
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

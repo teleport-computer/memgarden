@@ -68,6 +68,8 @@ from .mounted import (
     Scope,
 )
 from .ports import ClockPort, ModelPort, SystemClock
+from .schema import ERROR_CODES, manifest, schemas
+from .service import Service
 # 官方参考存储。放在顶层是**刻意的**：接入方需要一个能直接用的 store，
 # 逼他们去 `memgarden.stores.sqlite` 挖，等于告诉他们「内部模块可以随便进」。
 from .stores.sqlite import SqliteStore
@@ -80,6 +82,10 @@ __all__ = [
     "MaintenanceCheck",
     "MountPermissionError",
     "SqliteStore",
+    "Service",
+    "manifest",
+    "schemas",
+    "ERROR_CODES",
     "GardenCapabilities",
     "CaptureSession",
     "MaintenanceSession",

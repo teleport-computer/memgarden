@@ -237,6 +237,80 @@ def mutation_from_dict(payload: dict) -> Mutation:
     return cls(**{k: v for k, v in data.items() if k in known_fields})
 
 
+class InvalidMutation(ValueError):
+    """线上格式不合法 —— 缺必填字段、字段类型不对。
+
+    和 :class:`UnknownMutation` 分开，是因为调用方的处置不同：未知 op 多半是
+    版本不匹配（该升级），字段错多半是构造代码有 bug（该修）。
+    """
+
+
+def validate_mutations(payload: "list[dict]") -> list[Mutation]:
+    """把线上格式严格校验成类型化改动。**进存储之前的唯一关口。**
+
+    ## 为什么要有这一步
+
+    以前是「送到 Store，Store 不认识就抛」。问题有三个：
+
+    1. 每个 Store 实现各自判一遍，判得松紧不一 —— 官方 SQLite 抛 ValueError，
+       别人的适配器可能默默跳过那条，于是记忆悄悄少了一条而没有任何报错。
+    2. 错误在**存储层**冒出来，调用方看到的是「unknown op: merge」这种和自己
+       代码毫无关系的话（sevenfloor 2026-09-02 实测到的正是这句）。
+    3. 批次里第 3 条不合法时，前 2 条可能已经写进去了 —— 取决于 Store 有没有
+       事务，而那不该由 mutation 的合法性来决定。
+
+    所以统一在这里：**不合法就根本不进 Store**。
+
+    ## 校验什么
+
+    - op 必须认识；
+    - 各 op 的必填字段必须在（``add`` 要 card，``supersede`` 要 target 和 card，
+      ``update`` 要 record_id 和 changes，``archive``/``delete`` 要 target）；
+    - 字段类型必须对得上。
+
+    **不校验**卡的内容是否有意义 —— 那是 :mod:`memgarden.text` 的闸做的事，
+    两者关注点不同：这里管「结构对不对」，那里管「内容值不值得写」。
+    """
+    out: list[Mutation] = []
+    for index, row in enumerate(payload or []):
+        if not isinstance(row, dict):
+            raise InvalidMutation(f"第 {index} 条不是对象：{type(row).__name__}")
+        try:
+            mutation = mutation_from_dict(row)   # 未知 op 抛 UnknownMutation
+        except UnknownMutation:
+            raise
+        except TypeError as exc:
+            # dataclass 的必填字段缺了会抛裸 TypeError。原样冒出去的话，
+            # 调用方看到的是「Card.__init__() missing 1 required positional
+            # argument」—— 和他写的那条 mutation 对不上号。
+            raise InvalidMutation(f"第 {index} 条字段不合法：{exc}") from exc
+        _require_fields(index, mutation)
+        out.append(mutation)
+    return out
+
+
+def _require_fields(index: int, m: Mutation) -> None:
+    def _fail(what: str) -> None:
+        raise InvalidMutation(f"第 {index} 条 {m.op} 缺 {what}")
+
+    if isinstance(m, Add):
+        if m.card is None:
+            _fail("card")
+    elif isinstance(m, Supersede):
+        if not m.targets():
+            _fail("target_id / target_ids")
+        if m.card is None:
+            _fail("card（取代旧卡必须给出新卡，否则那条记忆就没了）")
+    elif isinstance(m, Update):
+        if not str(m.record_id or "").strip():
+            _fail("record_id")
+        if not isinstance(m.changes, dict) or not m.changes:
+            _fail("changes")
+    elif isinstance(m, (Archive, Delete)):
+        if not str(getattr(m, "target_id", "") or "").strip():
+            _fail("target_id")
+
+
 def required_capabilities(mutations: list[Mutation]) -> set[str]:
     """这批改动一共需要存储支持哪些能力。
 
@@ -255,5 +329,6 @@ def required_capabilities(mutations: list[Mutation]) -> set[str]:
 __all__ = [
     "RECORD_SCHEMA_VERSION", "Lifecycle", "Card", "Record",
     "Mutation", "Add", "Update", "Supersede", "Archive", "Delete", "NoOp",
-    "UnknownMutation", "mutation_from_dict", "required_capabilities",
+    "UnknownMutation", "InvalidMutation", "mutation_from_dict",
+    "validate_mutations", "required_capabilities",
 ]

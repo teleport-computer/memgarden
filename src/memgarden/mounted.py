@@ -31,6 +31,7 @@ from .contracts import (
     ToolCall,
     ToolResult,
 )
+from .records import UnknownMutation, required_capabilities, validate_mutations
 from .storage import RevisionConflict
 
 DEFAULT_MOUNT = "agent-private"
@@ -275,6 +276,29 @@ class MountedGarden:
 
     # -- 内部 ------------------------------------------------------------- #
 
+    def _missing_capabilities(self, needed: set[str]) -> set[str]:
+        """存储声明支持不了的那些能力。
+
+        存储没有 ``capabilities()`` 时**当作全部支持** —— 这个方法是可选契约，
+        缺它不代表能力弱，只代表适配器没实现声明。真做不到的话,写入那一步
+        自己会失败,不会静默错。
+        """
+        declare = getattr(self._store, "capabilities", None)
+        if declare is None:
+            return set()
+        try:
+            caps = declare()
+        except Exception:  # noqa: BLE001 —— 声明取不到不该让写入失败
+            return set()
+        out = set()
+        for name in needed:
+            flag = getattr(caps, f"supports_{name}", None)
+            if flag is None:
+                flag = getattr(caps, name, None)
+            if flag is False:
+                out.add(name)
+        return out
+
     def _readable_cards(
         self, scope: Scope, *, include_archived: bool = False
     ) -> list[dict]:
@@ -304,6 +328,27 @@ class MountedGarden:
             # mount 一律以可信作用域为准 —— 判断层给的只是建议值。
             row["mount"] = scope.check(str(row.get("mount") or mount))
             stamped.append(row)
+
+        # 🔴 进 Store 之前的唯一关口：结构不合法 / 存储支持不了,就根本不写。
+        #
+        # 以前是送到 Store、Store 不认识就抛。三个问题:每个 Store 各判一遍
+        # 松紧不一(有的默默跳过那条,记忆就悄悄少了);错误从存储层冒出来,
+        # 调用方看到的是和自己代码对不上号的话;批次里第 3 条不合法时前 2 条
+        # 可能已经写进去了 —— 那取决于 Store 有没有事务,不该由合法性决定。
+        try:
+            typed = validate_mutations(stamped)
+        except (UnknownMutation, ValueError) as exc:
+            return OperationReceipt(error=f"invalid_mutation:{exc}", trace=trace)
+
+        needed = required_capabilities(typed)
+        missing = self._missing_capabilities(needed)
+        if missing:
+            # 提前说「做不到」,好过写一半再失败 —— 后者留下的半成品状态
+            # 最难查:库里既有新卡又有没归档的旧卡,而且没有报错。
+            return OperationReceipt(
+                error=f"storage_lacks_capabilities:{','.join(sorted(missing))}",
+                trace=trace)
+
         try:
             applied = self._store.apply(
                 scope.tenant_id, stamped,
