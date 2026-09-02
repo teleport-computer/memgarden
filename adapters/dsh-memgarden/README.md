@@ -2,17 +2,32 @@
 
 把 Memory Garden 挂到 DeepSeek Harness 上的**薄** Adapter。
 
-> ## ⚠️ 状态：未经真实 Runtime 验证
+> ## ⚠️ 状态：接线对着真实 API 写，但**没有跑过端到端**
 >
-> 这份代码是照着 DeepSeek Harness 的**公开文档**写的骨架，**没有在真实的
-> DSH 上跑过**。按 sevenfloor 2026-09-02 §8.2 的验收标准，
-> **它现在不算「兼容完成」**——那要求「固定版本 + 可重复演示 + 端到端证据」。
+> 核对基线：`dsh-v0.1.2-alpha.4`，commit `4e84901e6471b79ec0338099867ebb4606d12bb5`
+> —— 和 sevenfloor 2026-09-02 文档里 pin 的一致，已从公开仓库拉下来逐个核对。
 >
-> 它现在的用处只有一个：把接线**形状**定下来，好让能跑 DSH 的人接手时
-> 不用从零开始，也好让形状本身先被 review。
+> **已核对属实**（不是照文档猜的）：
 >
-> 拿到 DSH 环境之后要做的：pin 确切 tag+commit、跑通 §8.2 那 16 步、
-> 补上失败路径那 12 项、把验证结果和确切版本写进这个 README。
+> | 项 | 真实值 |
+> |---|---|
+> | 包名 | `@deepseek-ai/dsh-*`（先前猜的 `@deepseek/harness` 不存在） |
+> | 注入上下文 | `@deepseek-ai/cordis` 的 `Context` |
+> | 工具注册 | `ctx.tools.register(defineTool({...}))` |
+> | 每轮召回 | `agent/pre-step`，waterfall，返回 `PreStepDecision` |
+> | 轮末落卡 | `agent/turn-stopping`，payload `{ agent, turn, signal }` |
+>
+> **仍未验证**：
+>
+> - 从 Agent 取 `profileId` / `userId` / 本轮文本的**具体字段名**还是推测；
+> - sevenfloor §8.2 那 16 步端到端，一步都没跑；
+> - 失败路径那 12 项（子进程不存在、握手不兼容、hot reload、并发…）都没试。
+>
+> 所以按他的验收标准，**这不算「兼容完成」**。拿到能跑的 DSH 环境之后：
+> 删掉 `types/dsh.d.ts`（那是为了独立类型检查抄的最小子集，会和真类型漂）、
+> 把 Adapter 放进他们的 workspace、跑通 §8.2、把结果和确切版本写回这里。
+>
+> 类型检查：`tsc` 5.6 严格模式 0 错误（注入类型错误会报，确认不是假绿）。
 
 ## 形状
 

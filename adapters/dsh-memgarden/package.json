@@ -17,5 +17,14 @@
   "engines": {
     "node": ">=20"
   },
-  "_note": "DSH 的包名/版本待定 —— 之前这里写的 @deepseek/harness@0.1.2-alpha.4 是照文档猜的，npm 上不存在。拿到真实环境后按实际包名 pin 确切 tag+commit。"
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "0.1.2-alpha.4",
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.4"
+  },
+  "_pinned": {
+    "dsh_tag": "dsh-v0.1.2-alpha.4",
+    "dsh_commit": "4e84901e6471b79ec0338099867ebb4606d12bb5",
+    "note": "接线是照着这个 commit 的真实签名写的。DSH 处于 pre-release、官方说明允许 breaking changes —— 升级必须重跑完整 conformance，不能跟随 master 浮动。"
+  }
 }
