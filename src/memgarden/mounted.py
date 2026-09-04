@@ -130,6 +130,31 @@ class MountedGarden:
             trace=dict(result.trace or {}),
         )
 
+    def store_capture_result(
+        self, scope: Scope, request: CaptureRequest, result: Any
+    ) -> OperationReceipt:
+        """把**已经判断完**的落卡结果写库。
+
+        给 host-driven 用：模型由宿主调（它持有 key、路由、用量、超时、取消），
+        判断由内核做，写库这一步仍然归这里 —— 否则每个宿主又要自己实现一遍
+        mount 校验、typed mutation 关口、能力检查、幂等和 CAS。
+
+        和 :meth:`capture_and_store` 的唯一区别是「谁调的模型」。空结果和失败
+        的区分、写入的所有保证，两条路完全一样。
+        """
+        if getattr(result, "error", None):
+            return OperationReceipt(error=result.error,
+                                    trace=dict(getattr(result, "trace", {}) or {}))
+        mutations = list(getattr(result, "mutations", []) or [])
+        if not mutations:
+            return OperationReceipt(reason="nothing_worth_keeping",
+                                    trace=dict(getattr(result, "trace", {}) or {}))
+        return self._apply(
+            scope, scope.check(request.mount or DEFAULT_MOUNT), mutations,
+            idempotency_key=request.idempotency_key,
+            trace=dict(getattr(result, "trace", {}) or {}),
+        )
+
     # -- 想起 ------------------------------------------------------------ #
 
     def context_for_turn(
@@ -138,17 +163,25 @@ class MountedGarden:
         query: str,
         *,
         limit: int = 8,
+        mount: str | None = None,
     ) -> ContextResult:
         """这一轮该想起哪几张 —— **候选自己从库里取**。
 
         以前要调用方先把候选准备好，于是每个接入方都要重写一遍：查库、
         生命周期过滤、mount 过滤、权限过滤、投影、回填。现在归这里。
         """
-        candidates = self._readable_cards(scope)
+        # 宿主可以把这一轮**收窄**到某一个挂载点。收窄同样要过权限检查 ——
+        # 悄悄忽略一个不认识的 mount，宿主会以为自己限制住了，实际读的是全部。
+        if mount is not None:
+            scope.check(mount)
+        mounts = (mount,) if mount is not None else scope.mounts()
+        candidates = [c for c in self._readable_cards(scope)
+                      if mount is None
+                      or str(c.get("mount") or DEFAULT_MOUNT) == mount]
         return self.component.build_context(ContextRequest(
             query=query,
             actor=scope.actor,
-            mounts=scope.mounts(),
+            mounts=tuple(mounts),
             candidates=candidates,
             limit=limit,
         ))

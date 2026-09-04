@@ -253,9 +253,15 @@ class _NoModel:
     """
 
     def complete(self, prompt: str, *, purpose: str = "") -> str:
-        raise RuntimeError(
+        from ..service import ServiceError
+
+        # 用带稳定错误码的类型：宿主要能靠 code 分支（比如自动改走
+        # capture.begin/feed 那条宿主驱动的路），而不是去 match 人话消息。
+        raise ServiceError(
+            "model_not_configured",
             "这个服务没有配模型（启动时加 --model），"
-            f"但 {purpose or '这次调用'} 需要它"
+            f"但 {purpose or '这次调用'} 需要它；"
+            "宿主自己驱动模型时请改用 capture.begin / capture.feed",
         )
 
 

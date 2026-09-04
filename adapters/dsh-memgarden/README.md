@@ -2,7 +2,7 @@
 
 把 Memory Garden 挂到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 上的薄 Adapter。
 
-> ## ✅ 已端到端跑通（2026-09-04）
+> ## ✅ 已端到端跑通（2026-09-04，39 条验收全绿）
 >
 > 不是「照文档写的骨架」—— 用真实的 DSH 和真实的模型跑过：
 >
@@ -100,23 +100,72 @@ Adapter **只做翻译和接线**，不复制任何提示词 / 解析 / 挑卡 /
 Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
 而这两件事的处置完全不同。
 
-## 还没做的
+## 验收：四组，25 + 14 条，全绿
 
-- **模型调用没走 DSH。** 现在是 `memgarden serve --model <命令>` 自己调
-  DeepSeek。按 sevenfloor §5.4，正确形态是 host-driven session：DSH 用自己的
-  provider 调模型（它持有 key、路由、用量、超时、取消、重试），Garden 只决定
-  问什么、怎么解析、要不要重问。那需要服务侧提供 `capture.begin` / `capture.feed`。
-- **失败路径没试**：子进程不存在、握手不兼容、ModelPort 超时、capture 中途
-  退出、hot reload、两轮快速连续到达、整理与前台并发。
-- **模型工具没注册**：`memory_search` / `memory_write` 还没接进 DSH 的 Tool
-  Registry（自动召回不依赖它们，但模型主动查还需要）。
-- **多 agent 隔离没验**：`agent-private` 的跨 agent 负向测试在 Python 侧有，
-  但没在 DSH 上验过。
+```bash
+# 真模型的正向场景（会花钱，慢）
+export DEEPSEEK_API_KEY=...
+python e2e/dsh_acceptance.py          # 14/14
+
+# 坏情况（不联网、不花钱，秒级，随便跑）
+python e2e/failure_paths.py           # 25/25
+```
+
+| 组 | 验的是 |
+|---|---|
+| A 自动落卡 + 跨会话召回 | 会话 A 说「不吃辣」→ 全新会话 B 问「晚饭吃什么」→ 模型答「温和养胃又不辣」。**模型全程没主动调任何记忆工具** |
+| B 模型主动调工具 | `memgarden_memory_search` / `memgarden_memory_write` 注册进 DSH 的 Tool Registry，模型调了、真的落库 |
+| C 多 agent 隔离 | 另一个租户挂**同一个花园库**，读不到别人的记忆 |
+| D 失败路径 | 服务起不来 / 中途退出 / 会话过期 / 越权挂载 / 卡住不回 / 快速两轮 / 整理与前台并发 / 幂等重放 |
+
+模型调用**全部走 DSH 的 provider**（`ctx.llm.stream`）——
+服务端启动时不带 `--model`，Garden 全程不碰 key。
+
+## 真跑才抓到的五件事
+
+写这个 Adapter 的过程本身就说明了「照文档写」和「真跑一遍」的差距。
+下面每一条都是**先跑绿了、才发现是错的**那一类。
+
+**① `content` 必须是分片数组，不能是字符串**
+
+```js
+{ role: 'user', content: [{ type: 'text', text: '[记忆]\n- 不吃辣' }] }   // ✅
+{ role: 'user', content: '[记忆]\n- 不吃辣' }                              // ❌ 整轮失败
+```
+
+传字符串时 DSH 内部会 `content.some(...)`，报
+`content.some is not a function` —— **这句话和「记忆注入」看不出任何关系**。
+
+**② `agent/pre-step` 是 waterfall，必须先 `await next()` 再追加**
+
+自己造一份 `messages` 返回，会把别的插件加的东西悄悄丢掉，而且不报错。
+
+**③ `agent/turn-stopping` 必须 `return` 那个 promise**
+
+fire-and-forget（`void promise`）的话，turn 立刻结束、进程随即退出，落卡在
+半路被杀掉：**没有报错，只是那条记忆没了**。宿主驱动比单次调用多两次往返，
+这个竞态每次都稳定命中，花园里 0 张卡。
+
+**④ 流分片的字段是 `text`，不是 `delta`**
+
+写成 `chunk.delta` 时它永远 `undefined`，拼出来是空串 —— 空串让 Garden 解析
+失败、产出 0 张卡，而**链路上每一步都「成功」**。现在空回复会当失败抛出来。
+
+**⑤ `spawn` 的 `error` 事件没人听 → 整个宿主进程崩**
+
+memgarden 没装、路径写错、没执行权限，后果都是「用户的 agent 起不来」，
+报错还和记忆看不出关系。**记忆是增强不是依赖**：挂了只该退化成没有记忆。
+这条是 D 组第一次跑就抓到的。
+
+**⑥ 子进程的 stderr 必须自己落一份**
+
+Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
+而这两件事的处置完全不同。
 
 ## 版本纪律
 
 DSH 处于 pre-release，官方说明允许 breaking changes。
 
 - Adapter 必须 pin 确切 tag + commit，**不能跟随 `master` 浮动**；
-- 升级必须重跑完整验收，不能凭「上一版能跑」推断；
+- 升级必须重跑上面两个验收脚本，不能凭「上一版能跑」推断；
 - 「在 alpha.4 验证通过」不自动代表未来 release 兼容。

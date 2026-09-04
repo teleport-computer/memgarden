@@ -152,6 +152,12 @@ ERROR_CODES = (
     "query_required",
     "summary_and_content_required",
     "unknown_tool",
+    # -- 服务层（长驻 serve 的分发边界） ------------------------------- #
+    "unknown_method",               # 没有这个方法
+    "invalid_request",              # 参数不合法
+    "unknown_session",              # capture 会话不存在/已取消/服务重启过
+    "model_not_configured",         # 服务没配模型，但这个方法需要模型
+    "internal_error",               # 兜底：出到这个码就是我们的 bug
 )
 
 
@@ -206,7 +212,8 @@ def manifest() -> dict[str, Any]:
         # 而不是发一个请求过来试。
         "operations": [
             "manifest.get", "schema.get", "health.get",
-            "capture.run", "context.get",
+            "capture.run", "capture.begin", "capture.feed", "capture.cancel",
+            "context.get",
             "maintenance.check", "maintenance.run",
             "tool.list", "tool.invoke",
             "records.browse", "records.export",
