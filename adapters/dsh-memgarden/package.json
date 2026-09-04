@@ -1,30 +1,27 @@
 {
-  "name": "@teleport-computer/dsh-memgarden",
-  "version": "0.0.1-alpha.0",
+  "name": "dsh-memgarden",
+  "version": "0.1.0",
   "private": true,
-  "description": "把 Memory Garden 挂到 DeepSeek Harness 上的薄 Adapter（未经真实 Runtime 验证）",
+  "description": "把 Memory Garden 挂到 DeepSeek Harness 上的薄 Adapter",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "src/plugin.mjs",
+  "exports": {
+    ".": "./src/plugin.mjs",
+    "./package.json": "./package.json"
+  },
   "files": [
-    "dist",
+    "src",
     "README.md"
   ],
-  "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
-  "peerDependencies": {
-    "@deepseek-ai/cordis": "*",
-    "@deepseek-ai/dsh-agent": "0.1.2-alpha.4",
-    "@deepseek-ai/dsh-tools": "0.1.2-alpha.4"
-  },
-  "_pinned": {
-    "dsh_tag": "dsh-v0.1.2-alpha.4",
+  "_verified": {
+    "dsh_package": "@deepseek-ai/dsh",
+    "dsh_version": "0.1.2-alpha.4",
     "dsh_commit": "4e84901e6471b79ec0338099867ebb4606d12bb5",
-    "note": "接线是照着这个 commit 的真实签名写的。DSH 处于 pre-release、官方说明允许 breaking changes —— 升级必须重跑完整 conformance，不能跟随 master 浮动。"
+    "date": "2026-09-04",
+    "scenario": "会话 A 落卡 → 全新会话 B 自动召回，模型未主动调工具",
+    "note": "DSH 是 pre-release,允许 breaking changes。升级必须重跑完整验收,不能凭「上一版能跑」推断;也不能跟随 master 浮动。"
   }
 }

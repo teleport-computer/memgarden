@@ -1,76 +1,122 @@
-# @teleport-computer/dsh-memgarden
+# dsh-memgarden
 
-把 Memory Garden 挂到 DeepSeek Harness 上的**薄** Adapter。
+把 Memory Garden 挂到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 上的薄 Adapter。
 
-> ## ⚠️ 状态：接线对着真实 API 写，但**没有跑过端到端**
+> ## ✅ 已端到端跑通（2026-09-04）
 >
-> 核对基线：`dsh-v0.1.2-alpha.4`，commit `4e84901e6471b79ec0338099867ebb4606d12bb5`
-> —— 和 sevenfloor 2026-09-02 文档里 pin 的一致，已从公开仓库拉下来逐个核对。
+> 不是「照文档写的骨架」—— 用真实的 DSH 和真实的模型跑过：
 >
-> **已核对属实**（不是照文档猜的）：
+> ```
+> dsh          0.1.2-alpha.4（commit 4e84901e6471b79ec0338099867ebb4606d12bb5）
+> 模型          deepseek-v4-flash（落卡侧 deepseek-chat）
+> 改 DSH 代码   0 行 —— 只在 profile 的用户层加了一个插件
+> ```
 >
-> | 项 | 真实值 |
-> |---|---|
-> | 包名 | `@deepseek-ai/dsh-*`（先前猜的 `@deepseek/harness` 不存在） |
-> | 注入上下文 | `@deepseek-ai/cordis` 的 `Context` |
-> | 工具注册 | `ctx.tools.register(defineTool({...}))` |
-> | 每轮召回 | `agent/pre-step`，waterfall，返回 `PreStepDecision` |
-> | 轮末落卡 | `agent/turn-stopping`，payload `{ agent, turn, signal }` |
+> **验到的场景**（sevenfloor §8.2 的核心几步）：
 >
-> **仍未验证**：
+> ```
+> 会话 A  用户：「我不吃辣，一吃就胃疼」
+>         → 轮末自动落卡，桶=饮食
 >
-> - 从 Agent 取 `profileId` / `userId` / 本轮文本的**具体字段名**还是推测；
-> - sevenfloor §8.2 那 16 步端到端，一步都没跑；
-> - 失败路径那 12 项（子进程不存在、握手不兼容、hot reload、并发…）都没试。
+> 会话 B  全新会话，不复制 A 的任何对话
+>         用户：「晚饭吃什么？」
+>         → pre-step 自动召回
+>         → 模型：「小米南瓜粥搭配清蒸鲈鱼和焯水的西兰花，温和养胃又不辣」
+> ```
 >
-> 所以按他的验收标准，**这不算「兼容完成」**。拿到能跑的 DSH 环境之后：
-> 删掉 `types/dsh.d.ts`（那是为了独立类型检查抄的最小子集，会和真类型漂）、
-> 把 Adapter 放进他们的 workspace、跑通 §8.2、把结果和确切版本写回这里。
->
-> 类型检查：`tsc` 5.6 严格模式 0 错误（注入类型错误会报，确认不是假绿）。
+> **模型全程没有主动调用任何记忆工具** —— 它根本不知道有记忆系统存在。
+> 这正是「只注册 MCP 工具做不到」的那件事：自动召回、自动落卡不依赖模型
+> 记得去查。
 
-## 形状
+## 怎么跑
 
+```bash
+# 1. 装 DSH 和 memgarden
+npm install @deepseek-ai/dsh@0.1.2-alpha.4
+pip install memgarden
+
+# 2. 初始化 profile
+export DSH_HOME=/absolute/path/to/dsh-home
+npx dsh --profile sdk-minimal --dump-default-config >/dev/null
+
+# 3. 把插件挂进 $DSH_HOME/profiles/sdk-minimal/cordis.patch.yml
+#    （见下面的配置示例）
+
+# 4. 跑
+export DEEPSEEK_API_KEY=...
+python e2e/dsh_e2e.py
 ```
-DeepSeek Harness
-      │  pre-step hook / tool registry / scheduler
-      ▼
-DshMemGardenAdapter（TypeScript，薄）
-      │  stdio，一行一个 JSON
-      ▼
-memgarden serve（Python 长驻）
-      ├── MountedGarden
-      ├── ModelPort ← 反过来回调 DSH 的 LLM
-      └── StoragePort（官方 SQLite）
+
+`cordis.patch.yml`：
+
+```yaml
+- insert:
+    - id: memgarden
+      name: 'dsh-memgarden'
+      inject: [tools]
+      config:
+        bin: /path/to/memgarden          # pip 装出来的可执行文件
+        storage: 'sqlite:////path/to/garden.db'
+        tenant: 'user-1'                 # 🔴 来自你的可信上下文
+        locale: 'zh-Hans'
+        model: 'python3 e2e/deepseek_cli.py'
 ```
 
-**Adapter 只做翻译和接线**，不复制任何 Garden 的提示词、解析、挑卡、整理逻辑。
-判断一律回到 Python 那边——复制过来就会漂，而漂了不报错。
+## 接线点（都是 DSH 的正式扩展点）
 
-## 三条边界
+| 时机 | DSH 扩展点 | 做什么 |
+|---|---|---|
+| 每次请求模型前 | `agent/pre-step`（waterfall） | 召回相关记忆，注入本轮上下文 |
+| 一轮结束 | `agent/turn-stopping` | 后台落卡，不阻塞回复 |
 
-1. **Python 内核不 import DSH**，DSH 的类型不进 Garden 契约。
-2. **DSH 升级只改 Adapter**，不改 Garden 领域模型。
-3. **作用域来自 DSH 的可信 scope**，不从模型的工具参数读 —— 否则模型只要在
-   参数里写别人的 tenant 就能读到别人的记忆。
+Adapter **只做翻译和接线**，不复制任何提示词 / 解析 / 挑卡 / 整理逻辑 ——
+判断一律回到 Python 那边（`memgarden serve`）。复制过来最省事也最致命：
+两边会慢慢漂，而漂了不报错，表现是「同样的对话，DSH 上记的东西和别处不一样」。
 
-## 为什么不只用 MCP
+## 真跑才抓到的三件事
 
-DSH 自带 MCP Client，只注册 `memory_search` / `memory_write` 确实能跑。
-但那样只有「模型主动想起来要查」这一种触发方式，做不到：
+写这个 Adapter 的过程本身就说明了「照文档写」和「真跑一遍」的差距。
 
-- 每轮自动带上相关记忆（模型不调工具就没有）
-- 对话结束自动落卡
-- 后台整理
+**① `content` 必须是分片数组，不能是字符串**
 
-这三件恰恰是「记忆」这个产品的主体。所以要 Native Adapter + 长驻 Service，
-MCP Server 作为通用分发面另算。
+```js
+// ❌ 整轮对话直接失败
+{ role: 'user', content: '[记忆]\n- 不吃辣' }
 
-## 待确定（需要 DSH 环境才能定）
+// ✅
+{ role: 'user', content: [{ type: 'text', text: '[记忆]\n- 不吃辣' }] }
+```
 
-- 新 Session 是否继续用同一个 agent 的长期花园
-- Fork / Resume / Clear Session 各自算不算新的 capture 来源
-- 同一 agent 的多个 Session 如何防重复 capture
-- 删除 agent 时它的 private 记忆怎么处理
-- turn 失败 / 被取消 / 纯工具轮 要不要 capture
-- hot reload 时 pending capture 怎么办
+传字符串时 DSH 内部会 `content.some(...)`，报
+`content.some is not a function` —— **这句话和「记忆注入」看不出任何关系**。
+类型检查发现不了，文档也没写死这一点。
+
+**② `agent/pre-step` 是 waterfall，必须先 `await next()` 再追加**
+
+自己造一份 `messages` 返回，会把别的插件加的东西悄悄丢掉，而且不报错。
+
+**③ 子进程的 stderr 必须自己落一份**
+
+Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
+而这两件事的处置完全不同。
+
+## 还没做的
+
+- **模型调用没走 DSH。** 现在是 `memgarden serve --model <命令>` 自己调
+  DeepSeek。按 sevenfloor §5.4，正确形态是 host-driven session：DSH 用自己的
+  provider 调模型（它持有 key、路由、用量、超时、取消、重试），Garden 只决定
+  问什么、怎么解析、要不要重问。那需要服务侧提供 `capture.begin` / `capture.feed`。
+- **失败路径没试**：子进程不存在、握手不兼容、ModelPort 超时、capture 中途
+  退出、hot reload、两轮快速连续到达、整理与前台并发。
+- **模型工具没注册**：`memory_search` / `memory_write` 还没接进 DSH 的 Tool
+  Registry（自动召回不依赖它们，但模型主动查还需要）。
+- **多 agent 隔离没验**：`agent-private` 的跨 agent 负向测试在 Python 侧有，
+  但没在 DSH 上验过。
+
+## 版本纪律
+
+DSH 处于 pre-release，官方说明允许 breaking changes。
+
+- Adapter 必须 pin 确切 tag + commit，**不能跟随 `master` 浮动**；
+- 升级必须重跑完整验收，不能凭「上一版能跑」推断；
+- 「在 alpha.4 验证通过」不自动代表未来 release 兼容。
