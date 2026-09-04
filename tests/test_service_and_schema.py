@@ -160,3 +160,68 @@ def test_a_service_without_a_model_still_serves_what_needs_no_model():
         **T1, "window": "用户：我不吃辣", "locale": "zh-Hans"}})
     assert needs_model["ok"] is False
     assert "没有配模型" in needs_model["error"]["message"]
+
+
+# --------------------------------------------------------------------------- #
+# Manifest 必须如实
+# --------------------------------------------------------------------------- #
+
+def test_manifest_capabilities_match_what_the_component_actually_declares():
+    """Manifest 里的能力声明必须和组件自己说的一致。
+
+    两处各写一份的话会漂，而漂的方向通常是「Manifest 说支持、执行层没做」——
+    接入方照着 Manifest 写代码，到线上才发现不生效，且没有报错。
+    """
+    from dataclasses import asdict
+
+    from memgarden import GardenComponent
+    from memgarden.schema import manifest
+
+    declared = manifest()["capabilities"]
+    actual = asdict(GardenComponent(model=None).capabilities())
+    actual.pop("mounts", None)
+    actual.pop("schema_version", None)
+    assert declared == actual
+
+
+def test_manifest_only_lists_mounts_whose_permissions_are_enforced():
+    """只列**权限执行层真正保护**的 mount。
+
+    契约里定义过 user-private / family-shared / workspace-shared，但第一阶段
+    只有 agent-private 有真正的隔离。声明了却不保护，比不声明危险得多。
+    """
+    from memgarden.schema import manifest
+
+    assert manifest()["mounts"] == ["agent-private"]
+
+
+def test_history_import_is_declared_unsupported_not_silently_substituted():
+    """History Import 明说不支持，而不是悄悄用日常聊天那把尺子代替。
+
+    代替的表现是「导入成功但几乎没记住」—— 用户交出三年记录只蒸出几张，
+    而且没有任何错误可查。宁可明说做不到。
+    """
+    from memgarden import GardenComponent
+    from memgarden.contracts import ImportRequest
+    from memgarden.schema import manifest
+
+    assert manifest()["capabilities"]["history_import"] is False
+
+    # 而且真调它、指定 history_import 档位时,要明确拒绝
+    out = GardenComponent(model=None).import_history(
+        ImportRequest(material="三年的聊天记录…", policy="history_import",
+                      locale="zh-Hans"))
+    assert out.error and "policy_not_supported" in out.error
+
+
+def test_manifest_lists_every_operation_the_service_actually_serves():
+    """Manifest 报的方法必须和服务真的处理的一致。
+
+    少报 → 接入方以为不支持，绕路自己实现；多报 → 调过来才发现没有，
+    而那时已经在用户的请求里了。
+    """
+    from memgarden.schema import manifest
+    from memgarden.service import Service
+
+    served = set(Service(garden=None)._methods)
+    assert set(manifest()["operations"]) == served

@@ -168,19 +168,63 @@ def schemas() -> dict[str, Any]:
 
 
 def manifest() -> dict[str, Any]:
-    """这个组件是什么、说哪个版本的协议。
+    """这个组件是什么、能做什么、说哪个版本的协议。
 
     接入方**启动时**就该核对这个 —— 版本不兼容要立刻拒绝启动，而不是跑到
     第一条用户消息才失败。
+
+    ## 🔴 ``capabilities`` 必须如实
+
+    这里声明的每一项，执行层都要真的支持；**做不到的一律声明 False**。
+
+    「Contract 声明支持、执行层不保护」是最坏的一种状态：接入方照着声明写代码，
+    到线上才发现不生效，而且没有报错。所以 ``history_import`` 是 ``False`` ——
+    专用提示词模板还没做，用日常聊天那把尺子代替会产生「导入成功但几乎没记住」
+    的假成功。宁可明说不支持。
+
+    ``mounts`` 同理：契约里定义过 ``user-private`` / ``family-shared`` /
+    ``workspace-shared``，但第一阶段只有 ``agent-private`` 有真正的权限执行，
+    所以这里只报它一个。
     """
+    from .component import GardenComponent
+    from dataclasses import asdict
+
+    caps = asdict(GardenComponent(model=None).capabilities())
+    mounts = list(caps.pop("mounts", ("agent-private",)))
+    caps.pop("schema_version", None)
     return {
         "component_id": "memgarden",
+        "component_version": _version(),
         "protocol_version": f"{SCHEMA_VERSION}",
         "record_schema_version": RECORD_SCHEMA_VERSION,
         "mutation_schema_version": MUTATION_SCHEMA_VERSION,
+        # 每一项都对应执行层真的做得到的事,做不到的是 False。
+        "capabilities": caps,
+        # 只列**权限执行层真正保护**的 mount。
+        "mounts": mounts,
+        # 长驻服务暴露的方法。接入方据此判断这个版本支不支持它要的调用,
+        # 而不是发一个请求过来试。
+        "operations": [
+            "manifest.get", "schema.get", "health.get",
+            "capture.run", "context.get",
+            "maintenance.check", "maintenance.run",
+            "tool.list", "tool.invoke",
+            "records.browse", "records.export",
+        ],
         "error_codes": list(ERROR_CODES),
         "schemas": sorted(schemas()),
     }
+
+
+def _version() -> str:
+    """装出来的版本号。取不到时给空串,不猜 —— 猜出来的版本号会让接入方
+    的兼容性判断建立在假数据上。"""
+    try:
+        from importlib import metadata
+
+        return metadata.version("memgarden")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def dump(indent: int = 2) -> str:
