@@ -34,10 +34,15 @@ class Client {
     this.buf = ''
     this.restarts = 0
     this.closed = false
+    // 🔴 重启耗尽后置成 Error，request() 据此立刻失败。
+    // 不置的话（此前就是），后续请求会继续写一个已经退出的子进程的 stdin，
+    // 然后等满 120s 超时 —— 每一轮对话都白等两分钟，而根因早就发生了。
+    this.dead = null
     this.spawn()
   }
 
   spawn() {
+    this.dead = null          // 起来了就不再是 dead
     // 🔴 **不给服务任何模型配置**。模型调用归 DSH —— 它持有 provider、
     // key、路由、用量统计、超时、取消、重试。让 Garden 另开一条 DSH 管不着的
     // 通道，后果很具体：用户按「停止」时那次落卡的调用停不下来，也不计入用量。
@@ -74,6 +79,7 @@ class Client {
   maybeRestart() {
     if (this.closed) return
     if (this.restarts >= MAX_RESTARTS) {
+      this.dead = new Error('已重启 ' + this.restarts + ' 次仍然退出')
       log('[memgarden] 已重启 ' + this.restarts + ' 次仍然退出，不再重试。\n' +
           '            记忆功能从现在起不可用，但对话不受影响。\n')
       return
@@ -267,12 +273,21 @@ function agentIdOf(agent) {
  *
  * 取不到 session 时退回只用 query：**降级要能看出来**，不能悄悄记一半。
  */
-function renderTurnWindow(agent, query) {
+function messageCount(agent) {
+  try {
+    return (agent?.session?.surface?.messages
+            || agent?.session?.messages || []).length
+  } catch { return 0 }
+}
+
+function renderTurnWindow(agent, query, from = 0) {
   const lines = []
   try {
     const msgs = agent?.session?.surface?.messages
                  || agent?.session?.messages || []
-    for (const m of msgs.slice(-12)) {
+    // 只取本轮开始之后的消息。上限仍然留着，防一个超长 turn 撑爆窗口。
+    const slice = msgs.slice(Math.max(0, from)).slice(-40)
+    for (const m of slice) {
       const role = String(m?.role || '')
       const text = textOf(m?.content)
       if (!text.trim()) continue
@@ -378,7 +393,18 @@ export function apply(ctx, config) {
       // 只在这一轮**第一次** pre-step 时记下用户输入。一个 turn 里会有
       // 多次 pre-step（工具循环），后面几次的最后一条消息是工具结果，
       // 拿它当「用户说的话」会把工具输出记成用户的原话。
-      if (!turns.has(key)) turns.set(key, { query: q, agent: payload.agent })
+      if (!turns.has(key)) {
+        // 记下本轮从第几条消息开始 —— turn-stopping 只渲染这之后的。
+        // 用固定的 slice(-12) 的话，短 turn 会把上一轮的对话再次卷进落卡窗口，
+        // 于是同一件事被重复记，或者旧上下文串进这一轮的卡里。
+        //
+        // ⚠️ 减一：pre-step 触发时，**用户这一轮的话已经在消息里了**
+        // （上面那个 `q` 就是从最后一条取的）。直接用当前条数当起点，
+        // 会把用户的原话切掉，落卡窗口里只剩助手的回复 —— 模型拿到一段
+        // 没有用户输入的对话，返回空，整轮落卡失败。
+        turns.set(key, { query: q, agent: payload.agent,
+                         from: Math.max(0, messageCount(payload.agent) - 1) })
+      }
       const turnScope = scopeFor(agentIdOf(payload.agent),
                                  sessionIdOf(payload.agent))
       const result = await client.request('context.get',
@@ -456,7 +482,7 @@ export function apply(ctx, config) {
     // 🔴 落卡的窗口是**这一轮的完整内容**，不只是 pre-step 存的那句 query。
     // 只记用户问句的话，「助手答应了什么」「工具查到了什么」全都进不了记忆 ——
     // 而那些往往才是这一轮真正值得记的东西。
-    const window = renderTurnWindow(payload.agent, state.query)
+    const window = renderTurnWindow(payload.agent, state.query, state.from)
     if (!window.trim()) return
 
     const turnScope = scopeFor(agentIdOf(payload.agent),

@@ -123,6 +123,55 @@ class OperationReceipt:
 
 
 @dataclass
+class Page:
+    """一页结果 + 下一页的游标。
+
+    ``next_cursor`` 为空表示没有下一页 —— 调用方据此停止，不用自己数总数。
+
+    ## 为什么它可迭代、还转发属性
+
+    分页是**加法**：以前 ``browse()`` 直接返回一个列表、``export()`` 返回一个
+    带 ``counts`` 的结果对象。套一层新类型会让所有现有调用方一起断，而它们
+    并没有做错什么 —— 这个包对外发过版，别人的代码在跑。
+
+    所以 ``for x in page`` / ``len(page)`` / ``page[0]`` 和以前一样，
+    ``page.counts`` 这类原结果上的字段也照常取得到；要分页的人才去读
+    ``page.next_cursor``。
+    """
+
+    items: Any = None
+    next_cursor: str = ""
+    total: int = 0
+    schema_version: int = 1
+
+    def __iter__(self):
+        return iter(self.items if self.items is not None else ())
+
+    def __len__(self) -> int:
+        try:
+            return len(self.items)
+        except TypeError:
+            return 0
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+    def __eq__(self, other) -> bool:
+        # 和裸列表比较时按内容比 —— 老测试写的是 `assert browse(...) == []`。
+        if isinstance(other, Page):
+            return (self.items, self.next_cursor, self.total) == (
+                other.items, other.next_cursor, other.total)
+        return self.items == other
+
+    def __getattr__(self, name: str):
+        # dataclass 自己的字段走不到这里（只有找不到时才调），所以不会打架。
+        try:
+            return getattr(object.__getattribute__(self, "items"), name)
+        except AttributeError:
+            raise AttributeError(name) from None
+
+
+@dataclass
 class MaintenanceCheck:
     """要不要整理。**先问这一句，别为了问一句就烧一次模型调用。**"""
 
@@ -432,18 +481,32 @@ class MountedGarden:
 
     # -- 看和导出 --------------------------------------------------------- #
 
-    def browse(self, scope: Scope, *, include_archived: bool = False):
-        cards = self._readable_cards(scope, include_archived=include_archived)
-        return self.component.browse(cards)
+    #: 一页最多多少条。**浏览和导出必须有界** —— 不分页的 export 在几万张卡的
+    #: 花园上会把整座花园塞进一条响应，宿主那边直接 OOM。
+    DEFAULT_PAGE = 100
+    MAX_PAGE = 1000
 
-    def export(self, scope: Scope, *, include_archived: bool = True):
+    def browse(self, scope: Scope, *, include_archived: bool = False,
+               limit: int | None = None, cursor: str = ""):
+        cards = self._readable_cards(scope, include_archived=include_archived)
+        page, next_cursor = _paginate(cards, limit, cursor,
+                                      self.DEFAULT_PAGE, self.MAX_PAGE)
+        return Page(items=self.component.browse(page), next_cursor=next_cursor,
+                    total=len(cards))
+
+    def export(self, scope: Scope, *, include_archived: bool = True,
+               limit: int | None = None, cursor: str = ""):
         from .contracts import ExportRequest
 
         cards = self._readable_cards(scope, include_archived=include_archived)
-        return self.component.export(ExportRequest(
-            actor=scope.actor, mounts=scope.mounts(),
-            include_archived=include_archived,
-        ), cards)
+        page, next_cursor = _paginate(cards, limit, cursor,
+                                      self.DEFAULT_PAGE, self.MAX_PAGE)
+        return Page(
+            items=self.component.export(ExportRequest(
+                actor=scope.actor, mounts=scope.mounts(),
+                include_archived=include_archived,
+            ), page),
+            next_cursor=next_cursor, total=len(cards))
 
     # -- 内部 ------------------------------------------------------------- #
 
@@ -630,3 +693,27 @@ def _digest_key(scope: Scope, mutations: list[dict]) -> str:
         ensure_ascii=False, default=str,
     )
     return "auto-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _paginate(cards: list[dict], limit: int | None, cursor: str,
+              default: int, maximum: int) -> tuple[list[dict], str]:
+    """按稳定顺序切一页出来。
+
+    游标用的是**卡的 id**，不是下标：下标游标在翻页途中有卡被删掉时会跳过
+    一条，而那一条从此不会出现在任何一页里 —— 导出「成功」了，内容少一张。
+
+    id 找不到时（那张卡在翻页途中被删了）从头开始，宁可重复一页也不跳过。
+    """
+    size = int(limit) if limit else default
+    size = max(1, min(size, maximum))
+    ordered = sorted(cards, key=lambda c: str(c.get("id") or ""))
+    start = 0
+    if cursor:
+        ids = [str(c.get("id") or "") for c in ordered]
+        if cursor in ids:
+            start = ids.index(cursor) + 1
+    page = ordered[start:start + size]
+    nxt = ""
+    if start + size < len(ordered) and page:
+        nxt = str(page[-1].get("id") or "")
+    return page, nxt

@@ -28,7 +28,14 @@ from ..storage import MutationRejected
 
 #: ``update`` 不许碰的字段。改这些等于换一张卡，必须走专门的 op。
 _IMMUTABLE = frozenset({"id", "owner", "tenant", "archived", "superseded_by",
-                        "deleted"})
+                        "deleted",
+                        # 🔴 mount 也在里面。少了它就是一条**提权路径**：
+                        # MountedGarden._apply 只校验 mutation 顶层的 mount，
+                        # 而 changes={"mount": "family-shared"} 会绕过那道检查
+                        # 直接写进卡 —— 只有 agent-private 权限的调用，
+                        # 因此可以把一张私密卡提升成共享的。
+                        # 提升挂载点必须走宿主授权的专门路径，不能是「改个字段」。
+                        "mount"})
 
 
 
@@ -51,6 +58,19 @@ def apply_ops(
 
         if op == "add":
             card = dict(m.get("card") or {})
+            # 🔴 调用方自带 id 时必须查重。
+            #
+            # 写入是 upsert，撞上已有 id 就是**静默覆盖掉那张旧卡** ——
+            # 不报错，总数还不变。同一批里两个 add 用同一个 id 也一样，
+            # 前一张凭空消失。
+            #
+            # 允许自带 id 本身是对的（宿主可能有自己的 ULID/业务号），
+            # 但「我要新增一张」和「我要覆盖那一张」是两个意思，
+            # 后者应当走 update。
+            supplied = str(card.get("id") or "").strip()
+            if supplied and supplied in staged:
+                raise MutationRejected(
+                    f"add 的 id 已存在: {supplied}（要改已有的卡请用 update）")
             card.setdefault("id", new_id())
             staged[card["id"]] = card
             results.append({"id": card["id"], "status": "written"})
@@ -90,6 +110,14 @@ def apply_ops(
                 if old_id not in staged:
                     raise MutationRejected(f"supersede target not found: {old_id}")
             new_card = dict(m.get("card") or {})
+            # 同上；而且 supersede 这里更严重：新卡 id 若等于某个 target，
+            # 「旧卡归档并指向新卡」的链条会被新卡直接盖掉，
+            # 历史就此消失 —— 而 supersede 的全部意义就是保住那条链。
+            supplied = str(new_card.get("id") or "").strip()
+            if supplied and supplied in staged:
+                raise MutationRejected(
+                    f"supersede 的新卡 id 已存在: {supplied}"
+                    "（新卡必须是新的，否则会盖掉它要取代的历史）")
             new_card.setdefault("id", new_id())
             for old_id in targets:
                 staged[old_id] = {**staged[old_id],

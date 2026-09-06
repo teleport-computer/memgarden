@@ -274,10 +274,16 @@ class Service:
 
     def _browse(self, p: dict) -> Any:
         return self.garden.browse(
-            _scope_from(p), include_archived=bool(p.get("include_archived")))
+            _scope_from(p), include_archived=bool(p.get("include_archived")),
+            limit=p.get("limit"), cursor=str(p.get("cursor") or ""))
 
     def _export(self, p: dict) -> Any:
-        return self.garden.export(_scope_from(p))
+        # include_archived 以前在这里被丢掉了 —— schema 声明了它、调用方传了，
+        # 而实现从不读。导出「归档的也要」的请求会静默返回不含归档的结果。
+        return self.garden.export(
+            _scope_from(p),
+            include_archived=bool(p.get("include_archived", True)),
+            limit=p.get("limit"), cursor=str(p.get("cursor") or ""))
 
     def _invoke(self, p: dict) -> Any:
         # 🔴 scope 用请求里的可信作用域，工具参数里的 actor/mounts 一概不读。
@@ -298,7 +304,18 @@ class Service:
         if fn is None:
             return {"id": rid, "ok": False,
                     "error": {"code": "unknown_method", "message": method}}
-        params = dict(request.get("params") or {})
+        # `handle` 承诺**永远返回 dict、不抛**。所以连「把 params 变成 dict」
+        # 这一步都要在保护内：params 传成字符串/数组时 dict() 会直接抛，
+        # 而一次坏请求把长驻进程带走，会连带影响所有别的调用方。
+        raw_params = request.get("params")
+        if raw_params is None:
+            raw_params = {}
+        if not isinstance(raw_params, dict):
+            return {"id": rid, "ok": False,
+                    "error": {"code": "invalid_request",
+                              "message": "params 必须是对象，"
+                                         f"收到 {type(raw_params).__name__}"}}
+        params = dict(raw_params)
         # 🔴 **执行前**按方法的 request schema 校验。
         # 不校验的话坏请求会走到业务代码里才炸，那时的错误消息是
         # 「NoneType 没有 strip」—— 调用方既不知道哪个字段错了，

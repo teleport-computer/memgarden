@@ -224,12 +224,23 @@ class UnknownMutation(ValueError):
 
 
 def mutation_from_dict(payload: dict) -> Mutation:
-    """从线上格式还原成类型化的改动。"""
+    """从线上格式还原成类型化的改动。
+
+    ``target_id`` 是老调用方对 archive/delete 的写法，这里**规范化**成
+    ``record_id``。只在校验处「也认 target_id」是不够的：下面这行会按
+    dataclass 的字段名过滤，而 ``Archive``/``Delete`` 上没有 ``target_id``
+    这个字段 —— 那个值在到达校验之前就已经被丢掉了。于是「兼容旧写法」
+    是一句空话：旧请求照样被拒，而注释还写着兼容。
+    """
     op = str((payload or {}).get("op") or "").strip()
     cls = _OPS.get(op)
     if cls is None:
         raise UnknownMutation(f"unknown mutation op: {op!r}")
     data = {k: v for k, v in (payload or {}).items() if k not in {"op", "requires"}}
+    if cls in (Archive, Delete) and not str(data.get("record_id") or "").strip():
+        legacy = str(data.pop("target_id", "") or "").strip()
+        if legacy:
+            data["record_id"] = legacy
     if "card" in data and isinstance(data["card"], dict):
         known = {f for f in Card.__dataclass_fields__}
         data["card"] = Card(**{k: v for k, v in data["card"].items() if k in known})
@@ -312,8 +323,7 @@ def _require_fields(index: int, m: Mutation) -> None:
         # 合法删除请求会被自己的校验器拒掉**，而照着校验器写的请求又不带
         # 类型系统认识的字段。声明和校验对不上，两边都走不通。
         # ``target_id`` 仍然认，老调用方不受影响。
-        if not (str(getattr(m, "record_id", "") or "").strip()
-                or str(getattr(m, "target_id", "") or "").strip()):
+        if not str(getattr(m, "record_id", "") or "").strip():
             _fail("record_id")
         # 删除必须能追溯到是谁要求的 —— 审计和合规都指着这个字段，
         # 而 ``Delete`` 的文档里也是这么承诺的。不查等于那句承诺是空的。

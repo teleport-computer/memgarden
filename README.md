@@ -35,14 +35,17 @@ gh attestation verify memgarden-0.12.8-py3-none-any.whl --repo teleport-computer
 > —— 有仓库写权限的人换掉一个 Release 附件，验证会失败。见 `docs/RELEASING.md`。
 
 ```python
-from memgarden import GardenComponent, CaptureRequest
+from memgarden import (GardenComponent, MountedGarden, CaptureRequest,
+                       Scope)
+from memgarden.stores.sqlite import SqliteStore
 
 garden = GardenComponent(model=my_model)              # 模型你提供，key 不给它
 result = garden.capture(CaptureRequest(
     window="用户：我不吃辣，一吃就胃疼",
     locale="zh-Hans",
 ))
-my_store.apply(result.mutations)                       # 落库是你的事
+my_store.apply("acme", result.mutations, owner="user-42",
+               idempotency_key="turn_42", expected_revision=None)  # 落库是你的事
 
 # 不想自己编排 load/CAS/幂等/生命周期的话，用 MountedGarden：
 garden = MountedGarden(model=my_model, store=SqliteStore("memory.db"))
@@ -216,23 +219,36 @@ result = policy.select(cards, query="我的狗是什么品种", limit=8)
 实现三个方法（`storage.StoragePort`）：
 
 ```python
-capabilities() -> Capabilities        # 你支持什么、不支持什么
-load(tenant, **filters) -> Snapshot   # 卡片 + 一个版本号（用于 CAS）
-apply(tenant, mutations, *, idempotency_key, expected_revision) -> ApplyResult
+capabilities() -> Capabilities                    # 你支持什么、不支持什么
+load(tenant, *, owner, **filters) -> Snapshot     # 卡片 + 版本号（用于 CAS）
+apply(tenant, mutations, *, owner, idempotency_key,
+      expected_revision, maintenance_state=None) -> ApplyResult
+maintenance_state(tenant, *, owner, mount) -> dict     # 整理账本（可选）
 ```
 
-**两条硬要求**，缺了会被拒绝而不是降级：
+🔴 **`owner` 必须落到查询条件里**，不能读回整个 tenant 再由调用方过滤。
+两者在正常情况下结果一样，差别只在出错时才看得见：漏一处过滤，
+前者读不到、后者读得到 —— 而后者不会报错。
+
+**四条硬要求**，缺了会被拒绝而不是降级：
 
 ```
-supersede      更新记忆必须是「旧的归档 + 新的写入」，不许硬删
-atomic_batch   一批要么全成、要么全不成，不许留半截
+supersede        更新记忆必须是「旧的归档 + 新的写入」，不许硬删
+atomic_batch     一批要么全成、要么全不成，不许留半截
+hard_delete      用户说删就真删。降级成归档 = 界面说删了、库里还在
+owner_scoping    查询层能限制在一个 owner 内。降级成事后过滤 = 越权读
 ```
+
+`Capabilities` **没有默认值**，每一项都要显式声明；不实现 `capabilities()`
+的存储会被当作**全部不支持**（fail closed）。
 
 其余能力缺了会**显式降级并说明代价**，不会静默变差 ——
 `describe_for_user(caps)` 直接给出人话说明。
 
 `stores/memory.py` 与 `stores/sqlite.py` 是两个参考实现，也是接口的活文档：
-两者跑**同一套契约测试**（`tests/test_store_contract.py`，24 条）。
+两者跑**同一套契约测试**（`tests/test_store_contract.py`），
+六个 mutation 也走同一份执行器（`stores/_ops.py`）——
+各写一份的话行为会漂，而漂了不报错。
 
 ### 插口 2：字段映射（你的卡片长得不一样）
 

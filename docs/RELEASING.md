@@ -43,10 +43,9 @@ PyPI。那不只是流程瑕疵 —— 红灯一旦变成常态，它就不再�
 > 不是记忆判断，不该让每个接 Garden 的人都吃下 io 的协议假设。
 > 现在这个包**零第三方依赖**。
 
-的断言改成认 PyPI。
-
-**在那之前 README 不许写 `pip install memgarden`** —— 照着做的人第一步就失败，
-而那是别人对这个项目的第一印象。这条有测试守着。
+> 包已经发在 PyPI 上，README 里的 `pip install memgarden` 是有效的。
+> （这段以前写着「在那之前 README 不许写 pip install」—— 那是首发之前的
+> 状态，现在不成立了。）
 
 ## 🔴 不要给 publish 步骤加 `continue-on-error`
 

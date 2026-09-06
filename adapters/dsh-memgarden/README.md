@@ -92,7 +92,7 @@ Garden 不持有 key，也不知道你用的哪个 provider。
 | 时机 | DSH 扩展点 | 做什么 |
 |---|---|---|
 | 每次请求模型前 | `agent/pre-step`（waterfall） | 召回相关记忆，注入本轮上下文 |
-| 一轮结束 | `agent/turn-stopping` | 后台落卡，不阻塞回复 |
+| 一轮结束 | `agent/turn-stopping` | 落卡。**会让 turn 的结束等它做完**（几秒），但回复早已生成并发给用户了。不等的话进程可能随即退出，落卡在半路被杀且不报错 |
 
 Adapter **只做翻译和接线**，不复制任何提示词 / 解析 / 挑卡 / 整理逻辑 ——
 判断一律回到 Python 那边（`memgarden serve`）。复制过来最省事也最致命：

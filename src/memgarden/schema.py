@@ -90,14 +90,23 @@ def _mutation() -> dict:
                                 "default": ""}},
              "anyOf": [{"required": ["target_id"]},
                        {"required": ["target_ids"]}]},
+            # record_id 是正式字段名（和 dataclass 一致）；target_id 是老写法，
+            # 解析时会被规范化成 record_id，这里只作为兼容 alias 列出。
             {"title": "archive", "type": "object",
-             "required": ["op", "target_id"],
+             "required": ["op"],
              "properties": {**base, "op": {"const": "archive"},
-                            "target_id": _STR}},
+                            "record_id": _STR, "target_id": _OPT_STR,
+                            "reason": _OPT_STR},
+             "anyOf": [{"required": ["record_id"]},
+                       {"required": ["target_id"]}]},
             {"title": "delete", "type": "object",
-             "required": ["op", "target_id"],
+             # requested_by 必填：删除必须能追溯到是谁要求的。
+             "required": ["op", "requested_by"],
              "properties": {**base, "op": {"const": "delete"},
-                            "target_id": _STR}},
+                            "record_id": _STR, "target_id": _OPT_STR,
+                            "requested_by": _STR, "reason": _OPT_STR},
+             "anyOf": [{"required": ["record_id"]},
+                       {"required": ["target_id"]}]},
             {"title": "no_op", "type": "object",
              "required": ["op"],
              "properties": {**base, "op": {"const": "no_op"},
@@ -119,9 +128,17 @@ def _scope() -> dict:
     schema 表达不了这条约束，所以写在这里，也写在 :mod:`memgarden.mounted`。
     """
     return {"type": "object",
-            "required": ["tenant_id"],
+            # 🔴 memory_owner_id 是**必填**，schema 必须和运行时一致。
+            # 少了它，接入方按 schema 生成的请求在本地校验通过、
+            # 到服务端才失败 —— 而 schema 存在的全部意义就是让对方
+            # 在本地就知道自己传对没有。
+            "required": ["tenant_id", "memory_owner_id"],
             "properties": {
                 "tenant_id": _STR,
+                # 这座花园的稳定所有者。tenant 是安全边界，owner 是归属人；
+                # 只有 tenant 的话，同租户下两个 agent 会互相读到对方的
+                # agent-private。
+                "memory_owner_id": _STR,
                 "actor": _actor(),
                 "allowed_mounts": {"type": "array", "items": _STR,
                                    "default": ["agent-private"]},

@@ -127,6 +127,22 @@ class SqliteStore:
         if version >= _SCHEMA_VERSION:
             return
 
+        # 🔴 整个迁移是一个事务。
+        # 重建表要走「建新表 → 搬数据 → DROP 旧表 → 改名」四步，中间任何一步
+        # 崩掉（断电、被 kill、磁盘满）都会留下一个半迁移的库：可能旧表已经
+        # DROP 了而新表还没改名 —— 数据看起来凭空消失。
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            self._migrate_steps(conn)
+            conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+    def _migrate_steps(self, conn: sqlite3.Connection) -> None:
+        """实际的升级动作。由 :meth:`_migrate` 包在事务里调用。"""
+
         # ① 补 applied.digest。旧行的 digest 留 NULL —— 幂等检查会把 NULL
         #    当作「没记过摘要」，退回到「同键即命中」的旧行为,而不是误报冲突。
         cols = {r[1] for r in conn.execute("PRAGMA table_info(applied)")}
@@ -214,7 +230,6 @@ class SqliteStore:
 
         conn.execute(
             "CREATE INDEX IF NOT EXISTS cards_by_owner ON cards(tenant, owner)")
-        conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
     @staticmethod
     def _seed_next_id(conn: sqlite3.Connection, tenant: str, owner: str) -> int:
