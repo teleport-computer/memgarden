@@ -1,27 +1,18 @@
 {
-  "name": "dsh-memgarden",
+  "name": "@teleport-computer/dsh-memgarden",
   "version": "0.1.0",
-  "private": true,
-  "description": "把 Memory Garden 挂到 DeepSeek Harness 上的薄 Adapter",
+  "description": "Mount Memory Garden into DeepSeek Harness — automatic recall, automatic capture, real storage.",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "src/plugin.mjs",
-  "exports": {
-    ".": "./src/plugin.mjs",
-    "./package.json": "./package.json"
-  },
-  "files": [
-    "src",
-    "README.md"
-  ],
-  "engines": {
-    "node": ">=22"
-  },
-  "_verified": {
-    "dsh_package": "@deepseek-ai/dsh",
-    "dsh_version": "0.1.2-alpha.4",
-    "dsh_commit": "4e84901e6471b79ec0338099867ebb4606d12bb5",
-    "date": "2026-09-04",
-    "scenario": "会话 A 落卡 → 全新会话 B 自动召回，模型未主动调工具",
-    "note": "DSH 是 pre-release,允许 breaking changes。升级必须重跑完整验收,不能凭「上一版能跑」推断;也不能跟随 master 浮动。"
+  "exports": { ".": "./src/plugin.mjs" },
+  "files": ["src", "README.md", "install.mjs"],
+  "bin": { "dsh-memgarden-install": "./install.mjs" },
+  "engines": { "node": ">=20" },
+  "peerDependencies": { "@deepseek-ai/dsh": "0.1.2-alpha.4" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/teleport-computer/memgarden",
+    "directory": "adapters/dsh-memgarden"
   }
 }

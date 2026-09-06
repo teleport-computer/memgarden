@@ -14,6 +14,7 @@ import re
 import threading
 from pathlib import Path
 
+from ._ops import apply_ops
 from ..storage import (
     FULL_CAPABILITIES,
     ApplyResult,
@@ -26,7 +27,7 @@ from ..storage import (
 
 #: schema 版本。**加字段/加表就要 +1**,并在 _migrate 里补上对应的升级动作 ——
 #: 只改 _SCHEMA 里的 CREATE TABLE IF NOT EXISTS 对旧库一点作用都没有。
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 #: 这个 store 自己分配的 id 形状。宿主塞进来的 id 不长这样,也不该被计数器管。
 _NUMERIC_ID = re.compile(r"m_(\d+)")
@@ -34,29 +35,49 @@ _NUMERIC_ID = re.compile(r"m_(\d+)")
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS cards (
     tenant   TEXT NOT NULL,
+    owner    TEXT NOT NULL DEFAULT '',
     id       TEXT NOT NULL,
     doc      TEXT NOT NULL,
-    PRIMARY KEY (tenant, id)
+    PRIMARY KEY (tenant, owner, id)
 );
 CREATE TABLE IF NOT EXISTS revisions (
-    tenant   TEXT PRIMARY KEY,
-    revision INTEGER NOT NULL DEFAULT 0
+    tenant   TEXT NOT NULL,
+    owner    TEXT NOT NULL DEFAULT '',
+    revision INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant, owner)
 );
 CREATE TABLE IF NOT EXISTS applied (
     tenant   TEXT NOT NULL,
+    owner    TEXT NOT NULL DEFAULT '',
     key      TEXT NOT NULL,
     result   TEXT NOT NULL,
     digest   TEXT,
-    PRIMARY KEY (tenant, key)
+    PRIMARY KEY (tenant, owner, key)
 );
 -- 只增不减的 id 计数器。**不要**改回「数 cards 的行数」——
 -- 删除会让计数回退、撞上已有 id，而写入是 upsert，结果是静默覆盖数据。
 CREATE TABLE IF NOT EXISTS id_counters (
-    tenant   TEXT PRIMARY KEY,
-    next_id  INTEGER NOT NULL DEFAULT 1
+    tenant   TEXT NOT NULL,
+    owner    TEXT NOT NULL DEFAULT '',
+    next_id  INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant, owner)
+);
+-- 整理账本。作用域 (tenant, owner, mount)。
+-- 🔴 它和卡改动**在同一个事务里**提交 —— 分开写的两种坏法都很隐蔽：
+--    账本先走 → 这批整理再也不会跑，改动丢了没人知道
+--    卡先走   → 下次照样整理同一批，重复合并
+CREATE TABLE IF NOT EXISTS maintenance_state (
+    tenant          TEXT NOT NULL,
+    owner           TEXT NOT NULL DEFAULT '',
+    mount           TEXT NOT NULL,
+    signature       TEXT NOT NULL DEFAULT '',
+    seed_card_count INTEGER NOT NULL DEFAULT 0,
+    revision        TEXT NOT NULL DEFAULT '',
+    updated_at      TEXT NOT NULL DEFAULT '',
+    schema_version  INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant, owner, mount)
 );
 """
-
 
 class SqliteStore:
     """单文件存储。并发写用 sqlite 自己的事务 + 一把进程内的锁。"""
@@ -67,6 +88,8 @@ class SqliteStore:
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
             self._migrate(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS cards_by_owner ON cards(tenant, owner)")
 
     # -- 升级旧库 -------------------------------------------------------- #
 
@@ -110,21 +133,91 @@ class SqliteStore:
         if "digest" not in cols:
             conn.execute("ALTER TABLE applied ADD COLUMN digest TEXT")
 
-        # ② 给每个已有卡片、但还没有计数行的 tenant 播种计数器。
-        #    从**已有 id 的最大编号**往后接,而不是从 1 开始。
-        for (tenant,) in conn.execute(
-            "SELECT DISTINCT tenant FROM cards WHERE tenant NOT IN "
-            "(SELECT tenant FROM id_counters)"
-        ).fetchall():
+        # ② 升到 v2：owner 进主键。
+        #
+        # 🔴 **必须重建表，不能只 ALTER 加一列。**
+        #
+        # 旧表的主键是 (tenant, id)。加一列 owner 之后主键**还是** (tenant, id) ——
+        # sqlite 不会因为多了一列就改主键。后果很具体：同一个 tenant 下
+        # ownerA 和 ownerB 的 id 计数器各自从 1 开始，两边都会生成 m_1，
+        # 而写入是 upsert →「ownerB 写自己的第一张卡」会**静默覆盖掉
+        # ownerA 的第一张卡**。跨 owner 的数据互相破坏，一声不响。
+        #
+        # 所以老实走「建新表 → 搬数据 → 换名」这条路。
+        #
+        # 旧行归给谁？答案是 **owner = tenant 自己**。owner 这个概念出现之前，
+        # 一个 tenant 就是一座花园，那座花园天然的所有者就是这个 tenant：
+        #     · 老宿主（一租户一花园）传 owner=tenant，数据原样看得见
+        #     · 新宿主开始区分多个 owner，从此互相隔离
+        # 不能归给空字符串 —— 空 owner 在新代码里是被拒绝的值，
+        # 那等于把旧数据变成谁都读不到的孤儿。
+        #
+        #    🔴 旧行归给谁？答案是 **owner = tenant 自己**。
+        #
+        #    owner 这个概念出现之前，一个 tenant 就是一座花园 —— 那座花园
+        #    天然的所有者就是这个 tenant。这样升上来的库：
+        #        · 老宿主（一租户一花园）传 owner=tenant，数据原样看得见
+        #        · 新宿主开始区分多个 owner，从此互相隔离
+        #    不能归给空字符串：空 owner 在新代码里是被拒绝的值，那等于把
+        #    旧数据变成谁都读不到的孤儿。
+        _REBUILD = {
+            "cards": ("tenant, owner, id, doc",
+                      "tenant, tenant, id, doc",
+                      "tenant TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
+                      "id TEXT NOT NULL, doc TEXT NOT NULL, "
+                      "PRIMARY KEY (tenant, owner, id)"),
+            "revisions": ("tenant, owner, revision",
+                          "tenant, tenant, revision",
+                          "tenant TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
+                          "revision INTEGER NOT NULL DEFAULT 0, "
+                          "PRIMARY KEY (tenant, owner)"),
+            "applied": ("tenant, owner, key, result, digest",
+                        "tenant, tenant, key, result, digest",
+                        "tenant TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
+                        "key TEXT NOT NULL, result TEXT NOT NULL, digest TEXT, "
+                        "PRIMARY KEY (tenant, owner, key)"),
+            "id_counters": ("tenant, owner, next_id",
+                            "tenant, tenant, next_id",
+                            "tenant TEXT NOT NULL, owner TEXT NOT NULL DEFAULT '', "
+                            "next_id INTEGER NOT NULL DEFAULT 1, "
+                            "PRIMARY KEY (tenant, owner)"),
+        }
+        for table, (cols_new, cols_from_old, ddl) in _REBUILD.items():
+            existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if not existing or "owner" in existing:
+                continue          # 新库，或者已经升过了
+            # digest 是 v1 才加的列；更老的库没有它，搬数据时补 NULL。
+            select = cols_from_old
+            if table == "applied" and "digest" not in existing:
+                select = "tenant, tenant, key, result, NULL"
+            conn.execute(f"CREATE TABLE {table}__v2 ({ddl})")
             conn.execute(
-                "INSERT INTO id_counters(tenant, next_id) VALUES(?,?)",
-                (tenant, self._seed_next_id(conn, tenant)),
+                f"INSERT INTO {table}__v2 ({cols_new}) SELECT {select} FROM {table}")
+            conn.execute(f"DROP TABLE {table}")
+            conn.execute(f"ALTER TABLE {table}__v2 RENAME TO {table}")
+
+        # ③ 给每个已有卡片、但还没有计数行的 (tenant, owner) 播种计数器。
+        #    从**已有 id 的最大编号**往后接,而不是从 1 开始。
+        for tenant, owner in conn.execute(
+            "SELECT DISTINCT tenant, owner FROM cards"
+        ).fetchall():
+            row = conn.execute(
+                "SELECT 1 FROM id_counters WHERE tenant=? AND owner=?",
+                (tenant, owner),
+            ).fetchone()
+            if row:
+                continue
+            conn.execute(
+                "INSERT INTO id_counters(tenant, owner, next_id) VALUES(?,?,?)",
+                (tenant, owner, self._seed_next_id(conn, tenant, owner)),
             )
 
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS cards_by_owner ON cards(tenant, owner)")
         conn.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
 
     @staticmethod
-    def _seed_next_id(conn: sqlite3.Connection, tenant: str) -> int:
+    def _seed_next_id(conn: sqlite3.Connection, tenant: str, owner: str) -> int:
         """从已有卡片 id 推出「下一个安全编号」。
 
         只认 ``m_<数字>`` 这一种形状 —— 宿主自己塞的 id(ULID/UUID/业务号)
@@ -133,7 +226,7 @@ class SqliteStore:
         """
         biggest = 0
         for (card_id,) in conn.execute(
-            "SELECT id FROM cards WHERE tenant=?", (tenant,)
+            "SELECT id FROM cards WHERE tenant=? AND owner=?", (tenant, owner)
         ):
             m = _NUMERIC_ID.fullmatch(str(card_id))
             if m:
@@ -152,17 +245,36 @@ class SqliteStore:
 
     # -- 读 -------------------------------------------------------------- #
 
-    def load(self, tenant: str, **filters) -> Snapshot:
+    def load(self, tenant: str, *, owner: str, **filters) -> Snapshot:
+        tenant, owner = _scope(tenant, owner)
         with self._lock, self._connect() as conn:
-            rows = conn.execute(
-                "SELECT doc FROM cards WHERE tenant=?", (tenant,)
-            ).fetchall()
-            cards = [json.loads(r[0]) for r in rows]
+            cards = list(self._cards_of(conn, tenant, owner).values())
             if not filters.get("include_archived"):
                 cards = [c for c in cards if not c.get("archived")]
             if not filters.get("include_superseded"):
                 cards = [c for c in cards if not c.get("superseded_by")]
-            return Snapshot(cards=cards, revision=self._rev(conn, tenant))
+            return Snapshot(cards=cards, revision=self._rev(conn, tenant, owner),
+                            owner=owner)
+
+    def maintenance_state(self, tenant: str, *, owner: str, mount: str) -> dict:
+        """上一次整理留下的账本。没有就返回空 dict。
+
+        没有它的话，「这批整理过没有」这个判断只能靠宿主自己存 —— 而宿主
+        重启一次就忘了，表现是同一批卡被反复合并。
+        """
+        tenant, owner = _scope(tenant, owner)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT signature, seed_card_count, revision, updated_at, "
+                "schema_version FROM maintenance_state "
+                "WHERE tenant=? AND owner=? AND mount=?",
+                (tenant, owner, mount),
+            ).fetchone()
+        if not row:
+            return {}
+        return {"signature": row[0], "seed_card_count": int(row[1]),
+                "revision": row[2], "updated_at": row[3],
+                "schema_version": int(row[4]), "mount": mount}
 
     # -- 写 -------------------------------------------------------------- #
 
@@ -171,14 +283,18 @@ class SqliteStore:
         tenant: str,
         mutations: list[dict],
         *,
+        owner: str,
         idempotency_key: str,
         expected_revision: str | None = None,
+        maintenance_state: dict | None = None,
     ) -> ApplyResult:
+        tenant, owner = _scope(tenant, owner)
         with self._lock, self._connect() as conn:
             digest = mutations_digest(mutations)
             cached = conn.execute(
-                "SELECT result, digest FROM applied WHERE tenant=? AND key=?",
-                (tenant, idempotency_key),
+                "SELECT result, digest FROM applied "
+                "WHERE tenant=? AND owner=? AND key=?",
+                (tenant, owner, idempotency_key),
             ).fetchone()
             if cached:
                 # 同 key 必须同内容。不同内容不是重放，是两个不同请求撞了 key ——
@@ -186,26 +302,52 @@ class SqliteStore:
                 if cached[1] and cached[1] != digest:
                     raise IdempotencyConflict(idempotency_key)
                 payload = json.loads(cached[0])
-                return ApplyResult(results=payload["results"], revision=payload["revision"])
+                return ApplyResult(results=payload["results"],
+                                   revision=payload["revision"])
 
             conn.execute("BEGIN IMMEDIATE")
             try:
-                current = self._rev(conn, tenant)
+                current = self._rev(conn, tenant, owner)
                 if expected_revision is not None and expected_revision != current:
                     raise RevisionConflict(expected_revision, current)
-                results = [self._one(conn, tenant, m) for m in mutations]
+
+                # 🔴 六个 op 走**和 InMemoryStore 完全同一份**执行器。
+                # 各写一份的后果是行为漂移，而漂移不报错：接入方在一个 store
+                # 上测通、换另一个上线，某个 op 静默变成了别的语义。
+                # 代价是这一批要把该 owner 的卡读进内存 —— 这个参考实现面向
+                # 「开箱即用」，不面向超大库；真要扛量应当自己写适配器。
+                before = self._cards_of(conn, tenant, owner)
+                staged = {k: dict(v) for k, v in before.items()}
+                results = apply_ops(
+                    staged, mutations,
+                    new_id=lambda: self._next_id(conn, tenant, owner))
+
+                for gone in set(before) - set(staged):
+                    conn.execute(
+                        "DELETE FROM cards WHERE tenant=? AND owner=? AND id=?",
+                        (tenant, owner, gone))
+                for card_id, card in staged.items():
+                    if before.get(card_id) != card:
+                        self._put(conn, tenant, owner, card)
+
                 new_rev = str(int(current) + 1)
                 conn.execute(
-                    "INSERT INTO revisions(tenant, revision) VALUES(?,?) "
-                    "ON CONFLICT(tenant) DO UPDATE SET revision=excluded.revision",
-                    (tenant, int(new_rev)),
+                    "INSERT INTO revisions(tenant, owner, revision) VALUES(?,?,?) "
+                    "ON CONFLICT(tenant, owner) DO UPDATE SET "
+                    "revision=excluded.revision",
+                    (tenant, owner, int(new_rev)),
                 )
                 conn.execute(
-                    "INSERT INTO applied(tenant, key, result, digest) VALUES(?,?,?,?)",
-                    (tenant, idempotency_key,
-                     json.dumps({"results": results, "revision": new_rev}, ensure_ascii=False),
+                    "INSERT INTO applied(tenant, owner, key, result, digest) "
+                    "VALUES(?,?,?,?,?)",
+                    (tenant, owner, idempotency_key,
+                     json.dumps({"results": results, "revision": new_rev},
+                                ensure_ascii=False),
                      digest),
                 )
+                # 🔴 账本和卡改动同一个事务。见 maintenance_state 表上的注释。
+                if maintenance_state is not None:
+                    self._put_ledger(conn, tenant, owner, maintenance_state, new_rev)
                 conn.execute("COMMIT")
             except Exception:
                 conn.execute("ROLLBACK")
@@ -214,64 +356,47 @@ class SqliteStore:
 
     # -- 内部 ------------------------------------------------------------ #
 
-    def _one(self, conn: sqlite3.Connection, tenant: str, m: dict) -> dict:
-        op = str(m.get("op") or "add")
-        if op == "add":
-            card = dict(m.get("card") or {})
-            card.setdefault("id", self._next_id(conn, tenant))
-            self._put(conn, tenant, card)
-            return {"id": card["id"], "status": "written"}
-        if op == "supersede":
-            # 一张新卡可以取代**多张**旧卡 —— 整理(merge/thicken)就是这个形状：
-            # N 张收敛成 1 张。只认单个 target_id 的话，一次 merge 得拆成多条
-            # mutation，而后面几条要引用前一条刚生成的新卡 id，那个 id 在批次
-            # 提交前根本不存在。
-            targets = [
-                str(i).strip()
-                for i in ([m.get("target_id")] + list(m.get("target_ids") or ()))
-                if str(i or "").strip()
-            ]
-            seen: list[str] = []
-            for t_id in targets:
-                if t_id not in seen:
-                    seen.append(t_id)
-            if not seen:
-                raise KeyError("supersede without a target")
-            rows = {}
-            for t_id in seen:
-                row = conn.execute(
-                    "SELECT doc FROM cards WHERE tenant=? AND id=?", (tenant, t_id)
-                ).fetchone()
-                # 一张找不到就整条失败 —— 半成功会留下「旧卡还活着、新卡也活着」
-                # 的双活状态，那是整理最不该产生的结果。
-                if not row:
-                    raise KeyError(f"supersede target not found: {t_id}")
-                rows[t_id] = row
-            new_card = dict(m.get("card") or {})
-            new_card.setdefault("id", self._next_id(conn, tenant))
-            for t_id, row in rows.items():
-                self._put(conn, tenant, {
-                    **json.loads(row[0]),
-                    "superseded_by": new_card["id"],
-                    "archived": True,
-                })
-            self._put(conn, tenant, new_card)
-            return {"id": new_card["id"], "status": "superseded",
-                    "replaced": seen[0] if len(seen) == 1 else list(seen)}
-        if op == "delete":
-            target = str(m.get("target_id") or "")
-            conn.execute("DELETE FROM cards WHERE tenant=? AND id=?", (tenant, target))
-            return {"id": target, "status": "deleted"}
-        raise ValueError(f"unknown op: {op}")
+    def _cards_of(self, conn: sqlite3.Connection, tenant: str,
+                  owner: str) -> dict[str, dict]:
+        rows = conn.execute(
+            "SELECT id, doc FROM cards WHERE tenant=? AND owner=?",
+            (tenant, owner),
+        ).fetchall()
+        return {r[0]: json.loads(r[1]) for r in rows}
 
-    def _put(self, conn: sqlite3.Connection, tenant: str, card: dict) -> None:
+    def _put_ledger(self, conn: sqlite3.Connection, tenant: str, owner: str,
+                    state: dict, revision: str) -> None:
+        from datetime import datetime, timezone
+
         conn.execute(
-            "INSERT INTO cards(tenant, id, doc) VALUES(?,?,?) "
-            "ON CONFLICT(tenant, id) DO UPDATE SET doc=excluded.doc",
-            (tenant, card["id"], json.dumps(card, ensure_ascii=False)),
+            "INSERT INTO maintenance_state(tenant, owner, mount, signature, "
+            "seed_card_count, revision, updated_at, schema_version) "
+            "VALUES(?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(tenant, owner, mount) DO UPDATE SET "
+            "signature=excluded.signature, "
+            "seed_card_count=excluded.seed_card_count, "
+            "revision=excluded.revision, updated_at=excluded.updated_at, "
+            "schema_version=excluded.schema_version",
+            (tenant, owner, str(state.get("mount") or "agent-private"),
+             str(state.get("signature") or ""),
+             int(state.get("seed_card_count") or 0),
+             revision,
+             str(state.get("updated_at")
+                 or datetime.now(timezone.utc).isoformat(timespec="seconds")),
+             int(state.get("schema_version") or 1)),
         )
 
-    def _next_id(self, conn: sqlite3.Connection, tenant: str) -> str:
+    def _put(self, conn: sqlite3.Connection, tenant: str, owner: str,
+             card: dict) -> None:
+        conn.execute(
+            "INSERT INTO cards(tenant, owner, id, doc) VALUES(?,?,?,?) "
+            "ON CONFLICT(tenant, owner, id) DO UPDATE SET doc=excluded.doc",
+            (tenant, owner, card["id"],
+             json.dumps(card, ensure_ascii=False)),
+        )
+
+    def _next_id(self, conn: sqlite3.Connection, tenant: str,
+                 owner: str) -> str:
         """下一个卡片 id。
 
         ⚠️ **绝不能用「当前总数 + 1」。** 那样删掉一条之后计数会回退，
@@ -286,18 +411,41 @@ class SqliteStore:
         数据库序列 —— 任何**不会因删除而回退**的东西都行，别自己数数。
         """
         row = conn.execute(
-            "SELECT next_id FROM id_counters WHERE tenant=?", (tenant,)
+            "SELECT next_id FROM id_counters WHERE tenant=? AND owner=?",
+            (tenant, owner),
         ).fetchone()
         # 没有计数行时**不能默认从 1 开始** —— 这个 tenant 可能已经有卡了
         # (旧库升上来、或者别处直接写过库)。从已有 id 往后接,别撞上去。
-        n = int(row[0]) if row else self._seed_next_id(conn, tenant)
+        n = int(row[0]) if row else self._seed_next_id(conn, tenant, owner)
         conn.execute(
-            "INSERT INTO id_counters(tenant, next_id) VALUES(?,?) "
-            "ON CONFLICT(tenant) DO UPDATE SET next_id=excluded.next_id",
-            (tenant, n + 1),
+            "INSERT INTO id_counters(tenant, owner, next_id) VALUES(?,?,?) "
+            "ON CONFLICT(tenant, owner) DO UPDATE SET next_id=excluded.next_id",
+            (tenant, owner, n + 1),
         )
         return f"m_{n}"
 
-    def _rev(self, conn: sqlite3.Connection, tenant: str) -> str:
-        row = conn.execute("SELECT revision FROM revisions WHERE tenant=?", (tenant,)).fetchone()
+    def _rev(self, conn: sqlite3.Connection, tenant: str, owner: str) -> str:
+        """版本号的作用域也是 (tenant, owner)。
+
+        用全租户一个版本号的话，两个互不相干的 owner 会互相踢掉对方的 CAS ——
+        表现是「明明没人跟我抢，我的写入却一直冲突」，很难查。
+        """
+        row = conn.execute(
+            "SELECT revision FROM revisions WHERE tenant=? AND owner=?",
+            (tenant, owner),
+        ).fetchone()
         return str(row[0] if row else 0)
+
+
+def _scope(tenant: str, owner: str) -> tuple[str, str]:
+    """归属键。**owner 为空直接拒绝** —— 不回退成全局默认值。"""
+    t = str(tenant or "").strip()
+    o = str(owner or "").strip()
+    if not t:
+        raise ValueError("tenant is required")
+    if not o:
+        raise ValueError(
+            "memory owner is required —— 缺稳定 owner 时必须 fail closed，"
+            "不能回退成全局默认花园"
+        )
+    return (t, o)

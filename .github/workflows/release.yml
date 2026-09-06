@@ -26,7 +26,34 @@ permissions:
   attestations: write    # 写 attestation
 
 jobs:
+  # 🔴 发版**必须**过测试闸。
+  #
+  # 2026-09-06 之前 release 不依赖 tests，于是出现过「主 tests workflow 红着、
+  # release 绿着并把包发上了 PyPI」。那不只是流程瑕疵：红灯一旦变成常态，
+  # 它就不再是信号了 —— 后面真正该拦下的那次也拦不住。
+  #
+  # 这里跑的是和 tests.yml 同一组命令。要改验证内容就两边一起改，
+  # 别让发版路径上的检查比日常的松。
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: pipx install uv
+      - name: 全量测试
+        run: uv run --extra dev pytest -q
+      - name: tag / pyproject / uv.lock 三者一致
+        # 对不上就是「发出去的版本号和锁文件说的不是一回事」，
+        # 事后查问题时会指向错误的代码。
+        run: uv run --extra dev python scripts/check_version_consistency.py
+
   build:
+    needs: gate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

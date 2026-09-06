@@ -25,6 +25,8 @@ import tempfile
 
 import pytest
 
+from memgarden.storage import MutationRejected
+
 from memgarden import GardenComponent
 from memgarden.contracts import MaintenanceRequest
 from memgarden.stores.sqlite import SqliteStore
@@ -67,7 +69,7 @@ def test_a_non_empty_consolidation_reaches_the_store(store, op):
     """
     cards = _cards(12)
     store.apply("t1", [{"op": "add", "card": c} for c in cards],
-                idempotency_key="seed")
+                owner="owner-1", idempotency_key="seed")
 
     result = GardenComponent(
         model=_Model(_reply(op, ["m_1", "m_2"], "收敛后的说法")),
@@ -81,14 +83,14 @@ def test_a_non_empty_consolidation_reaches_the_store(store, op):
     assert result.mutations, "非空建议却没产出 mutation —— 转换那一步丢了东西"
 
     # 这一行就是当初断掉的地方：官方 Store 必须认识它。
-    store.apply("t1", result.mutations, idempotency_key=f"tidy-{op}")
+    store.apply("t1", result.mutations, owner="owner-1", idempotency_key=f"tidy-{op}")
 
 
 def test_the_new_card_is_active_and_the_old_ones_are_traceable(store):
     """收敛之后：新卡可召回，旧卡仍可追溯，且不存在两张同时 active。"""
     cards = _cards(12)
     store.apply("t1", [{"op": "add", "card": c} for c in cards],
-                idempotency_key="seed")
+                owner="owner-1", idempotency_key="seed")
 
     result = GardenComponent(
         model=_Model(_reply("merge", ["m_1", "m_2"], "合并后的说法")),
@@ -97,11 +99,11 @@ def test_the_new_card_is_active_and_the_old_ones_are_traceable(store):
         cards=cards, all_cards=cards,
         known_ids=tuple(c["id"] for c in cards), locale="zh-Hans",
     ))
-    store.apply("t1", result.mutations, idempotency_key="tidy")
+    store.apply("t1", result.mutations, owner="owner-1", idempotency_key="tidy")
 
-    active = {c["id"]: c for c in store.load("t1").cards}
+    active = {c["id"]: c for c in store.load("t1", owner="owner-1").cards}
     everything = {c["id"]: c
-                  for c in store.load("t1", include_archived=True,
+                  for c in store.load("t1", owner="owner-1", include_archived=True,
                                       include_superseded=True).cards}
 
     # 旧的两张不再 active
@@ -134,7 +136,7 @@ def test_a_missing_target_fails_the_whole_batch(store):
     """
     cards = _cards(12)
     store.apply("t1", [{"op": "add", "card": c} for c in cards[:1]],
-                idempotency_key="seed")  # 只写进 m_1
+                owner="owner-1", idempotency_key="seed")  # 只写进 m_1
 
     result = GardenComponent(
         model=_Model(_reply("merge", ["m_1", "m_2"], "合并后的说法")),
@@ -144,11 +146,11 @@ def test_a_missing_target_fails_the_whole_batch(store):
         known_ids=tuple(c["id"] for c in cards), locale="zh-Hans",
     ))
 
-    with pytest.raises(KeyError):
-        store.apply("t1", result.mutations, idempotency_key="tidy")
+    with pytest.raises(MutationRejected):
+        store.apply("t1", result.mutations, owner="owner-1", idempotency_key="tidy")
 
     # 失败之后 m_1 必须原样活着，不能被改成「已被取代」
-    active = {c["id"]: c for c in store.load("t1").cards}
+    active = {c["id"]: c for c in store.load("t1", owner="owner-1").cards}
     assert "m_1" in active, "批次失败了却把 m_1 归档了 —— 没有回滚干净"
     assert not active["m_1"].get("superseded_by")
 
@@ -207,12 +209,12 @@ def test_both_reference_stores_behave_the_same(store):
 
     def _apply_and_read(target):
         target.apply("t1", [{"op": "add", "card": c} for c in cards],
-                     idempotency_key="seed")
-        target.apply("t1", result.mutations, idempotency_key="tidy")
-        active = {c["id"]: c.get("summary") for c in target.load("t1").cards}
+                     owner="owner-1", idempotency_key="seed")
+        target.apply("t1", result.mutations, owner="owner-1", idempotency_key="tidy")
+        active = {c["id"]: c.get("summary") for c in target.load("t1", owner="owner-1").cards}
         archived = {
             c["id"]: c.get("superseded_by")
-            for c in target.load("t1", include_archived=True,
+            for c in target.load("t1", owner="owner-1", include_archived=True,
                                  include_superseded=True).cards
             if c.get("superseded_by")
         }

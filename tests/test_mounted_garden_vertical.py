@@ -17,6 +17,8 @@ import tempfile
 
 import pytest
 
+from memgarden.storage import MutationRejected
+
 from memgarden.contracts import (
     Actor, CaptureRequest, MaintenanceRequest, ToolCall,
 )
@@ -58,7 +60,7 @@ def _garden(*replies: str, store=None) -> MountedGarden:
     )
 
 
-ALICE = Scope(tenant_id="alice", actor=Actor(user_id="alice", agent_id="a1"))
+ALICE = Scope(tenant_id="alice", memory_owner_id="owner-1", actor=Actor(user_id="alice", agent_id="a1"))
 
 
 # --------------------------------------------------------------------------- #
@@ -115,7 +117,7 @@ def test_B_a_non_empty_merge_is_persisted_and_the_old_cards_stay_traceable():
     seed = [{"id": f"m_{i}", "summary": f"第 {i} 条", "content": f"正文 {i}"}
             for i in range(1, 13)]
     store.apply("alice", [{"op": "add", "card": c} for c in seed],
-                idempotency_key="seed")
+                owner="owner-1", idempotency_key="seed")
 
     garden = MountedGarden(
         model=_Model(_consolidation_reply(["m_1", "m_2"])),
@@ -131,9 +133,9 @@ def test_B_a_non_empty_merge_is_persisted_and_the_old_cards_stay_traceable():
         ALICE, MaintenanceRequest(locale="zh-Hans"))
     assert receipt.written, f"整理没落库：{receipt.error or receipt.reason}"
 
-    active = {c["id"] for c in store.load("alice").cards}
+    active = {c["id"] for c in store.load("alice", owner="owner-1").cards}
     everything = {c["id"]: c for c in store.load(
-        "alice", include_archived=True, include_superseded=True).cards}
+        "alice", owner="owner-1", include_archived=True, include_superseded=True).cards}
 
     assert "m_1" not in active and "m_2" not in active, "旧卡还活着，会和新卡同时被召回"
     for old in ("m_1", "m_2"):
@@ -146,7 +148,7 @@ def test_B_maintenance_ledger_comes_back_so_it_does_not_loop():
     store = SqliteStore(_db())
     seed = [{"id": f"m_{i}", "summary": f"第 {i} 条"} for i in range(1, 13)]
     store.apply("alice", [{"op": "add", "card": c} for c in seed],
-                idempotency_key="seed")
+                owner="owner-1", idempotency_key="seed")
     garden = MountedGarden(
         model=_Model(_consolidation_reply(["m_1", "m_2"])), store=store,
         selection_policy=Chain(stages=(RelevanceStage(limit=8), RecentStage(limit=4))),
@@ -205,7 +207,7 @@ def test_D_replaying_the_same_capture_does_not_write_twice():
     first = garden.capture_and_store(ALICE, req)
     second = garden.capture_and_store(ALICE, req)
     assert first.written and second.written
-    assert len(store.load("alice").cards) == 1, "同一个幂等键写了两遍"
+    assert len(store.load("alice", owner="owner-1").cards) == 1, "同一个幂等键写了两遍"
 
 
 def test_D_a_failed_batch_leaves_nothing_behind():
@@ -216,17 +218,17 @@ def test_D_a_failed_batch_leaves_nothing_behind():
     """
     store = SqliteStore(_db())
     store.apply("alice", [{"op": "add", "card": {"id": "m_1", "summary": "在的"}}],
-                idempotency_key="seed")
-    before = {c["id"]: dict(c) for c in store.load("alice").cards}
+                owner="owner-1", idempotency_key="seed")
+    before = {c["id"]: dict(c) for c in store.load("alice", owner="owner-1").cards}
 
-    with pytest.raises(KeyError):
+    with pytest.raises(MutationRejected):
         store.apply("alice", [
             {"op": "add", "card": {"summary": "这条本来能成"}},
             {"op": "supersede", "target_id": "不存在的卡",
              "card": {"summary": "这条会失败"}},
-        ], idempotency_key="mixed")
+        ], owner="owner-1", idempotency_key="mixed")
 
-    after = {c["id"]: dict(c) for c in store.load("alice").cards}
+    after = {c["id"]: dict(c) for c in store.load("alice", owner="owner-1").cards}
     assert after == before, f"失败的批次留下了东西：{after}"
 
 
@@ -234,7 +236,7 @@ def test_D_a_failed_batch_leaves_nothing_behind():
 # E. 权限隔离
 # --------------------------------------------------------------------------- #
 
-BOB = Scope(tenant_id="bob", actor=Actor(user_id="bob", agent_id="b1"))
+BOB = Scope(tenant_id="bob", memory_owner_id="owner-1", actor=Actor(user_id="bob", agent_id="b1"))
 
 
 def test_E_one_tenant_cannot_read_another():
@@ -281,7 +283,7 @@ def test_E_writing_to_a_mount_outside_the_scope_is_refused():
     garden = _garden(_card_reply(SPICY))
     with pytest.raises(MountPermissionError):
         garden.capture_and_store(
-            Scope(tenant_id="alice", allowed_mounts=("agent-private",)),
+            Scope(tenant_id="alice", memory_owner_id="owner-1", allowed_mounts=("agent-private",)),
             CaptureRequest(window="x", locale="zh-Hans", mount="family-shared"),
         )
 
@@ -291,7 +293,7 @@ def test_E_an_empty_allowed_mounts_does_not_mean_everything():
 
     把空理解成通配是权限系统最经典的翻车方式。
     """
-    scope = Scope(tenant_id="alice", allowed_mounts=())
+    scope = Scope(tenant_id="alice", memory_owner_id="owner-1", allowed_mounts=())
     assert scope.mounts() == ("agent-private",)
     with pytest.raises(MountPermissionError):
         scope.check("family-shared")
@@ -322,7 +324,7 @@ def test_B_maintenance_refuses_to_guess_the_garden_language():
 def test_E_a_card_in_an_unauthorised_mount_is_invisible():
     """同一个租户下，**没授权的 mount 里的卡也读不到**。
 
-    这条是补上来的：先前只测了跨租户，而跨租户靠 `store.load(tenant)` 分表
+    这条是补上来的：先前只测了跨租户，而跨租户靠 `store.load(tenant, owner="owner-1")` 分表
     就挡住了 —— 把 mount 过滤整段删掉，那些用例照样绿。真正需要 mount 过滤的
     是这个场景：同一个人的 family-shared 记忆，不该被只授权 agent-private 的
     agent 读到。
@@ -333,12 +335,12 @@ def test_E_a_card_in_an_unauthorised_mount_is_invisible():
                                "mount": "agent-private"}},
         {"op": "add", "card": {"id": "f_1", "summary": "家庭共享的事",
                                "mount": "family-shared"}},
-    ], idempotency_key="seed")
+    ], owner="owner-1", idempotency_key="seed")
 
     garden = MountedGarden(model=_Model(), store=store,
                            selection_policy=Chain(stages=(RecentStage(limit=8),)))
 
-    private_only = Scope(tenant_id="alice", allowed_mounts=("agent-private",))
+    private_only = Scope(tenant_id="alice", memory_owner_id="owner-1", allowed_mounts=("agent-private",))
     ctx = garden.context_for_turn(private_only, "有什么事")
     assert "f_1" not in ctx.record_ids, "读到了没授权 mount 里的卡"
     assert "p_1" in ctx.record_ids, "自己 mount 里的卡反而读不到"

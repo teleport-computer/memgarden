@@ -91,7 +91,8 @@ class Service:
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
-SCOPE = {"tenant_id": "t1", "actor": {"user_id": "u1", "agent_id": "a1"},
+SCOPE = {"tenant_id": "t1", "memory_owner_id": "owner-1",
+         "actor": {"user_id": "u1", "agent_id": "a1"},
          "allowed_mounts": ["agent-private"]}
 
 # 一个假模型：吐固定的一张卡，不联网、不花钱。
@@ -146,7 +147,8 @@ def t_bad_input() -> None:
         # 🔴 最关键的一条：越权挂载点必须被拒（而不是被悄悄忽略 ——
         # 悄悄忽略的话，宿主以为自己把这一轮收窄到了 shared，实际读了全部）
         out = s.call("context.get", {
-            "scope": {"tenant_id": "t1", "actor": {"user_id": "u1", "agent_id": "a1"},
+            "scope": {"tenant_id": "t1", "memory_owner_id": "owner-1",
+                      "actor": {"user_id": "u1", "agent_id": "a1"},
                       "allowed_mounts": ["agent-private"]},
             "query": "x", "mount": "shared",
         })

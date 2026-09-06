@@ -307,8 +307,18 @@ def _require_fields(index: int, m: Mutation) -> None:
         if not isinstance(m.changes, dict) or not m.changes:
             _fail("changes")
     elif isinstance(m, (Archive, Delete)):
-        if not str(getattr(m, "target_id", "") or "").strip():
-            _fail("target_id")
+        # 🔴 字段名是 ``record_id`` —— ``Archive`` / ``Delete`` 的 dataclass 就是
+        # 这么定义的。以前这里查的是 ``target_id``，于是**照着类型定义构造的
+        # 合法删除请求会被自己的校验器拒掉**，而照着校验器写的请求又不带
+        # 类型系统认识的字段。声明和校验对不上，两边都走不通。
+        # ``target_id`` 仍然认，老调用方不受影响。
+        if not (str(getattr(m, "record_id", "") or "").strip()
+                or str(getattr(m, "target_id", "") or "").strip()):
+            _fail("record_id")
+        # 删除必须能追溯到是谁要求的 —— 审计和合规都指着这个字段，
+        # 而 ``Delete`` 的文档里也是这么承诺的。不查等于那句承诺是空的。
+        if isinstance(m, Delete) and not str(m.requested_by or "").strip():
+            _fail("requested_by（删除必须能追溯到是谁要求的）")
 
 
 def required_capabilities(mutations: list[Mutation]) -> set[str]:

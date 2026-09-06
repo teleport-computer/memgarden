@@ -37,7 +37,7 @@ def service() -> Service:
     ))
 
 
-T1 = {"scope": {"tenant_id": "t1"}}
+T1 = {"scope": {"tenant_id": "t1", "memory_owner_id": "owner-1"}}
 
 
 # --------------------------------------------------------------------------- #
@@ -111,10 +111,18 @@ def test_an_unknown_method_is_a_structured_error(service):
 
 def test_a_missing_tenant_is_refused_rather_than_guessed(service):
     """没给 tenant 就报错。**服务不猜你是谁** —— 猜错就是读到别人的记忆。"""
+    # 整个 scope 都没给 —— schema 校验在执行前就拦下了，错误指到字段。
     out = service.handle({"id": "1", "method": "context.get",
                           "params": {"query": "辣"}})
     assert out["ok"] is False
     assert out["error"]["code"] == "invalid_request"
+    assert out["error"]["field"] == "scope"
+
+    # 给了 scope 但里面没有 tenant_id —— 这一层由服务自己拒，说清是哪个字段。
+    out = service.handle({"id": "1", "method": "context.get",
+                          "params": {"scope": {"memory_owner_id": "o1"},
+                                     "query": "辣"}})
+    assert out["ok"] is False
     assert "tenant_id" in out["error"]["message"]
 
 
@@ -135,7 +143,7 @@ def test_one_tenant_cannot_reach_another_over_the_wire(service):
         **T1, "window": "用户：我不吃辣", "locale": "zh-Hans"}})
 
     other = service.handle({"id": "2", "method": "tool.invoke", "params": {
-        "scope": {"tenant_id": "别人"},
+        "scope": {"tenant_id": "别人", "memory_owner_id": "owner-1"},
         "name": "memory_search", "arguments": {"query": "辣"}}})
     assert other["ok"] and other["result"]["content"] == "", other
 
@@ -166,22 +174,56 @@ def test_a_service_without_a_model_still_serves_what_needs_no_model():
 # Manifest 必须如实
 # --------------------------------------------------------------------------- #
 
-def test_manifest_capabilities_match_what_the_component_actually_declares():
-    """Manifest 里的能力声明必须和组件自己说的一致。
+def test_manifest_capabilities_match_what_the_running_service_can_actually_do(service):
+    """Manifest 声明的每项能力，都必须有一个**真的调得到**的方法撑着。
 
-    两处各写一份的话会漂，而漂的方向通常是「Manifest 说支持、执行层没做」——
-    接入方照着 Manifest 写代码，到线上才发现不生效，且没有报错。
+    ## 这条以前是怎么写错的
+
+    它拿 ``manifest()`` 和 ``GardenComponent(model=None).capabilities()`` 比。
+    两边同源 —— manifest 本来就是从那个组件生成的 —— 所以这个断言永远成立，
+    **无论 manifest 说得对不对**。它稳定地锁住了一个错误答案：
+
+        turn_context   声明 False，而服务一直提供 context.get
+        curated_write  声明 True，而 wire 上根本没有对应方法
+
+    比较对象必须是**正在跑的服务**，不是另一份同源声明。
     """
-    from dataclasses import asdict
+    declared = service.handle(
+        {"id": "1", "method": "manifest.get", "params": {}})["result"]
+    callable_methods = set(declared["operations"])
 
-    from memgarden import GardenComponent
-    from memgarden.schema import manifest
+    for name, backing in {
+        "capture": ("capture.run", "capture.begin"),
+        "turn_context": ("context.get",),
+        "maintenance": ("maintenance.run",),
+        "model_tools": ("tool.list", "tool.invoke"),
+        "browse": ("records.browse",),
+        "export": ("records.export",),
+        "delete": ("records.delete",),
+    }.items():
+        reachable = any(b in callable_methods for b in backing)
+        assert declared["capabilities"][name] is reachable, (
+            f"{name} 声明成 {declared['capabilities'][name]}，"
+            f"但 wire 上{'有' if reachable else '没有'}对应方法")
 
-    declared = manifest()["capabilities"]
-    actual = asdict(GardenComponent(model=None).capabilities())
-    actual.pop("mounts", None)
-    actual.pop("schema_version", None)
-    assert declared == actual
+    # 声明里出现的每个 operation 都必须真的能调 —— 否则接入方照着 manifest
+    # 调过来会拿到 unknown_method。
+    for op in declared["operations"]:
+        out = service.handle({"id": "1", "method": op, "params": {}})
+        assert out.get("error", {}).get("code") != "unknown_method", op
+
+
+def test_capabilities_without_a_wire_method_are_declared_false(service):
+    """内核 Python API 做得到、但 wire 上没有入口的能力，一律声明 False。
+
+    对陌生 Runtime 而言「调不到」就是「做不到」。声明 True 的后果是对方
+    照着 manifest 写代码，然后发现没有这个方法。
+    """
+    declared = service.handle(
+        {"id": "1", "method": "manifest.get", "params": {}})["result"]
+    for name in ("curated_write", "promote", "migrate"):
+        assert declared["capabilities"][name] is False, name
+        assert not [op for op in declared["operations"] if name in op]
 
 
 def test_manifest_only_lists_mounts_whose_permissions_are_enforced():

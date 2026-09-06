@@ -72,15 +72,15 @@ def test_writing_to_an_upgraded_db_does_not_overwrite_old_cards(tmp_path):
     """
     db = _old_db(tmp_path / "old.db", {"m_1": "不吃辣", "m_2": "周末看医生"})
 
-    before = {c["id"]: c["summary"] for c in SqliteStore(db).load("t1").cards}
+    before = {c["id"]: c["summary"] for c in SqliteStore(db).load("t1", owner="t1").cards}
     assert before == {"m_1": "不吃辣", "m_2": "周末看医生"}
 
     SqliteStore(db).apply(
         "t1", [{"op": "add", "card": {"summary": "新加的一张"}}],
-        idempotency_key="k1",
+        owner="t1", idempotency_key="k1",
     )
 
-    after = {c["id"]: c["summary"] for c in SqliteStore(db).load("t1").cards}
+    after = {c["id"]: c["summary"] for c in SqliteStore(db).load("t1", owner="t1").cards}
     clobbered = {k: (before[k], after.get(k)) for k in before if after.get(k) != before[k]}
     assert not clobbered, f"旧卡内容被覆盖了：{clobbered}"
     assert len(after) == len(before) + 1, f"新卡没真的加进去：{after}"
@@ -102,9 +102,9 @@ def test_idempotency_still_works_across_the_upgrade(tmp_path):
     """
     db = _old_db(tmp_path / "old.db", {"m_1": "不吃辣"})
     mutations = [{"op": "add", "card": {"summary": "只该进去一次"}}]
-    SqliteStore(db).apply("t1", mutations, idempotency_key="same-key")
-    SqliteStore(db).apply("t1", mutations, idempotency_key="same-key")
-    summaries = [c["summary"] for c in SqliteStore(db).load("t1").cards]
+    SqliteStore(db).apply("t1", mutations, owner="t1", idempotency_key="same-key")
+    SqliteStore(db).apply("t1", mutations, owner="t1", idempotency_key="same-key")
+    summaries = [c["summary"] for c in SqliteStore(db).load("t1", owner="t1").cards]
     assert summaries.count("只该进去一次") == 1, summaries
 
 
@@ -119,8 +119,8 @@ def test_host_supplied_ids_do_not_confuse_the_counter(tmp_path):
         "m_7": "store 自己发的号",
     })
     SqliteStore(db).apply(
-        "t1", [{"op": "add", "card": {"summary": "新的"}}], idempotency_key="k1")
-    ids = {c["id"] for c in SqliteStore(db).load("t1").cards}
+        "t1", [{"op": "add", "card": {"summary": "新的"}}], owner="t1", idempotency_key="k1")
+    ids = {c["id"] for c in SqliteStore(db).load("t1", owner="t1").cards}
     assert "m_8" in ids, f"应当从 m_7 往后接，实际：{ids}"
     assert len(ids) == 3
 
@@ -129,5 +129,5 @@ def test_an_empty_old_db_still_starts_from_one(tmp_path):
     """空的旧库升上来仍然从 m_1 开始 —— 播种逻辑别把空库也推高。"""
     db = _old_db(tmp_path / "old.db", {})
     SqliteStore(db).apply(
-        "t1", [{"op": "add", "card": {"summary": "第一张"}}], idempotency_key="k1")
-    assert [c["id"] for c in SqliteStore(db).load("t1").cards] == ["m_1"]
+        "t1", [{"op": "add", "card": {"summary": "第一张"}}], owner="t1", idempotency_key="k1")
+    assert [c["id"] for c in SqliteStore(db).load("t1", owner="t1").cards] == ["m_1"]

@@ -44,7 +44,8 @@ def _service(model=None) -> Service:
     ))
 
 
-SCOPE = {"tenant_id": "t1", "actor": {"user_id": "u1", "agent_id": "a1"},
+SCOPE = {"tenant_id": "t1", "memory_owner_id": "owner-1",
+         "actor": {"user_id": "u1", "agent_id": "a1"},
          "allowed_mounts": ["agent-private"]}
 
 

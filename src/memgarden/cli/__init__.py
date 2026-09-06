@@ -132,21 +132,18 @@ def _cmd_maintain(args) -> int:
 
 
 def _cmd_manifest(args) -> int:
-    """这个组件会做什么 —— 机器可读，给接入方和 CI 用。"""
-    from .. import __name__ as pkg  # noqa: F401
-    from importlib.metadata import version
+    """这个组件会做什么 —— 机器可读，给接入方和 CI 用。
+
+    🔴 和服务的 ``manifest.get`` 返回**同一个结构**，由同一个函数生成。
+
+    以前这里自己拼了一份：字段少、能力值也不一样（CLI 说 turn_context 有，
+    服务说没有）。接入方拿哪一份都可能是错的，而两份都「看起来很正常」。
+    一个契约只能有一个 owner。
+    """
+    from ..schema import manifest
 
     garden = GardenComponent(model=SubprocessModel("cat"))
-    try:
-        pkg_version = version("memgarden")
-    except Exception:
-        pkg_version = "unknown"
-    _emit({
-        "component_id": "memgarden",
-        "component_version": pkg_version,
-        "capabilities": garden.capabilities().as_dict(),
-        "tools": [asdict(t) for t in garden.tools()],
-    })
+    _emit({**manifest(), "tools": [asdict(t) for t in garden.tools()]})
     return 0
 
 

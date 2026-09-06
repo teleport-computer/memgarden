@@ -1,0 +1,140 @@
+"""六个 mutation 落到「一堆卡」上的**唯一**一份实现。
+
+## 为什么要抽出来
+
+两个官方 Store 各写一份的直接后果是行为漂移，而漂移不报错：
+接入方在 InMemory 上测通，换 SQLite 上线，``archive`` 那条静默变成了别的语义。
+sevenfloor 2026-09-06 复现的正是这个形状 —— 声明里有六个 op，
+两个 Store 实际只执行三个，另外三个抛 ``unknown op``。
+
+所以：**声明了几个 op，这里就必须执行几个**，Store 只负责怎么存。
+
+## 生命周期语义（六个 op 必须一致）
+
+    add        新卡进来，active
+    update     就地改字段。**不能改 id / 归属 / 生命周期状态** ——
+               那三样要走专门的 op，否则「改一个字段」可以偷偷换掉卡的归属
+    archive    不再参与召回，内容还在、可追溯（integrity: 历史可见）
+    supersede  N 张旧卡收敛成 1 张新卡，旧卡留着并指回新卡
+    delete     真删。用户要求或合规，**正文不再可读**
+    no_op      什么都不做，但要留痕 —— 「看过了、结论是不用改」和「漏了」
+               必须分得开
+"""
+from __future__ import annotations
+
+from typing import Callable
+
+from ..storage import MutationRejected
+
+#: ``update`` 不许碰的字段。改这些等于换一张卡，必须走专门的 op。
+_IMMUTABLE = frozenset({"id", "owner", "tenant", "archived", "superseded_by",
+                        "deleted"})
+
+
+
+
+def apply_ops(
+    staged: dict[str, dict],
+    mutations: list[dict],
+    *,
+    new_id: Callable[[], str],
+) -> list[dict]:
+    """在 ``staged``（会被就地修改的卡表）上执行一批 mutation。
+
+    调用方负责原子性：传进来的应当是一份副本，全部成功后才落回去。
+    任何一条失败就抛，绝不留半成品 —— 半成功的表现是「旧卡还活着、新卡也
+    活着」的双活状态，事后极难查。
+    """
+    results: list[dict] = []
+    for m in mutations:
+        op = str(m.get("op") or "add")
+
+        if op == "add":
+            card = dict(m.get("card") or {})
+            card.setdefault("id", new_id())
+            staged[card["id"]] = card
+            results.append({"id": card["id"], "status": "written"})
+
+        elif op == "update":
+            target = _target(m, "record_id")
+            current = staged.get(target)
+            if current is None:
+                raise MutationRejected(f"update target not found: {target}")
+            changes = dict(m.get("changes") or {})
+            touched = _IMMUTABLE & set(changes)
+            if touched:
+                # 允许改 owner 就等于允许「把别人的卡改成我的」——
+                # 这是一条越权路径，不是字段校验的小事。
+                raise MutationRejected(
+                    f"update may not change {sorted(touched)}; "
+                    "归属和生命周期状态要走专门的 op")
+            staged[target] = {**current, **changes}
+            results.append({"id": target, "status": "updated"})
+
+        elif op == "archive":
+            target = _target(m, "record_id")
+            current = staged.get(target)
+            if current is None:
+                raise MutationRejected(f"archive target not found: {target}")
+            staged[target] = {**current, "archived": True,
+                              "archive_reason": str(m.get("reason") or "")}
+            results.append({"id": target, "status": "archived"})
+
+        elif op == "supersede":
+            # 一张新卡可以取代**多张**旧卡 —— 整理(merge/thicken)就是这个形状。
+            targets = _targets(m)
+            if not targets:
+                raise MutationRejected("supersede without a target")
+            for old_id in targets:
+                # 一张找不到就整条失败 —— 半成功会留下双活状态。
+                if old_id not in staged:
+                    raise MutationRejected(f"supersede target not found: {old_id}")
+            new_card = dict(m.get("card") or {})
+            new_card.setdefault("id", new_id())
+            for old_id in targets:
+                staged[old_id] = {**staged[old_id],
+                                  "superseded_by": new_card["id"],
+                                  "archived": True}
+            staged[new_card["id"]] = new_card
+            results.append({
+                "id": new_card["id"], "status": "superseded",
+                "replaced": targets[0] if len(targets) == 1 else list(targets),
+            })
+
+        elif op == "delete":
+            # 🔴 字段名是 record_id（``Delete`` dataclass 就是这么定义的）。
+            # 旧实现读的是 target_id，于是走 typed 路径下来的删除**永远删不掉
+            # 任何东西**，还照常回一句 status=deleted —— 用户看到「已删除」，
+            # 库里原封不动。这是「绿着的假成功」最典型的一例。
+            target = _target(m, "record_id")
+            if target not in staged:
+                raise MutationRejected(f"delete target not found: {target}")
+            staged.pop(target, None)
+            results.append({"id": target, "status": "deleted"})
+
+        elif op == "no_op":
+            results.append({"id": "", "status": "no_op",
+                            "reason": str(m.get("reason") or "")})
+
+        else:
+            raise MutationRejected(f"unknown op: {op}")
+
+    return results
+
+
+def _target(m: dict, primary: str) -> str:
+    """取目标 id。兼容老调用方写的 ``target_id``，但以 typed 字段为准。"""
+    for field in (primary, "target_id"):
+        value = str(m.get(field) or "").strip()
+        if value:
+            return value
+    raise MutationRejected(f"{m.get('op')} without {primary}")
+
+
+def _targets(m: dict) -> list[str]:
+    out: list[str] = []
+    for candidate in [m.get("target_id"), *list(m.get("target_ids") or ())]:
+        value = str(candidate or "").strip()
+        if value and value not in out:
+            out.append(value)
+    return out

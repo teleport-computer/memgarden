@@ -24,7 +24,7 @@ from memgarden.records import (
     validate_mutations,
 )
 
-ME = Scope(tenant_id="t1", actor=Actor(user_id="u1"))
+ME = Scope(tenant_id="t1", memory_owner_id="owner-1", actor=Actor(user_id="u1"))
 
 
 class _NoModel:
@@ -54,8 +54,11 @@ def test_an_unknown_op_is_rejected():
     ({"op": "supersede", "card": {"summary": "s", "content": "c"}}, "target"),
     ({"op": "update", "record_id": "m_1"}, "changes"),
     ({"op": "update", "changes": {"summary": "s"}}, "record_id"),
-    ({"op": "archive"}, "target_id"),
-    ({"op": "delete"}, "target_id"),
+    ({"op": "archive"}, "record_id"),
+    ({"op": "delete"}, "record_id"),
+    # 删除必须能追溯到是谁要求的 —— ``Delete`` 的文档这么承诺，
+    # 校验就得真的查，否则那句承诺是空的。
+    ({"op": "delete", "record_id": "m_1"}, "requested_by"),
 ])
 def test_missing_required_fields_are_rejected(bad, missing):
     """每个 op 的必填字段都要守住。
@@ -101,7 +104,7 @@ def test_nothing_is_written_when_one_row_in_the_batch_is_invalid():
 
     assert not receipt.written
     assert receipt.error and receipt.error.startswith("invalid_mutation:")
-    assert store.load("t1").cards == [], "不合法的批次却写进去了东西"
+    assert store.load("t1", owner="owner-1").cards == [], "不合法的批次却写进去了东西"
 
 
 def test_the_error_names_the_mutation_not_the_storage_layer():
@@ -125,7 +128,7 @@ def test_storage_that_cannot_supersede_is_refused_up_front():
 
     store = _NoSupersede(str(pathlib.Path(tempfile.mkdtemp()) / "g.db"))
     store.apply("t1", [{"op": "add", "card": {"id": "m_1", "summary": "旧的"}}],
-                idempotency_key="seed")
+                owner="owner-1", idempotency_key="seed")
 
     receipt = _garden(store)._apply(ME, "agent-private", [
         {"op": "supersede", "target_id": "m_1",
@@ -136,29 +139,68 @@ def test_storage_that_cannot_supersede_is_refused_up_front():
     assert "storage_lacks_capabilities" in (receipt.error or "")
     assert "supersede" in (receipt.error or "")
     # 旧卡必须原样活着
-    assert [c["id"] for c in store.load("t1").cards] == ["m_1"]
+    assert [c["id"] for c in store.load("t1", owner="owner-1").cards] == ["m_1"]
 
 
-def test_a_store_without_a_capabilities_method_is_assumed_capable():
-    """存储没实现 ``capabilities()`` 时当作全部支持。
+def test_a_store_that_does_not_declare_its_capabilities_is_refused():
+    """存储不声明 ``capabilities()`` 时 —— **一律当作做不到（fail closed）**。
 
-    那是**可选**契约，缺它只说明适配器没写声明，不说明能力弱。真做不到的话
-    写入那一步自己会失败，不会静默错。反过来「没声明就一律拒绝」会把一大批
-    简单适配器挡在门外。
+    这条以前是反的：没有声明就当成「全部支持」。那正好错在最危险的方向 ——
+    一个不声明能力的适配器会被当成什么都能做，于是 supersede 被下发给一个
+    只会覆盖的后端，「永远不硬删」在没有任何报错的情况下破掉。
+
+    而 :mod:`memgarden.storage` 从一开始就写着「``Capabilities`` 没有默认值，
+    外部适配器要逐项写清楚」。那条约束会被这一个 fallback 全部抵消。
+
+    代价是简单适配器要多写一个方法。这个代价是对的：写一个 ``capabilities()``
+    要五分钟，查一次「记忆被静默覆盖了」要两天。
     """
     class _Bare:
         def __init__(self): self.written = []
-        def load(self, tenant, **f):
+        def load(self, tenant, *, owner, **f):
             from memgarden.storage import Snapshot
-            return Snapshot(cards=[], revision="0")
-        def apply(self, tenant, mutations, *, idempotency_key, expected_revision):
+            return Snapshot(cards=[], revision="0", owner=owner)
+        def apply(self, tenant, mutations, *, owner, idempotency_key,
+                  expected_revision, maintenance_state=None):
             from memgarden.storage import ApplyResult
             self.written.extend(mutations)
             return ApplyResult(results=[{"id": "m_1"}], revision="1")
 
     bare = _Bare()
     receipt = _garden(bare)._apply(ME, "agent-private", [
+        # supersede 需要 supports_supersede —— 没声明就不该放行。
+        {"op": "supersede", "target_id": "m_0",
+         "card": {"summary": "新的", "content": "正文"}},
+    ], idempotency_key="k1", trace={})
+    assert not receipt.written
+    assert receipt.error.startswith("storage_lacks_capabilities"), receipt.error
+    # 🔴 最要紧的一句：**一条都没送到存储**。
+    # 「先写一半再失败」留下的半成品状态最难查：库里既有新卡又有没归档的旧卡。
+    assert bare.written == []
+
+
+def test_a_store_that_declares_everything_is_allowed_through():
+    """反过来：如实声明了全部能力的存储照常放行。
+
+    有这一条，上面那条才不会被误读成「fail closed 就是全都拒绝」。
+    """
+    from memgarden.storage import FULL_CAPABILITIES
+
+    class _Declared:
+        def __init__(self): self.written = []
+        def capabilities(self): return FULL_CAPABILITIES
+        def load(self, tenant, *, owner, **f):
+            from memgarden.storage import Snapshot
+            return Snapshot(cards=[], revision="0", owner=owner)
+        def apply(self, tenant, mutations, *, owner, idempotency_key,
+                  expected_revision, maintenance_state=None):
+            from memgarden.storage import ApplyResult
+            self.written.extend(mutations)
+            return ApplyResult(results=[{"id": "m_1"}], revision="1")
+
+    store = _Declared()
+    receipt = _garden(store)._apply(ME, "agent-private", [
         {"op": "add", "card": {"summary": "写得进去", "content": "正文"}},
     ], idempotency_key="k1", trace={})
     assert receipt.written, receipt.error
-    assert bare.written
+    assert store.written

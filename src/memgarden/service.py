@@ -42,22 +42,8 @@ from typing import Any, Callable, TextIO
 
 from .contracts import Actor, CaptureRequest, MaintenanceRequest, ToolCall
 from .mounted import MountPermissionError, MountedGarden, Scope
-from .schema import manifest, schemas
-
-
-def _scope_from(params: dict) -> Scope:
-    raw = params.get("scope") or {}
-    if not str(raw.get("tenant_id") or "").strip():
-        raise ValueError("scope.tenant_id 必填 —— 服务不猜你是谁")
-    actor = raw.get("actor") or {}
-    mounts = raw.get("allowed_mounts") or ()
-    return Scope(
-        tenant_id=str(raw["tenant_id"]),
-        actor=Actor(user_id=str(actor.get("user_id") or ""),
-                    agent_id=str(actor.get("agent_id") or ""),
-                    session_id=str(actor.get("session_id") or "")),
-        allowed_mounts=tuple(str(m) for m in mounts) or ("agent-private",),
-    )
+from .schema import WIRE_OPERATIONS, manifest, method_schemas, schemas
+from .validate import SchemaViolation, validate
 
 
 class ServiceError(Exception):
@@ -70,6 +56,33 @@ class ServiceError(Exception):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _scope_from(params: dict) -> Scope:
+    raw = params.get("scope") or {}
+    if not str(raw.get("tenant_id") or "").strip():
+        raise ServiceError("scope_required", "scope.tenant_id 必填 —— 服务不猜你是谁")
+    owner = str(raw.get("memory_owner_id") or "").strip()
+    if not owner:
+        # 🔴 不回退成 tenant，也不回退成 actor.agent_id。
+        # 回退的后果是同一个租户下所有 agent 共用一座花园 —— 隔离在最常见的
+        # 路径上直接失效，而且一切「正常」，没有任何报错。
+        raise ServiceError(
+            "memory_owner_required",
+            "scope.memory_owner_id 必填：它是这座花园的稳定所有者。"
+            "宿主拿不到稳定 owner 时应当关闭记忆功能并告知用户，"
+            "而不是让服务替它猜一个",
+        )
+    actor = raw.get("actor") or {}
+    mounts = raw.get("allowed_mounts") or ()
+    return Scope(
+        tenant_id=str(raw["tenant_id"]),
+        memory_owner_id=owner,
+        actor=Actor(user_id=str(actor.get("user_id") or ""),
+                    agent_id=str(actor.get("agent_id") or ""),
+                    session_id=str(actor.get("session_id") or "")),
+        allowed_mounts=tuple(str(m) for m in mounts) or ("agent-private",),
+    )
 
 
 def _as_dict(obj: Any) -> Any:
@@ -94,8 +107,9 @@ class Service:
         self._sessions: dict[str, dict] = {}
         self._methods: dict[str, Callable[[dict], Any]] = {
             # ---- Runtime 生命周期面 ----
-            "manifest.get": lambda p: manifest(),
-            "schema.get": lambda p: schemas(),
+            "manifest.get": lambda p: manifest(tuple(self._METHOD_NAMES)),
+            "schema.get": lambda p: {"schemas": schemas(),
+                                     "methods": method_schemas()},
             "health.get": lambda p: {"ok": True},
             "capture.run": self._capture,
             # host-driven:模型调用归宿主。见 _capture_begin 的说明。
@@ -107,10 +121,28 @@ class Service:
             "maintenance.run": self._maintenance_run,
             "records.browse": self._browse,
             "records.export": self._export,
+            "records.delete": self._delete,
             # ---- 模型工具面 ----
             "tool.list": lambda p: [_as_dict(t) for t in self.garden.tools()],
             "tool.invoke": self._invoke,
         }
+        self._METHOD_NAMES = tuple(self._methods)
+        self._method_schemas = method_schemas()
+        self._schemas = schemas()
+        # 🔴 方法表、manifest 的 operations、方法级 schema —— 三者必须一致。
+        # 不对账的话，加了方法忘了登记（陌生 Runtime 从 manifest 上看不到它，
+        # 等于没加）或者登记了没实现（对方照着 manifest 调，得到
+        # unknown_method）都不会有任何提示，直到接入方踩上去。
+        declared, actual = set(WIRE_OPERATIONS), set(self._methods)
+        if declared != actual:
+            raise RuntimeError(
+                "服务方法表和 manifest 对不上 —— "
+                f"manifest 多出 {sorted(declared - actual)}，"
+                f"方法表多出 {sorted(actual - declared)}")
+        missing_schema = actual - set(self._method_schemas)
+        if missing_schema:
+            raise RuntimeError(
+                f"这些方法没有 request/response schema: {sorted(missing_schema)}")
 
     # -- 方法 ------------------------------------------------------------- #
 
@@ -159,17 +191,22 @@ class Service:
             user_name=str(p.get("user_name") or ""),
             idempotency_key=str(p.get("idempotency_key") or ""),
         )
-        session = self.garden.component.capture_session(request)
+        # 🔴 和 capture.run 走**同一条** store-aware 准备路径。
+        # 分两份写的话，DSH 这条路看不到已有记忆，于是永远只 add ——
+        # 表现是「DSH 上记的东西和别处不一样」，而且不报错。
+        prepared, revision = self.garden.prepare_capture(scope, request)
+        session = self.garden.component.capture_session(prepared)
         prompt = session.next_prompt()
         if prompt is None:
             # 请求本身就被判定为不用问模型(比如窗口是空的)。直接给结果,
             # 不让宿主白跑一趟。
             return {"status": "completed",
                     "result": self.garden.store_capture_result(
-                        scope, request, session.result())}
+                        scope, prepared, session.result(),
+                        expected_revision=revision)}
         sid = uuid.uuid4().hex
         self._sessions[sid] = {"session": session, "scope": scope,
-                               "request": request}
+                               "request": prepared, "revision": revision}
         return {"session_id": sid, "status": "needs_model", "next_prompt": prompt}
 
     def _capture_feed(self, p: dict) -> Any:
@@ -194,7 +231,8 @@ class Service:
         self._sessions.pop(sid, None)
         return {"status": "completed",
                 "result": self.garden.store_capture_result(
-                    entry["scope"], entry["request"], session.result())}
+                    entry["scope"], entry["request"], session.result(),
+                    expected_revision=entry.get("revision"))}
 
     def _capture_cancel(self, p: dict) -> Any:
         """宿主主动放弃这次落卡(用户按了停止、turn 被取消)。
@@ -203,6 +241,19 @@ class Service:
         """
         sid = str(p.get("session_id") or "")
         return {"cancelled": self._sessions.pop(sid, None) is not None}
+
+    def _delete(self, p: dict) -> Any:
+        """用户主动删除 —— **真删**。
+
+        作用域一律用可信 scope，不看参数里的其它身份字段：否则调用方
+        （或它背后的模型）只要换个 id 就能删别人的卡。
+        """
+        return self.garden.delete_record(
+            _scope_from(p),
+            str(p.get("record_id") or ""),
+            requested_by=str(p.get("requested_by") or ""),
+            reason=str(p.get("reason") or ""),
+        )
 
     def _context(self, p: dict) -> Any:
         mount = p.get("mount")
@@ -247,8 +298,21 @@ class Service:
         if fn is None:
             return {"id": rid, "ok": False,
                     "error": {"code": "unknown_method", "message": method}}
+        params = dict(request.get("params") or {})
+        # 🔴 **执行前**按方法的 request schema 校验。
+        # 不校验的话坏请求会走到业务代码里才炸，那时的错误消息是
+        # 「NoneType 没有 strip」—— 调用方既不知道哪个字段错了，
+        # 也分不出是自己传错还是服务有 bug。
+        spec = (self._method_schemas.get(method) or {}).get("request")
+        if spec:
+            try:
+                validate(params, spec, schemas=self._schemas)
+            except SchemaViolation as exc:
+                return {"id": rid, "ok": False,
+                        "error": {"code": "invalid_request",
+                                  "message": str(exc), "field": exc.path}}
         try:
-            result = fn(dict(request.get("params") or {}))
+            result = fn(params)
         except ServiceError as exc:
             return {"id": rid, "ok": False,
                     "error": {"code": exc.code, "message": str(exc)}}

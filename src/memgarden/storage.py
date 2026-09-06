@@ -38,7 +38,7 @@ fail-open —— 适配器漏声明会被当成「全支持」，正好错在最
 ## 现状
 
 本模块只定义接口与降级规划，不接任何真实存储。把 IO 现有的
-锁 / 信封 / 全量替换包成适配器，是后续批次的事（会动写入路径，需拍板）。
+把宿主现有的锁与全量替换写法包成适配器，是后续批次的事（会动写入路径，需拍板）。
 
 ## ⚠️ 这个接口还没定完（codex review 2026-08-14）
 
@@ -101,6 +101,26 @@ class Capabilities:
     可降级：把候选拉回本地再排，量大时延迟和内存变差但结果正确。
     """
 
+    supports_hard_delete: bool
+    """能不能真删 —— 用户主动删除、合规删除。
+
+    ⚠️ **正确性前置条件，不可降级。** 用户说「把这条忘掉」时，降级成归档
+    等于**当着用户的面撒谎**：界面说删了，库里还在。缺了只能拒绝 delete，
+    让宿主把「这个后端不支持真删」如实告诉用户。
+
+    以前这一项只出现在 ``OPTIONAL_CONTRACT`` 名单里、``Capabilities`` 上却没有
+    字段，于是 ``getattr(caps, "supports_hard_delete", None)`` 恒为 ``None``，
+    检查永远通不过也永远不报错 —— fail-open 正好错在最危险的方向。
+    """
+
+    supports_owner_scoping: bool
+    """能不能在**查询层**把结果限制在一个 memory owner 内。
+
+    ⚠️ **正确性前置条件，不可降级。** 降级成「把整个租户的卡load回来再在
+    内存里按 owner 过滤」看起来等价，实际不是：漏过滤一处就是越权读，
+    而且不报错；量大时还会把别人的数据整批读进本进程内存。
+    """
+
 
 #: 全部支持 —— 官方参考实现和大多数关系库适配器都能达到这一档。
 FULL_CAPABILITIES = Capabilities(
@@ -108,10 +128,15 @@ FULL_CAPABILITIES = Capabilities(
     supports_atomic_batch=True,
     supports_custom_fields=True,
     supports_metadata_sort=True,
+    supports_hard_delete=True,
+    supports_owner_scoping=True,
 )
 
 #: 缺了就必须拒绝对应操作的能力（不是「降级后继续」）。
-CORRECTNESS_CRITICAL = frozenset({"supports_supersede", "supports_atomic_batch"})
+CORRECTNESS_CRITICAL = frozenset({
+    "supports_supersede", "supports_atomic_batch",
+    "supports_hard_delete", "supports_owner_scoping",
+})
 
 
 # --------------------------------------------------------------------------- #
@@ -120,9 +145,9 @@ CORRECTNESS_CRITICAL = frozenset({"supports_supersede", "supports_atomic_batch"}
 #
 # ## 为什么要分
 #
-# 契约测试如果把「按元数据排序」这类动作也算成必需，那么**加密存储永远过不了**——
-# 卡片在客户端加密，服务端只看得见密文，`importance` 这个字段它根本读不出来，
-# 排序发生在解密之后的另一层。
+# 契约测试如果把「按元数据排序」这类动作也算成必需，那么**一大批合法后端
+# 永远过不了**—— 有的后端只当一个不透明的键值存储用，`importance` 这种字段
+# 它根本不参与，排序发生在取回之后的另一层。
 #
 # 硬跑的结果是：50 个用例 30 个跳过 20 个通过，报告是绿的，**但什么也没证明**。
 #
@@ -147,7 +172,7 @@ REQUIRED_CONTRACT = (
 
 #: 可选能力 —— 做不到就声明，Garden 会降级。
 OPTIONAL_CONTRACT = (
-    "metadata_sort",     # 按重要度/时间排序分页。加密存储做不到 → 拉回本地排
+    "metadata_sort",     # 按重要度/时间排序分页。不认识这些字段的后端 → 拉回本地排
     "metadata_filter",   # 按字段过滤
     "full_text_search",  # 全文检索
     "vector_search",     # 向量检索
@@ -198,6 +223,16 @@ def mutations_digest(mutations: list[dict]) -> str:
 
     blob = json.dumps(mutations, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+class MutationRejected(ValueError):
+    """这条改动在当前库状态下**做不了**（目标不存在、改了不该改的字段…）。
+
+    和 ``UnknownMutation`` 分开：那个是「格式不认识」（调用方的 bug），
+    这个是「格式对但做不到」（可能只是并发下目标已经没了）。两者的处置不同。
+
+    以前这里抛的是裸 ``KeyError`` —— 适配器只能靠猜来判断该重试还是该报错。
+    """
 
 
 class RevisionConflict(RuntimeError):
@@ -257,6 +292,12 @@ _DEGRADABLE_RULES: tuple[tuple[str, str, str], ...] = (
 )
 
 _CRITICAL_REASONS: dict[str, str] = {
+    "supports_hard_delete": (
+        "降级成归档等于当着用户的面撒谎：界面说删了、库里还在"
+    ),
+    "supports_owner_scoping": (
+        "降级成「全租户读回来再在内存里过滤」漏一处就是越权读，而且不报错"
+    ),
     "supports_supersede": (
         "降级成覆盖会破坏「永远不硬删」——旧卡的前后链条丢失且不可追溯，"
         "写日志救不回来"
@@ -322,6 +363,14 @@ def describe_capabilities(caps: Capabilities) -> str:
 
 # 给接入方看的话术：不出现字段名，说清楚「你会失去什么」。
 _USER_FACING_CRITICAL: dict[str, str] = {
+    "supports_hard_delete": (
+        "这个记忆库不支持真正的删除，只能归档。"
+        "为避免界面显示已删除而内容仍在，用户主动删除会被拒绝"
+    ),
+    "supports_owner_scoping": (
+        "这个记忆库不能按记忆归属人限制查询范围。"
+        "为避免读到同一账户下别人的私有记忆，记忆功能会被关闭"
+    ),
     "supports_supersede": (
         "这个记忆库不支持「标记为被取代」，只能覆盖或删除。"
         "为避免记忆被不可追溯地改掉，整理记忆时的消矛盾会被跳过"
@@ -372,7 +421,7 @@ def describe_for_user(caps: Capabilities) -> list[str]:
 
 @dataclass(frozen=True)
 class Snapshot:
-    """一次读取的结果：未解密的卡视图 + 这批数据的版本号。
+    """一次读取的结果：这一批卡 + 它们的版本号。
 
     ``revision`` 是调用方做 CAS 的凭据 —— 基于这份快照算出来的 mutation
     必须带着它回来，否则并发写会基于过期快照覆盖别人刚写的卡。
@@ -380,13 +429,18 @@ class Snapshot:
     """
 
     cards: list[dict]
-    """未解密的卡。**「信封」是 IO 适配器的内部概念，不是领域模型** ——
-    对 mem0 / SQLite 这类后端不成立。内核只要求：每张卡带得动打分需要的明文
-    元数据（重要度 / 情绪强度 / 最近被想起 / 状态），内容部分不透明即可。
-    （codex review 2026-08-14 指出原字段名 ``envelopes`` 把 IO 假设写进了 port。）
+    """这一批卡。全链路按**明文**设计。
+
+    内核只要求：每张卡带得动打分需要的元数据（重要度 / 情绪强度 /
+    最近被想起 / 状态）。正文长什么样、后端怎么存，内核不关心 ——
+    这一层刻意不表达任何某一个宿主的内部格式，否则换个后端就不成立。
     """
 
     revision: Any
+
+    #: 这份快照属于谁。调用方可以断言它和自己请求的 owner 一致 ——
+    #: 存储实现把 owner 过滤漏掉时，这里是唯一能当场发现的地方。
+    owner: str = ""
 
 
 @dataclass(frozen=True)
@@ -409,8 +463,8 @@ class ApplyResult:
 class StoragePort(Protocol):
     """内核对存储的全部要求。
 
-    读侧返回的是**信封**（明文元数据 + 密文正文原样），内核只在明文元数据上
-    打分排序；解密由适配器在内核挑完候选之后另做一步。
+    读侧返回的是卡本身（明文），内核在元数据上打分排序。要不要在传输或磁盘
+    层面加密由部署环境决定，不进这个接口的字段和能力声明。
 
     写侧只有 ``apply`` 一个入口，因为「写新卡 + 标记旧卡」必须原子。
     不提供 save/update/delete 三个独立方法 —— 那样在并发下会丢卡
@@ -421,8 +475,16 @@ class StoragePort(Protocol):
         """声明这个后端支持哪些能力。每一项都要显式给。"""
         ...
 
-    def load(self, tenant: str, **filters: Any) -> Snapshot:
-        """取出该租户的卡 + 版本号。不解密（若该后端有加密的话）。"""
+    def load(self, tenant: str, *, owner: str, **filters: Any) -> Snapshot:
+        """取出**该租户下该 owner** 的卡 + 版本号。
+
+        🔴 ``owner`` 必须落到查询条件里，不能读回整个租户再由调用方过滤。
+        两者的差别在出错时才看得见：漏一处过滤，前者读不到、后者读得到。
+
+        ``revision`` 的作用域也必须是 ``(tenant, owner)`` —— 用全局或全租户的
+        版本号会让两个互不相干的 owner 互相踢掉对方的 CAS，表现为
+        「明明没人跟我抢，我的写入却一直冲突」。
+        """
         ...
 
     def apply(
@@ -430,15 +492,22 @@ class StoragePort(Protocol):
         tenant: str,
         mutations: list[dict],
         *,
+        owner: str,
         idempotency_key: str,
         expected_revision: Any,
+        maintenance_state: dict | None = None,
     ) -> ApplyResult:
         """把一批 mutation 作为一个原子单位写入。
 
         ``expected_revision`` 来自先前 ``load`` 的 ``Snapshot.revision``；
-        与当前不符时适配器应拒绝写入（CAS 失败），由调用方重读后重算。
+        与当前不符时适配器应拒绝写入（CAS 失败），由调用方重读后**重算**。
         纯新增（不依赖旧快照）可以传 ``None``。
 
         ``idempotency_key`` 保证同一批重放不产生第二份。
+
+        ``maintenance_state`` 是整理账本（signature / seed_card_count / …）。
+        给了就**必须和这批卡改动在同一个提交里**成或败：
+        账本先走一步 → 这批整理永远不会重跑，改动丢了也没人知道；
+        卡先走一步 → 下次照样整理同一批，重复合并。
         """
         ...

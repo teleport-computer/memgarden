@@ -161,6 +161,204 @@ ERROR_CODES = (
 )
 
 
+# --------------------------------------------------------------------------- #
+# 方法级契约：每个 method 的 request / response
+# --------------------------------------------------------------------------- #
+#
+# ## 为什么光有 Card/Mutation 的 schema 不够
+#
+# 陌生 Runtime 拿到「Mutation 长这样」之后，仍然不知道 ``capture.run`` 该传
+# 什么、会回什么。他只能读我们的 Python 源码或者靠试 —— 而试出来的理解
+# 会在某个可选字段上悄悄跑偏，且不报错。
+#
+# 所以每个方法都要有 request/response schema，并且**在执行前**按它校验输入：
+# 早拒绝的错误消息说得清「哪个字段不对」，晚失败的错误消息只会说
+# 「NoneType 没有 strip」。
+
+def _scope_ref() -> dict:
+    return {"$ref": "#/schemas/Scope"}
+
+
+def _error_envelope() -> dict:
+    """所有失败响应的统一形状。**code 是稳定的，message 不是。**"""
+    return {
+        "type": "object",
+        "required": ["ok", "error"],
+        "properties": {
+            "id": _OPT_STR,
+            "ok": {"type": "boolean", "enum": [False]},
+            "error": {
+                "type": "object",
+                "required": ["code", "message"],
+                "properties": {
+                    "code": {"type": "string", "enum": list(ERROR_CODES)},
+                    "message": _STR,
+                },
+                "additionalProperties": True,
+            },
+        },
+        "additionalProperties": True,
+    }
+
+
+def _ok_envelope(result: dict) -> dict:
+    return {
+        "type": "object",
+        "required": ["ok", "result"],
+        "properties": {"id": _OPT_STR,
+                       "ok": {"type": "boolean", "enum": [True]},
+                       "result": result},
+        "additionalProperties": True,
+    }
+
+
+def _page() -> dict:
+    """分页游标。**浏览和导出必须有界** —— 不分页的 export 在几万张卡的
+    花园上会一次性把整座花园塞进一条响应，宿主那边直接 OOM。"""
+    return {
+        "limit": {"type": "integer", "default": 100, "minimum": 1,
+                  "maximum": 1000},
+        "cursor": _OPT_STR,
+    }
+
+
+def _maintenance_state() -> dict:
+    """整理账本。作用域 (tenant, memory_owner, mount)。
+
+    它和卡改动在**同一次提交**里落地 —— 分开写的两种坏法都很隐蔽，
+    见 :mod:`memgarden.storage` 里 ``apply`` 的说明。
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "mount": _OPT_STR,
+            "signature": _OPT_STR,
+            "seed_card_count": {"type": "integer", "default": 0},
+            "revision": _OPT_STR,
+            "updated_at": _OPT_STR,
+            "schema_version": {"type": "integer", "default": 1},
+        },
+        "additionalProperties": True,
+    }
+
+
+def method_schemas() -> dict[str, Any]:
+    """每个 Service 方法的 request / response。"""
+    receipt = {"$ref": "#/schemas/OperationReceipt"}
+    capture_req = {
+        "type": "object",
+        "required": ["scope", "window", "locale"],
+        "properties": {
+            "scope": _scope_ref(),
+            "window": _STR,
+            "locale": _STR,
+            "ai_name": _OPT_STR,
+            "user_name": _OPT_STR,
+            "idempotency_key": _OPT_STR,
+        },
+        "additionalProperties": True,
+    }
+    return {
+        "manifest.get": {"request": {"type": "object"},
+                         "response": _ok_envelope({"type": "object"})},
+        "schema.get": {"request": {"type": "object"},
+                       "response": _ok_envelope({"type": "object"})},
+        "health.get": {"request": {"type": "object"},
+                       "response": _ok_envelope({"type": "object"})},
+        "capture.run": {"request": capture_req,
+                        "response": _ok_envelope(receipt)},
+        "capture.begin": {
+            "request": capture_req,
+            "response": _ok_envelope({
+                "type": "object",
+                "properties": {"session_id": _OPT_STR,
+                               "status": {"type": "string",
+                                          "enum": ["needs_model", "completed"]},
+                               "next_prompt": _OPT_STR,
+                               "result": receipt},
+                "additionalProperties": True}),
+        },
+        "capture.feed": {
+            "request": {"type": "object",
+                        "required": ["session_id", "reply"],
+                        "properties": {"session_id": _STR, "reply": _STR,
+                                       "truncated": {"type": "boolean",
+                                                     "default": False},
+                                       "finish_reason": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+        "capture.cancel": {
+            "request": {"type": "object", "required": ["session_id"],
+                        "properties": {"session_id": _STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+        "context.get": {
+            "request": {"type": "object", "required": ["scope", "query"],
+                        "properties": {"scope": _scope_ref(), "query": _STR,
+                                       "limit": {"type": "integer",
+                                                 "default": 8},
+                                       "mount": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+        "maintenance.check": {
+            "request": {"type": "object", "required": ["scope"],
+                        "properties": {"scope": _scope_ref()},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+        "maintenance.run": {
+            "request": {"type": "object", "required": ["scope", "locale"],
+                        "properties": {"scope": _scope_ref(), "locale": _STR,
+                                       "mount": _OPT_STR,
+                                       "ai_name": _OPT_STR,
+                                       "user_name": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(receipt),
+        },
+        "records.browse": {
+            "request": {"type": "object", "required": ["scope"],
+                        "properties": {"scope": _scope_ref(),
+                                       "include_archived": {"type": "boolean",
+                                                            "default": False},
+                                       **_page()},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+        "records.export": {
+            "request": {"type": "object", "required": ["scope"],
+                        "properties": {"scope": _scope_ref(),
+                                       "include_archived": {"type": "boolean",
+                                                            "default": True},
+                                       **_page()},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+        "records.delete": {
+            "request": {"type": "object",
+                        "required": ["scope", "record_id", "requested_by"],
+                        "properties": {"scope": _scope_ref(),
+                                       "record_id": _STR,
+                                       # 删除必须能追溯到是谁要求的。
+                                       "requested_by": _STR,
+                                       "reason": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(receipt),
+        },
+        "tool.list": {"request": {"type": "object"},
+                      "response": _ok_envelope({"type": "array"})},
+        "tool.invoke": {
+            "request": {"type": "object", "required": ["scope", "name"],
+                        "properties": {"scope": _scope_ref(), "name": _STR,
+                                       "arguments": {"type": "object"}},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"type": "object"}),
+        },
+    }
+
+
 def schemas() -> dict[str, Any]:
     """全部 schema。键名就是契约名。"""
     return {
@@ -170,56 +368,112 @@ def schemas() -> dict[str, Any]:
         "Scope": _scope(),
         "OperationReceipt": _receipt(),
         "ErrorCode": {"type": "string", "enum": list(ERROR_CODES)},
+        "ErrorEnvelope": _error_envelope(),
+        "MaintenanceState": _maintenance_state(),
     }
 
 
-def manifest() -> dict[str, Any]:
-    """这个组件是什么、能做什么、说哪个版本的协议。
+#: Wire 上真正可调的方法 —— 这一份是 :class:`memgarden.service.GardenService`
+#: 的方法表的**唯一事实源**，Service 启动时会拿自己的注册表和它对账，对不上
+#: 就直接报错。以前两边各写一份，于是 manifest 声明的能力和实际能调的方法
+#: 长期不一致，而测试拿 manifest 和另一个 manifest 比，稳定地锁住了错误答案。
+WIRE_OPERATIONS: tuple[str, ...] = (
+    "manifest.get", "schema.get", "health.get",
+    "capture.run", "capture.begin", "capture.feed", "capture.cancel",
+    "context.get",
+    "maintenance.check", "maintenance.run",
+    "records.browse", "records.export", "records.delete",
+    "tool.list", "tool.invoke",
+)
+
+#: 一个能力要能算「Wire 上支持」，必须有方法撑着它。左边是能力名，
+#: 右边是实现它的方法 —— 没有方法就是 ``False``，不管 Python 层做不做得到。
+_CAPABILITY_BACKING: dict[str, tuple[str, ...]] = {
+    "capture": ("capture.run", "capture.begin"),
+    "turn_context": ("context.get",),
+    "maintenance": ("maintenance.run",),
+    "model_tools": ("tool.list", "tool.invoke"),
+    "tools": ("tool.list", "tool.invoke"),
+    "browse": ("records.browse",),
+    "export": ("records.export",),
+    "delete": ("records.delete",),
+    # 🔴 下面这三项 wire 上**没有**入口。内核的 Python API 做得到，
+    # 但陌生 Runtime 调不到 —— 对它而言就是做不到。声明成 True 的后果是
+    # 对方照着 manifest 写代码，然后发现没有这个方法。
+    "curated_write": (),
+    "promote": (),
+    "migrate": (),
+}
+
+#: 不由方法撑着的纯策略开关 —— 它们表达「这个版本要不要做这件事」，
+#: 和有没有 wire 入口无关。
+_POLICY_FLAGS = frozenset({"history_import"})
+
+
+def manifest(operations: tuple[str, ...] | None = None) -> dict[str, Any]:
+    """这个**已装配的服务**是什么、能做什么、说哪个版本的协议。
 
     接入方**启动时**就该核对这个 —— 版本不兼容要立刻拒绝启动，而不是跑到
     第一条用户消息才失败。
 
-    ## 🔴 ``capabilities`` 必须如实
+    ## 🔴 能力声明由「实际可调的方法」推出来，不手写
 
-    这里声明的每一项，执行层都要真的支持；**做不到的一律声明 False**。
+    以前这里读的是 ``GardenComponent(model=None).capabilities()`` ——
+    那是**判断内核**的能力，不是**这个服务**的能力。两者能差很远：
 
-    「Contract 声明支持、执行层不保护」是最坏的一种状态：接入方照着声明写代码，
-    到线上才发现不生效，而且没有报错。所以 ``history_import`` 是 ``False`` ——
-    专用提示词模板还没做，用日常聊天那把尺子代替会产生「导入成功但几乎没记住」
-    的假成功。宁可明说不支持。
+        turn_context   内核说 False，而服务其实提供了 context.get
+        curated_write  内核说 True，而 wire 上根本没有对应方法
 
-    ``mounts`` 同理：契约里定义过 ``user-private`` / ``family-shared`` /
-    ``workspace-shared``，但第一阶段只有 ``agent-private`` 有真正的权限执行，
-    所以这里只报它一个。
+    接入方读的是这份 manifest，于是照着一份和现实对不上的清单写代码。
+    而当时的测试拿 manifest 和同一个 ``GardenComponent`` 比，两边同源，
+    **稳定地锁住了这个错误答案**。
+
+    现在：能力名必须有方法撑着（见 ``_CAPABILITY_BACKING``），没有就是 False。
     """
     from .component import GardenComponent
     from dataclasses import asdict
 
+    ops = tuple(operations if operations is not None else WIRE_OPERATIONS)
+    available = set(ops)
+
     caps = asdict(GardenComponent(model=None).capabilities())
     mounts = list(caps.pop("mounts", ("agent-private",)))
     caps.pop("schema_version", None)
+
+    wire_caps: dict[str, Any] = {}
+    for name in set(caps) | set(_CAPABILITY_BACKING):
+        if name in _POLICY_FLAGS:
+            wire_caps[name] = bool(caps.get(name))
+            continue
+        backing = _CAPABILITY_BACKING.get(name)
+        if backing is None:
+            # 没登记的能力保守处理：没人说它由哪个方法撑着，就不敢声明支持。
+            wire_caps[name] = False
+            continue
+        # 🔴 判据只有一个：**wire 上有没有能调到的方法**。
+        # 不去 and 内核的那个开关 —— 那个说的是 Python API 的能力，
+        # 和「陌生 Runtime 调不调得到」是两件事（turn_context 就是这么
+        # 被错报成 False 的：内核标 False，而服务其实一直提供 context.get）。
+        wire_caps[name] = bool(backing) and any(b in available for b in backing)
+
     return {
         "component_id": "memgarden",
         "component_version": _version(),
         "protocol_version": f"{SCHEMA_VERSION}",
         "record_schema_version": RECORD_SCHEMA_VERSION,
         "mutation_schema_version": MUTATION_SCHEMA_VERSION,
-        # 每一项都对应执行层真的做得到的事,做不到的是 False。
-        "capabilities": caps,
+        # 🔴 全链路明文。传输和磁盘层面的安全由部署环境决定，不进这个协议 ——
+        # 接入方据此知道「不需要给我密钥，也别指望我替你加密」。
+        "plaintext": True,
+        # 每一项都对应 wire 上真的调得到的方法,调不到的是 False。
+        "capabilities": wire_caps,
         # 只列**权限执行层真正保护**的 mount。
         "mounts": mounts,
-        # 长驻服务暴露的方法。接入方据此判断这个版本支不支持它要的调用,
-        # 而不是发一个请求过来试。
-        "operations": [
-            "manifest.get", "schema.get", "health.get",
-            "capture.run", "capture.begin", "capture.feed", "capture.cancel",
-            "context.get",
-            "maintenance.check", "maintenance.run",
-            "tool.list", "tool.invoke",
-            "records.browse", "records.export",
-        ],
+        "operations": list(ops),
         "error_codes": list(ERROR_CODES),
         "schemas": sorted(schemas()),
+        # 每个 operation 都能定位到自己的 request/response schema。
+        "method_schemas": sorted(method_schemas()),
     }
 
 
@@ -237,6 +491,7 @@ def _version() -> str:
 def dump(indent: int = 2) -> str:
     """导出成 JSON 文本 —— CI 里可以把它和签入的副本比对，防止悄悄漂了。"""
     return json.dumps(
-        {"manifest": manifest(), "schemas": schemas()},
+        {"manifest": manifest(), "schemas": schemas(),
+         "methods": method_schemas()},
         ensure_ascii=False, indent=indent, sort_keys=True,
     )

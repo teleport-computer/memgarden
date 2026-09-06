@@ -18,7 +18,7 @@ mutation 执行、CAS、幂等键、整理账本、工具搜索、失败后重�
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .component import GardenComponent
@@ -32,9 +32,18 @@ from .contracts import (
     ToolResult,
 )
 from .records import UnknownMutation, required_capabilities, validate_mutations
-from .storage import RevisionConflict
+from .rendering import render_buckets, render_card_index, render_threads
+from .storage import IdempotencyConflict, MutationRejected, RevisionConflict
 
 DEFAULT_MOUNT = "agent-private"
+
+
+class MissingMemoryOwner(ValueError):
+    """作用域里没有稳定的记忆归属人。
+
+    单独一个类型，是为了让宿主能把它和别的参数错误分开处理：这一条的正确
+    处置是**关闭记忆功能并告诉用户**，不是重试，也不是塞一个默认值进去。
+    """
 
 
 class MountPermissionError(PermissionError):
@@ -47,11 +56,39 @@ class Scope:
 
     ``allowed_mounts`` 为空时退化成只有默认的 ``agent-private`` —— 空列表
     绝不能被理解成「都可以」，那是权限系统最经典的翻车方式。
+
+    ## tenant / owner / actor 是三样东西，别混
+
+        tenant_id         账户、组织或部署的**安全边界**
+        memory_owner_id   一座长期花园的**稳定所有者**
+        actor             此刻在执行的是谁（agent / session / turn 来源身份）
+
+    最容易错的是把 session 当成 owner：那样用户换个设备、重开一轮，
+    拿到的就是一座空花园 —— 而这在测试里根本看不出来，测试都是新建的。
+
+    反过来，把 owner 省掉、只用 tenant 也不行：同一个账户下两个 agent
+    各自的 agent-private 就互相读得到了。sevenfloor 2026-09-06 复现的正是
+    这一条 —— 当时的「多 agent 隔离测试」用的是两个不同 tenant，
+    验的是另一件事。
     """
 
     tenant_id: str
+    #: 🔴 **必填。** 空值直接拒绝，不回退成默认花园 —— 回退的后果是
+    #: 所有没显式给 owner 的调用共用同一座花园，隔离在最常见的路径上失效。
+    memory_owner_id: str = ""
     actor: Actor = field(default_factory=Actor)
     allowed_mounts: tuple[str, ...] = (DEFAULT_MOUNT,)
+
+    def owner(self) -> str:
+        """稳定的记忆归属人。缺了就抛 —— fail closed。"""
+        value = str(self.memory_owner_id or "").strip()
+        if not value:
+            raise MissingMemoryOwner(
+                "Scope.memory_owner_id 必填：缺稳定 owner 时必须 fail closed。"
+                "宿主拿不到稳定 owner 时应当明确关闭记忆功能，"
+                "而不是回退成一个全局默认值（那会让同租户的用户互相读到）。"
+            )
+        return value
 
     def mounts(self) -> tuple[str, ...]:
         return tuple(self.allowed_mounts) or (DEFAULT_MOUNT,)
@@ -113,25 +150,48 @@ class MountedGarden:
     ) -> OperationReceipt:
         """这段对话里有什么值得记 —— **并且真的写进去**。
 
+        ## 这一步会先读库，不只是判断
+
+        调用方只需要给可信 Scope 和这一轮的对话文本。已有的卡、桶、线索
+        由这里从库里取出来渲染进判断请求 —— 否则模型看不见任何旧卡，
+        于是**永远只会 add**：同一件事说两遍就是两张 active 卡，
+        而且每一步都「成功」，没人会发现。
+
         空结果和失败必须分开：模型觉得没什么可记是**正常**的（游标该推进），
         解析彻底失败是**异常**（游标不能动，否则这批对话永远不会再被看一眼）。
         """
         mount = scope.check(request.mount or DEFAULT_MOUNT)
-        result = self.component.capture(request)
-        if result.error:
-            return OperationReceipt(error=result.error,
-                                    trace=dict(result.trace or {}))
-        if not result.mutations:
-            return OperationReceipt(reason="nothing_worth_keeping",
-                                    trace=dict(result.trace or {}))
-        return self._apply(
-            scope, mount, result.mutations,
-            idempotency_key=request.idempotency_key,
-            trace=dict(result.trace or {}),
+
+        def judge(prepared: CaptureRequest):
+            return self.component.capture(prepared)
+
+        return self._capture_with_cas(scope, mount, request, judge)
+
+    def prepare_capture(
+        self, scope: Scope, request: CaptureRequest
+    ) -> tuple[CaptureRequest, Any]:
+        """把库里的现状填进 Capture 请求，并把快照版本一起返回。
+
+        host-driven（``capture.begin``/``feed``）和普通 ``capture`` 走的是
+        **同一个**准备函数 —— 分两份写的话，两条路看到的旧记忆会不一样，
+        表现是「DSH 上记的东西和别处不一样」，而且不报错。
+        """
+        snapshot = self._snapshot(scope)
+        cards = self._visible(scope, snapshot.cards)
+        prepared = replace(
+            request,
+            mount=scope.check(request.mount or DEFAULT_MOUNT),
+            # 调用方已经渲染过就尊重它（宿主可能有更好的身份信息）；
+            # 没给才由我们从库里填 —— 但**不能两边都空着**。
+            cards=request.cards or render_card_index(cards),
+            buckets=request.buckets or render_buckets(cards),
+            threads=request.threads or render_threads(cards),
         )
+        return prepared, snapshot.revision
 
     def store_capture_result(
-        self, scope: Scope, request: CaptureRequest, result: Any
+        self, scope: Scope, request: CaptureRequest, result: Any,
+        *, expected_revision: Any = None,
     ) -> OperationReceipt:
         """把**已经判断完**的落卡结果写库。
 
@@ -139,8 +199,8 @@ class MountedGarden:
         判断由内核做，写库这一步仍然归这里 —— 否则每个宿主又要自己实现一遍
         mount 校验、typed mutation 关口、能力检查、幂等和 CAS。
 
-        和 :meth:`capture_and_store` 的唯一区别是「谁调的模型」。空结果和失败
-        的区分、写入的所有保证，两条路完全一样。
+        ``expected_revision`` 来自 :meth:`prepare_capture`。给了就走 CAS：
+        判断期间别人写过，这次提交会被拒，调用方需要重新走一遍准备+判断。
         """
         if getattr(result, "error", None):
             return OperationReceipt(error=result.error,
@@ -153,6 +213,7 @@ class MountedGarden:
             scope, scope.check(request.mount or DEFAULT_MOUNT), mutations,
             idempotency_key=request.idempotency_key,
             trace=dict(getattr(result, "trace", {}) or {}),
+            expected_revision=expected_revision,
         )
 
     # -- 想起 ------------------------------------------------------------ #
@@ -204,14 +265,22 @@ class MountedGarden:
     def run_and_store_maintenance(
         self, scope: Scope, request: MaintenanceRequest
     ) -> OperationReceipt:
-        """整理并写回。
+        """整理并写回。**账本由这里读、由这里写，和卡改动同一次提交。**
 
         ``request.locale`` **必须给** —— 这个花园用什么语言写卡，只有宿主知道。
         内核在这里不猜：猜错的表现是整理完之后整个花园换了语言，而且没有报错
         （2026-08-24 线上事故就是这个形状）。
 
-        账本（signature / seed_card_count）跟着 trace 一起回来 —— 宿主要存回去，
-        否则下次判断不出增量、会反复整理同一批。
+        ## 账本为什么不能丢给宿主存
+
+        以前这里把 signature / seed_card_count 放进 trace，让宿主存回去。
+        宿主重启一次就忘了，表现是**同一批卡被反复合并**。而且宿主分两步存
+        （先存账本再写卡，或反过来）时，两种坏法都很隐蔽：
+
+            账本先走 → 这批整理再也不会跑，改动丢了没人知道
+            卡先走   → 下次照样整理同一批，重复合并
+
+        所以账本落到 Store，并且和卡改动**在同一个事务里**成或败。
         """
         if not str(getattr(request, "locale", "") or "").strip():
             raise ValueError(
@@ -219,31 +288,100 @@ class MountedGarden:
                 "这个花园用什么语言写卡由宿主决定，内核不猜"
             )
         mount = scope.check(request.mount or DEFAULT_MOUNT)
-        cards = self._readable_cards(scope)
+        ledger = self.maintenance_ledger(scope, mount=mount)
         base = request
-        result = self.component.run_maintenance(MaintenanceRequest(
-            cards=cards,
-            all_cards=cards,
-            known_ids=tuple(str(c.get("id") or "") for c in cards),
-            mount=mount,
-            locale=base.locale,
-            ai_name=base.ai_name,
-            user_name=base.user_name,
-            recent_conversations=base.recent_conversations,
-            last_seed_card_count=base.last_seed_card_count,
-            last_signature=base.last_signature,
-        ))
-        if result.error:
-            return OperationReceipt(error=result.error,
-                                    trace=dict(result.trace or {}))
-        if not result.needed:
-            return OperationReceipt(reason="not_needed",
-                                    trace=dict(result.trace or {}))
-        if not result.mutations:
-            return OperationReceipt(reason="nothing_to_consolidate",
-                                    trace=dict(result.trace or {}))
-        return self._apply(scope, mount, result.mutations,
-                           idempotency_key="", trace=dict(result.trace or {}))
+
+        last: OperationReceipt | None = None
+        for attempt in range(self.MAX_RECOMPUTE):
+            snapshot = self._snapshot(scope)
+            cards = self._visible(scope, snapshot.cards)
+            result = self.component.run_maintenance(MaintenanceRequest(
+                cards=cards,
+                all_cards=cards,
+                known_ids=tuple(str(c.get("id") or "") for c in cards),
+                mount=mount,
+                locale=base.locale,
+                ai_name=base.ai_name,
+                user_name=base.user_name,
+                recent_conversations=base.recent_conversations,
+                # 账本优先用库里的；调用方显式给了才用它的（便于测试和迁移）。
+                last_seed_card_count=(
+                    base.last_seed_card_count
+                    if base.last_seed_card_count
+                    else int(ledger.get("seed_card_count") or 0)),
+                last_signature=(base.last_signature
+                                or str(ledger.get("signature") or "")),
+            ))
+            if result.error:
+                return OperationReceipt(error=result.error,
+                                        trace=dict(result.trace or {}))
+            if not result.needed:
+                return OperationReceipt(reason="not_needed",
+                                        trace=dict(result.trace or {}))
+            if not result.mutations:
+                return OperationReceipt(reason="nothing_to_consolidate",
+                                        trace=dict(result.trace or {}))
+            trace = dict(result.trace or {})
+            receipt = self._apply(
+                scope, mount, result.mutations,
+                idempotency_key="", trace=trace,
+                expected_revision=snapshot.revision,
+                maintenance_state={
+                    "mount": mount,
+                    "signature": str(trace.get("signature") or ""),
+                    "seed_card_count": int(trace.get("seed_card_count")
+                                           or len(cards)),
+                    "schema_version": 1,
+                },
+            )
+            if receipt.error != "revision_conflict":
+                return receipt
+            last = receipt
+            last.trace = {**last.trace, "recompute_attempt": attempt + 1}
+        return last or OperationReceipt(error="revision_conflict")
+
+    def maintenance_ledger(self, scope: Scope, *, mount: str | None = None) -> dict:
+        """上一次整理留下的账本。存储没实现就返回空 —— 那种情况下整理会
+        保守地重跑，重复但不会丢东西。"""
+        target = scope.check(mount or DEFAULT_MOUNT)
+        read = getattr(self._store, "maintenance_state", None)
+        if read is None:
+            return {}
+        try:
+            return dict(read(scope.tenant_id, owner=scope.owner(),
+                             mount=target) or {})
+        except Exception:  # noqa: BLE001 —— 读不到账本不该让整理彻底失败
+            return {}
+
+    # -- 用户主动删除 ------------------------------------------------------ #
+
+    def delete_record(
+        self, scope: Scope, record_id: str, *,
+        requested_by: str, reason: str = "",
+    ) -> OperationReceipt:
+        """**用户要求删除 → 真删。**
+
+        和整理时的 archive/supersede 是两回事：那两个是编辑，内容还在、
+        可追溯；这个是删除，正文不再可读。混在一起的后果是界面说「已删除」
+        而库里原封不动 —— 当着用户的面撒谎。
+
+        ``requested_by`` 必填：删除必须能追溯到是谁要求的。
+        """
+        target = str(record_id or "").strip()
+        if not target:
+            return OperationReceipt(error="record_id_required")
+        if not str(requested_by or "").strip():
+            return OperationReceipt(error="requested_by_required")
+        mount = scope.check(DEFAULT_MOUNT)
+        # 只能删自己作用域里看得见的那张 —— 否则给个别人的 id 就能删别人的卡。
+        visible = {str(c.get("id") or "")
+                   for c in self._readable_cards(scope, include_archived=True)}
+        if target not in visible:
+            return OperationReceipt(error="record_not_found")
+        return self._apply(scope, mount, [{
+            "op": "delete", "record_id": target,
+            "requested_by": str(requested_by), "reason": str(reason or ""),
+        }], idempotency_key=f"delete:{target}", trace={})
 
     # -- 给模型的工具 ----------------------------------------------------- #
 
@@ -309,26 +447,89 @@ class MountedGarden:
 
     # -- 内部 ------------------------------------------------------------- #
 
-    def _missing_capabilities(self, needed: set[str]) -> set[str]:
-        """存储声明支持不了的那些能力。
+    #: 冲突后最多重算几次。**必须有界** —— 无界重算在高并发下会把额度烧光，
+    #: 而且每一次重算都要调一次模型。到顶了就如实返回 conflict，
+    #: 绝不能对用户说「记住了」。
+    MAX_RECOMPUTE = 3
 
-        存储没有 ``capabilities()`` 时**当作全部支持** —— 这个方法是可选契约，
-        缺它不代表能力弱，只代表适配器没实现声明。真做不到的话,写入那一步
-        自己会失败,不会静默错。
+    def _capture_with_cas(self, scope: Scope, mount: str,
+                          request: CaptureRequest, judge) -> OperationReceipt:
+        """load → 判断 → CAS 提交；冲突就**重读重算**，不是重放旧结果。
+
+        重放旧 mutation 是最诱人也最错的做法：那批 mutation 是基于旧快照算的，
+        里面的 target_id 可能已经被别人 supersede 掉了，去重结论也可能失效。
+        重放的结果是「凭空多出一张重复卡」或「supersede 一张不存在的卡」。
+        """
+        last: OperationReceipt | None = None
+        for attempt in range(self.MAX_RECOMPUTE):
+            prepared, revision = self.prepare_capture(scope, request)
+            result = judge(prepared)
+            if getattr(result, "error", None):
+                return OperationReceipt(error=result.error,
+                                        trace=dict(result.trace or {}))
+            if not getattr(result, "mutations", None):
+                return OperationReceipt(reason="nothing_worth_keeping",
+                                        trace=dict(result.trace or {}))
+            receipt = self._apply(
+                scope, mount, result.mutations,
+                idempotency_key=request.idempotency_key,
+                trace=dict(result.trace or {}),
+                expected_revision=revision,
+            )
+            if receipt.error != "revision_conflict":
+                return receipt
+            last = receipt
+            last.trace = {**last.trace, "recompute_attempt": attempt + 1}
+        # 重算到顶还在冲突 —— 如实报出去。调用方可以退避后再来，
+        # 但**不能**把这当成成功。
+        return last or OperationReceipt(error="revision_conflict")
+
+    def _snapshot(self, scope: Scope, *, include_archived: bool = False):
+        snapshot = self._store.load(scope.tenant_id, owner=scope.owner(),
+                                    include_archived=include_archived)
+        # 存储把 owner 过滤漏掉时，这里是唯一能当场发现的地方 ——
+        # 漏过滤的表现是读到别人的卡，不会有任何异常。
+        got = str(getattr(snapshot, "owner", "") or "")
+        if got and got != scope.owner():
+            raise MountPermissionError(
+                f"store returned a snapshot for owner {got!r}, "
+                f"expected {scope.owner()!r}")
+        return snapshot
+
+    def _visible(self, scope: Scope, cards: list[dict]) -> list[dict]:
+        allowed = set(scope.mounts())
+        # 没写 mount 的卡按默认 mount 处理 —— 老数据没有这个字段。
+        return [c for c in cards
+                if str(c.get("mount") or DEFAULT_MOUNT) in allowed]
+
+    def _missing_capabilities(self, needed: set[str]) -> set[str]:
+        """存储支持不了的那些能力。
+
+        ## 🔴 取不到声明 = 全部当作不支持（fail closed）
+
+        以前这里反过来：没有 ``capabilities()``、或者调用抛异常，就当成
+        「全部支持」。那正好错在最危险的方向 —— 一个不声明能力的适配器会被
+        当成什么都能做，于是 supersede 被下发给一个只会覆盖的后端，
+        「永远不硬删」这条红线在没有任何报错的情况下破掉。
+
+        而 :mod:`memgarden.storage` 从一开始就写着「``Capabilities`` 没有默认值，
+        外部适配器要逐项写清楚」。这里必须和那条约束一致，否则声明的强制性
+        被这一个 fallback 全部抵消。
         """
         declare = getattr(self._store, "capabilities", None)
         if declare is None:
-            return set()
+            return set(needed)
         try:
             caps = declare()
-        except Exception:  # noqa: BLE001 —— 声明取不到不该让写入失败
-            return set()
+        except Exception:  # noqa: BLE001
+            return set(needed)
         out = set()
         for name in needed:
             flag = getattr(caps, f"supports_{name}", None)
             if flag is None:
                 flag = getattr(caps, name, None)
-            if flag is False:
+            # None（没有这个字段）也算不支持 —— 「没声明」不是「支持」。
+            if not flag:
                 out.add(name)
         return out
 
@@ -340,20 +541,14 @@ class MountedGarden:
         **过滤在这里做，不在调用方**。放给调用方做的话，25 个接入点就有 25 种
         理解，而漏掉一处的表现是「读到了别人的记忆」——不会报错。
         """
-        snapshot = self._store.load(scope.tenant_id,
-                                    include_archived=include_archived)
-        allowed = set(scope.mounts())
-        out = []
-        for card in snapshot.cards:
-            # 没写 mount 的卡按默认 mount 处理 —— 老数据没有这个字段。
-            mount = str(card.get("mount") or DEFAULT_MOUNT)
-            if mount in allowed:
-                out.append(card)
-        return out
+        snapshot = self._snapshot(scope, include_archived=include_archived)
+        return self._visible(scope, snapshot.cards)
 
     def _apply(
         self, scope: Scope, mount: str, mutations: list[dict], *,
         idempotency_key: str, trace: dict,
+        expected_revision: Any = None,
+        maintenance_state: dict | None = None,
     ) -> OperationReceipt:
         stamped = []
         for m in mutations:
@@ -385,13 +580,36 @@ class MountedGarden:
         try:
             applied = self._store.apply(
                 scope.tenant_id, stamped,
+                owner=scope.owner(),
                 idempotency_key=idempotency_key or _digest_key(scope, stamped),
-                expected_revision=None,
+                # 🔴 基于旧状态做的判断**必须**带着读到的 revision 回来。
+                # 以前这里写死 None —— Store 支持 CAS，主链路却从不使用，
+                # 于是并发下后写的那次会盖掉先写的判断，且不报错。
+                expected_revision=expected_revision,
+                maintenance_state=maintenance_state,
             )
         except RevisionConflict as exc:
             # 让调用方重读重算,而不是覆盖别人刚写的东西。
             return OperationReceipt(error="revision_conflict", trace={
                 **trace, "detail": str(exc)})
+        except IdempotencyConflict as exc:
+            # 同键不同内容 —— 调用方的键生成有 bug。单独一个码，
+            # 因为处置和版本冲突完全不同：这个重试多少次都一样。
+            return OperationReceipt(error="idempotency_conflict", trace={
+                **trace, "detail": str(exc)})
+        except MutationRejected as exc:
+            # 目标不在了、改了不该改的字段 —— 格式对但做不到。
+            return OperationReceipt(error=f"mutation_rejected:{exc}", trace=trace)
+        except Exception as exc:  # noqa: BLE001
+            # 🔴 存储自己炸了（磁盘满、连接断、适配器有 bug）也必须变成回执。
+            # 让它原样冒出去的话，一次写库失败会把整轮对话带走 —— 而记忆
+            # 写不进去**不该影响用户能不能继续聊**。
+            #
+            # 更要紧的是账本：整理路径上如果异常直接穿出去，调用方分不清
+            # 「没整理」和「整理了但没写成」，而这两件事的后续处置相反。
+            return OperationReceipt(
+                error=f"storage_failed:{type(exc).__name__}",
+                trace={**trace, "detail": str(exc)[:200]})
         ids = tuple(str(r.get("id") or "") for r in applied.results
                     if r.get("id"))
         return OperationReceipt(written=True, record_ids=ids,
@@ -408,7 +626,7 @@ def _digest_key(scope: Scope, mutations: list[dict]) -> str:
     import json
 
     payload = json.dumps(
-        [scope.tenant_id, mutations], sort_keys=True, ensure_ascii=False,
-        default=str,
+        [scope.tenant_id, scope.owner(), mutations], sort_keys=True,
+        ensure_ascii=False, default=str,
     )
     return "auto-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]

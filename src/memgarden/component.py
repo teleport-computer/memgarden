@@ -952,7 +952,7 @@ class GardenComponent:
                 consolidations, mount=request.mount
             ),
             # 原始建议照旧给出去 —— 宿主有自己的写入格式时要从这里构造
-            # (io 的 action 带加密信封和溯源,mutations 表达不了)。
+            # (宿主的 action 里带着 mutations 表达不了的溯源信息)。
             consolidations=list(consolidations),
             trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
                    "consolidations": len(consolidations),
