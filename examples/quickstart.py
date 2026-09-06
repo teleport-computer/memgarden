@@ -32,6 +32,17 @@ FAKE_REPLY = """{"cards":[
 ]}"""
 
 
+#: 这座花园的**稳定所有者**。
+#
+# tenant 是账户/部署的安全边界，owner 是「这座花园属于谁」。分开的原因很实际：
+# 同一个账户下的两个 agent（或两个家庭成员）各自有自己的 agent-private，
+# 只用 tenant 的话他们会互相读到对方的记忆。
+#
+# 没有默认值是**有意的** —— 塞一个默认值就等于让所有没配 owner 的部署
+# 共用一座花园，而且不报错。
+OWNER = "user_1"
+
+
 def main() -> None:
     print("① 三个档位 —— 同一套判断，三把尺子")
     for name in ("conversation_capture", "history_import", "curated_archive"):
@@ -82,17 +93,17 @@ def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         store = SqliteStore(Path(tmp) / "demo.db")
         batch = [{"op": "add", "card": c} for c in cards]
-        result = store.apply("user_1", batch, idempotency_key="turn_42")
+        result = store.apply("user_1", batch, owner=OWNER, idempotency_key="turn_42")
         print(f"     写入 {len(result.results)} 张，版本号 {result.revision}")
 
         # 幂等：**同一批内容**重放不会写第二次（网络重试、任务重跑都会这样）
-        store.apply("user_1", batch, idempotency_key="turn_42")
-        print(f"     同一批内容重放 → 库里仍是 {len(store.load('user_1').cards)} 张")
+        store.apply("user_1", batch, owner=OWNER, idempotency_key="turn_42")
+        print(f"     同一批内容重放 → 库里仍是 {len(store.load('user_1', owner=OWNER).cards)} 张")
 
         # 反过来：同一个 key 送来**不同内容**是冲突，不是重放。
         # 静默返回旧结果会让这批改动凭空消失，而调用方以为写成功了。
         try:
-            store.apply("user_1", batch[:1], idempotency_key="turn_42")
+            store.apply("user_1", batch[:1], owner=OWNER, idempotency_key="turn_42")
             print("     ⚠️ 同 key 不同内容没报错 —— 这批改动会被静默丢掉")
         except IdempotencyConflict:
             print("     同一个 key 换一批内容 → 报冲突（多半是键生成漏了批次标识）")

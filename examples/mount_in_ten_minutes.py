@@ -84,7 +84,15 @@ def main() -> None:
 
     # 🔴 作用域来自你的可信上下文，不来自模型
     me = Scope(
-        tenant_id="user-42",
+        tenant_id="acme",
+        # 🔴 这座花园的**稳定所有者**。必填，没有默认值。
+        #
+        # tenant 是账户/部署的安全边界；owner 是「这座花园属于谁」。
+        # 只用 tenant 的话，同一个账户下的两个 agent 会互相读到对方的
+        # agent-private —— 那个 mount 的名字就没有意义了。
+        #
+        # 也别拿 session 当 owner：用户换个设备、重开一轮，就会拿到一座空花园。
+        memory_owner_id="user-42",
         actor=Actor(user_id="user-42", agent_id="assistant-1"),
         allowed_mounts=("agent-private",),
     )
@@ -110,11 +118,11 @@ def main() -> None:
     # 重放同一个 turn —— 不会写第二遍。
     # ⚠️ 看回执的 record_ids 判断不了：幂等命中时它返回的是**上一次的结果**，
     #    看起来一样有 id。要看库里到底有几张。
-    before = len(SqliteStore(db).load(me.tenant_id).cards)
+    before = len(SqliteStore(db).load(me.tenant_id, owner=me.memory_owner_id).cards)
     garden.capture_and_store(me, CaptureRequest(
         window="用户：我不吃辣，一吃就胃疼\n我：那以后点菜避开",
         locale="zh-Hans", idempotency_key="turn-1"))
-    after = len(SqliteStore(db).load(me.tenant_id).cards)
+    after = len(SqliteStore(db).load(me.tenant_id, owner=me.memory_owner_id).cards)
     print(f"    重放同一个 turn：库里 {before} 张 → {after} 张（幂等，应当不变）")
 
     # ---- ② 想起来（候选由 Garden 自己从库里取）------------------------ #
@@ -157,8 +165,18 @@ def main() -> None:
 
     # ---- ⑥ 别人读不到 ------------------------------------------------- #
     print("\n⑥ 别人读不到")
-    someone_else = Scope(tenant_id="user-99", actor=Actor(user_id="user-99"))
-    print(f"    另一个用户召回到：{reopened.context_for_turn(someone_else, '晚饭').record_ids}")
+    # ⚠️ 注意这里是**同一个 tenant、同一个库文件**，只有 owner 不同。
+    #
+    # 换两个不同 tenant 来演示是没有说服力的：跨租户靠的是数据分离，
+    # 本来就成立。真正会漏的是这一条 —— 同一个账户下的另一个 agent。
+    someone_else = Scope(
+        tenant_id="acme",                    # 同一个租户
+        memory_owner_id="user-99",           # 另一个人
+        actor=Actor(user_id="user-99", agent_id="assistant-2"),
+    )
+    leaked = reopened.context_for_turn(someone_else, "晚饭").record_ids
+    print(f"    同一个租户下的另一个人召回到：{leaked or '（什么都没有）'}")
+    assert not leaked, "同租户跨 owner 读到了别人的记忆"
 
     print("\n完。真接的时候只换 EchoModel，其余照抄。")
 
