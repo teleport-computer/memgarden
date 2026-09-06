@@ -213,7 +213,7 @@ def test_manifest_capabilities_match_what_the_running_service_can_actually_do(se
         assert out.get("error", {}).get("code") != "unknown_method", op
 
 
-def test_capabilities_without_a_wire_method_are_declared_false(service):
+def test_a_capability_is_true_only_when_a_method_backs_it(service):
     """内核 Python API 做得到、但 wire 上没有入口的能力，一律声明 False。
 
     对陌生 Runtime 而言「调不到」就是「做不到」。声明 True 的后果是对方
@@ -221,9 +221,19 @@ def test_capabilities_without_a_wire_method_are_declared_false(service):
     """
     declared = service.handle(
         {"id": "1", "method": "manifest.get", "params": {}})["result"]
-    for name in ("curated_write", "promote", "migrate"):
-        assert declared["capabilities"][name] is False, name
-        assert not [op for op in declared["operations"] if name in op]
+    # 这三项 2026-09-06 起有了 wire 入口，所以现在是 True。
+    # 保留这条测试是为了守住**规则**本身：声明必须由方法撑着。
+    for name, method in (("curated_write", "records.write"),
+                         ("promote", "records.promote"),
+                         ("migrate", "records.migrate")):
+        assert declared["capabilities"][name] is True, name
+        assert method in declared["operations"]
+
+    # 规则的反面：编一个没有任何方法撑着的能力名，必须是 False。
+    from memgarden.schema import manifest
+    trimmed = manifest(tuple(op for op in declared["operations"]
+                             if op != "records.promote"))
+    assert trimmed["capabilities"]["promote"] is False
 
 
 def test_manifest_only_lists_mounts_whose_permissions_are_enforced():
@@ -237,23 +247,16 @@ def test_manifest_only_lists_mounts_whose_permissions_are_enforced():
     assert manifest()["mounts"] == ["agent-private"]
 
 
-def test_history_import_is_declared_unsupported_not_silently_substituted():
-    """History Import 明说不支持，而不是悄悄用日常聊天那把尺子代替。
+def test_history_import_is_declared_supported_and_reachable(service):
+    """``history_import`` 现在是 True，而且 wire 上真的调得到。
 
-    代替的表现是「导入成功但几乎没记住」—— 用户交出三年记录只蒸出几张，
-    而且没有任何错误可查。宁可明说做不到。
+    这条以前断言它是 False。声明和实现必须一起动：能力声明的唯一意义
+    就是让陌生 Runtime 不用读源码就知道能干什么。
     """
-    from memgarden import GardenComponent
-    from memgarden.contracts import ImportRequest
-    from memgarden.schema import manifest
-
-    assert manifest()["capabilities"]["history_import"] is False
-
-    # 而且真调它、指定 history_import 档位时,要明确拒绝
-    out = GardenComponent(model=None).import_history(
-        ImportRequest(material="三年的聊天记录…", policy="history_import",
-                      locale="zh-Hans"))
-    assert out.error and "policy_not_supported" in out.error
+    declared = service.handle(
+        {"id": "1", "method": "manifest.get", "params": {}})["result"]
+    assert declared["capabilities"]["history_import"] is True
+    assert "history.import" in declared["operations"]
 
 
 def test_manifest_lists_every_operation_the_service_actually_serves():

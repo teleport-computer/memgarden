@@ -468,34 +468,65 @@ def test_curated_write_still_passes_the_content_gate() -> None:
     assert out.error == "empty_text"
 
 
-def test_import_declares_it_lacks_its_own_ruler() -> None:
-    """能力声明必须说实话。
+def test_import_declares_its_own_ruler_now_that_it_has_one() -> None:
+    """``history_import`` 声明为 True —— 因为它真的有自己的尺子和模板了。
 
-    ``policies`` 里有 history_import 档，但提示词模板只实现了
-    conversation_capture 的结构。声明成 False 而不是假装支持 ——
-    后者的表现是「导入成功但几乎没记住什么」，用户和宿主都查不出原因。
+    这条以前反着写（断言 False），那是当时的实情。声明必须跟着实现走：
+    声明 True 而做不到，用户看到「导入成功但几乎没记住」；
+    声明 False 而做得到，接入方压根不会用这条路。两种都错。
     """
-    caps = GardenComponent(model=FakeModel()).capabilities()
-    assert caps.history_import is False
+    assert GardenComponent(model=FakeModel()).capabilities().history_import is True
 
 
-def test_import_refuses_an_unsupported_ruler_instead_of_silently_downgrading() -> None:
-    out = GardenComponent(model=FakeModel()).import_history(
-        ImportRequest(material="x", locale="zh-Hans", policy="history_import"))
-    assert out.error and out.error.startswith("policy_not_supported")
+def test_all_three_rulers_are_usable_now() -> None:
+    """三档都能用了（2026-09-06 起模板全部策略化）。
+
+    这条以前反着写：断言 history_import 会被拒。那是当时的实情 ——
+    模板只实现了 conversation_capture 的结构，硬用会让 prompt 自相矛盾。
+    现在开场白、动作偏好、日期字段、tags 播种、张数上限都随档位变了。
+    """
+    for policy in ("conversation_capture", "history_import", "curated_archive"):
+        out = GardenComponent(model=FakeModel()).import_history(
+            ImportRequest(material="x", locale="zh-Hans", policy=policy))
+        assert not (out.error or "").startswith("policy_not_supported"), policy
+
+
+def test_an_unknown_ruler_is_still_refused() -> None:
+    """拼错的档位名仍然要炸。
+
+    静默回落的后果不对称：``curated_archive`` 拼错一个字母就会切成
+    「宁少勿多」，把用户手工整理的上百条事实压成一两张卡，且没有任何信号。
+    """
+    from memgarden.policies import UnknownPolicyError
+
+    with pytest.raises(UnknownPolicyError):
+        GardenComponent(model=FakeModel()).import_history(
+            ImportRequest(material="x", locale="zh-Hans", policy="histry_import"))
 
 
 def test_import_failure_is_never_reported_as_nothing_to_keep() -> None:
     """导入失败必须是失败。报成「没什么可记」的话，用户交出三年记录、
     看到「导入完成」、然后一条都没有 —— 且没有任何错误可查。"""
+    out = GardenComponent(model=FakeModel("这不是 JSON，模型跑偏了")).import_history(
+        ImportRequest(material="三年的聊天记录", locale="zh-Hans"))
+    assert out.error is not None
+    assert not out.nothing_worth_keeping
+
+
+def test_capping_the_import_is_announced_not_silent() -> None:
+    """超过 max_cards 时截断，但**必须说出来**。
+
+    悄悄丢掉一半，用户看到的是「导入成功」而实际少了一半，没有任何痕迹。
+    """
     many = _cards_reply(*[{
         "action": "add", "summary": f"第 {i} 件事",
         "content": f"这是第 {i} 段有实质内容的正文，长度足够通过内容闸。",
         "bucket": "工作"} for i in range(60)])
     out = GardenComponent(model=FakeModel(many)).import_history(
-        ImportRequest(material="三年的聊天记录", locale="zh-Hans"))
-    assert out.error is not None
-    assert not out.nothing_worth_keeping
+        ImportRequest(material="三年的聊天记录", locale="zh-Hans", max_cards=50))
+    assert len(out.mutations) == 50
+    assert out.trace.get("capped_from") == 60
+    assert out.trace.get("cap") == 50
 
 
 # --------------------------------------------------------------- 导出 / 提升

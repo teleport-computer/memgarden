@@ -33,7 +33,8 @@ from .contracts import (
 )
 from .records import UnknownMutation, required_capabilities, validate_mutations
 from .rendering import render_buckets, render_card_index, render_threads
-from .storage import IdempotencyConflict, MutationRejected, RevisionConflict
+from .storage import (IdempotencyConflict, MutationRejected, PartialFailure,
+                      RevisionConflict)
 
 DEFAULT_MOUNT = "agent-private"
 
@@ -402,6 +403,134 @@ class MountedGarden:
         except Exception:  # noqa: BLE001 —— 读不到账本不该让整理彻底失败
             return {}
 
+    # -- 历史导入 ---------------------------------------------------------- #
+
+    #: 一批多少字。够模型一次读完，也够小到中断时不心疼。
+    IMPORT_BATCH_CHARS = 6000
+
+    def import_history(self, scope: Scope, request: Any, *,
+                       progress: Any = None, max_batches: int | None = None):
+        """把一大批过去的材料**分批**蒸成卡，可断点续跑。
+
+        ``progress`` 传上一次返回的那个对象就从断点继续；不传就从头开始。
+        ``max_batches`` 限制这一次最多跑几批 —— 宿主可以跑一小段就把进度
+        交还给用户（显示百分比），下次接着来。
+
+        ## 为什么必须串行
+
+        第 N 批做判断时，前 N-1 批写进去的卡就在它的「已有记忆索引」里，
+        模型于是会选 merge 而不是 add —— **跨批去重靠的是这个**，不靠额外
+        状态。并行跑的话每批看到的都是导入前的旧状态，同一件事在不同批里
+        各写一张，谁也不知道。
+        """
+        from .contracts import CaptureRequest
+        from .importing import ImportProgress, batch_key, split_material
+
+        material = str(getattr(request, "material", "") or "")
+        prog = progress or ImportProgress(total=len(material))
+        prog.total = len(material)
+        mount = scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT)
+        policy = getattr(request, "policy", None) or "history_import"
+        base_key = str(getattr(request, "idempotency_key", "") or "")
+        if not base_key:
+            # 没给稳定键就从内容算一个 —— 至少同一份材料重跑不会写两遍。
+            import hashlib
+            base_key = "import-" + hashlib.sha256(
+                material.encode("utf-8")).hexdigest()[:16]
+
+        batches = [(off, chunk)
+                   for off, chunk in split_material(
+                       material, batch_chars=self.IMPORT_BATCH_CHARS)
+                   if off >= prog.cursor]
+        if max_batches:
+            batches = batches[:max_batches]
+
+        for offset, chunk in batches:
+            receipt = self.capture_and_store(scope, CaptureRequest(
+                window=chunk,
+                mount=mount,
+                locale=getattr(request, "locale", "") or "",
+                ai_name=getattr(request, "ai_name", "") or "",
+                user_name=getattr(request, "user_name", "") or "",
+                policy=policy,
+                idempotency_key=batch_key(base_key, offset=offset, chunk=chunk),
+            ))
+            if receipt.error:
+                # 🔴 失败就**停在这里**，游标不动。继续往下跑的话，后面几批
+                # 看不到这一批本该写进去的卡，会把同一件事再记一遍；
+                # 而游标推过去了，这一批永远不会被重试。
+                prog.failed.append({"offset": offset, "error": receipt.error})
+                break
+            prog.cursor = offset + len(chunk)
+            prog.batches_done += 1
+            if receipt.written:
+                prog.cards_written += len(receipt.record_ids)
+            else:
+                # 空结果**不是失败** —— 某一批确实没什么可记是正常的，
+                # 游标照常推进。但要记下来，否则「导入完什么都没有」时
+                # 分不清是材料没内容还是我们漏读了。
+                prog.skipped.append({"offset": offset,
+                                     "reason": receipt.reason or "empty"})
+        return prog
+
+    # -- 用户明说要记 ------------------------------------------------------- #
+
+    def write_one(self, scope: Scope, request: Any) -> OperationReceipt:
+        """用户明说要记的一件事 —— 不做「值不值得」的判断，直接落库。"""
+        result = self.component.write_one(request)
+        if result.error:
+            return OperationReceipt(error=result.error,
+                                    trace=dict(result.trace or {}))
+        if not result.mutations:
+            return OperationReceipt(reason="nothing_worth_keeping",
+                                    trace=dict(result.trace or {}))
+        return self._apply(
+            scope, scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT),
+            result.mutations,
+            idempotency_key=str(getattr(request, "idempotency_key", "") or ""),
+            trace=dict(result.trace or {}))
+
+    # -- 换挂载点 / 升级老卡 ------------------------------------------------ #
+
+    def promote(self, scope: Scope, request: Any) -> OperationReceipt:
+        """把一张卡换到另一个挂载点（比如私密 → 家庭共享）。
+
+        🔴 ``to_mount`` 也要过 ``scope.check`` —— 调用方无权访问的挂载点，
+        不能通过「把卡提升过去」绕进去。而且 ``authorized`` 必须为真：
+        这是用户的授权，不是模型能决定的事。
+        """
+        target = scope.check(str(getattr(request, "to_mount", "") or ""))
+        if not getattr(request, "authorized", False):
+            return OperationReceipt(error="not_authorized")
+        record_id = str(getattr(request, "record_id", "") or "").strip()
+        if not record_id:
+            return OperationReceipt(error="record_id_required")
+        visible = {str(c.get("id") or "")
+                   for c in self._readable_cards(scope, include_archived=True)}
+        if record_id not in visible:
+            return OperationReceipt(error="record_not_found")
+        # 换挂载点走专门的 op，不走 update —— update 明确禁止改 mount，
+        # 因为那条路绕过了这里的授权检查。
+        return self._apply(scope, target, [{
+            "op": "promote", "record_id": record_id, "to_mount": target,
+            "reason": str(getattr(request, "reason", "") or ""),
+        }], idempotency_key=f"promote:{record_id}:{target}", trace={
+            "promoted_to": target, "reason": str(getattr(request, "reason", ""))})
+
+    def migrate_and_store(self, scope: Scope, request: Any) -> OperationReceipt:
+        """把一批老格式的卡升级成当前形状并写回。"""
+        result = self.component.migrate(request)
+        if getattr(result, "error", None):
+            return OperationReceipt(error=result.error,
+                                    trace=dict(getattr(result, "trace", {}) or {}))
+        mutations = list(getattr(result, "mutations", []) or [])
+        if not mutations:
+            return OperationReceipt(reason="nothing_to_migrate",
+                                    trace=dict(getattr(result, "trace", {}) or {}))
+        return self._apply(
+            scope, scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT),
+            mutations, idempotency_key="", trace=dict(getattr(result, "trace", {}) or {}))
+
     # -- 用户主动删除 ------------------------------------------------------ #
 
     def delete_record(
@@ -660,6 +789,16 @@ class MountedGarden:
             # 因为处置和版本冲突完全不同：这个重试多少次都一样。
             return OperationReceipt(error="idempotency_conflict", trace={
                 **trace, "detail": str(exc)})
+        except PartialFailure as exc:
+            # 🔴 **绝不能报成写入成功**，也不能报成什么都没写。
+            # 回执里带上分界线，调用方才能只重放剩下的那部分 ——
+            # 当成全失败去重试会把已落库的那几条写第二遍。
+            return OperationReceipt(
+                error="partial_failure",
+                record_ids=tuple(str(r.get("id") or "") for r in exc.applied
+                                 if r.get("id")),
+                trace={**trace, "applied": len(exc.applied),
+                       "failed_at": exc.failed_at, "detail": str(exc)[:200]})
         except MutationRejected as exc:
             # 目标不在了、改了不该改的字段 —— 格式对但做不到。
             return OperationReceipt(error=f"mutation_rejected:{exc}", trace=trace)

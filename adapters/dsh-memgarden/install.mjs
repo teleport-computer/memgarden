@@ -27,6 +27,8 @@ const owner = arg('owner')
 const bin = arg('bin', 'memgarden')
 const storage = arg('storage', join(home, 'memgarden.db'))
 const locale = arg('locale', 'zh-Hans')
+// 落卡待办本放哪。进程在 turn 中途崩掉时，靠它把那一轮补回来。
+const stateDir = arg('state-dir', join(home, 'memgarden-state'))
 
 const problems = []
 if (!home) problems.push('--dsh-home（或环境变量 DSH_HOME）')
@@ -66,6 +68,7 @@ const entry = [
   `        tenant: '${tenant}'`,
   `        memoryOwner: '${owner}'`,
   `        locale: '${locale}'`,
+  `        stateDir: '${stateDir}'`,
   '',
 ].join('\n')
 

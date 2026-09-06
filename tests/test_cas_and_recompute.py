@@ -129,3 +129,59 @@ def test_maintenance_also_uses_cas():
         ME, MaintenanceRequest(locale="zh-Hans"))
     assert out.written, f"整理没落库: {out.error or out.reason}"
     assert seen and seen[0] is not None, "整理提交时没带版本号"
+
+
+def test_host_driven_capture_also_recomputes_on_conflict():
+    """host-driven（capture.begin/feed）这条路同样要重读重算。
+
+    ## 这条以前是漏的，而且只有真机才暴露
+
+    ``capture_and_store`` 有重算循环，``capture.begin/feed`` 没有 —— 它拿到
+    冲突就直接返回一个「完成」的回执，只是 ``error=revision_conflict``。
+    宿主那边多半只看 ``written``，于是**那一轮的记忆悄悄消失**。
+
+    实测场景：DSH 启动时补上一条崩溃前没做完的落卡，恰好和当前这一轮的
+    落卡撞在一起 —— 当前这轮就没了。单测抓不到（那时两条路都被 stub），
+    是真机跑出来的。
+    """
+    import json as _json
+
+    from memgarden.service import Service
+    from memgarden.stores.memory import InMemoryStore
+
+    store = InMemoryStore()
+    bumped = {"done": False}
+
+    class _Model:
+        def complete(self, prompt: str, *, purpose: str = "") -> str:
+            return _json.dumps({"cards": [CARD]}, ensure_ascii=False)
+
+    svc = Service(MountedGarden(model=_Model(), store=store))
+    scope = {"tenant_id": "t1", "memory_owner_id": "owner-1"}
+    params = {"scope": scope, "window": "用户：我不吃辣", "locale": "zh-Hans"}
+
+    begun = svc.handle({"id": "1", "method": "capture.begin",
+                        "params": params})["result"]
+    assert begun["status"] == "needs_model"
+
+    # 判断进行到一半，别人写了一张 —— 版本号往前走了
+    store.apply("t1", [{"op": "add", "card": {"summary": "别人写的",
+                                              "content": "x"}}],
+                owner="owner-1", idempotency_key="other", expected_revision=None)
+    bumped["done"] = True
+
+    fed = svc.handle({"id": "2", "method": "capture.feed",
+                      "params": {"session_id": begun["session_id"],
+                                 "reply": _json.dumps({"cards": [CARD]},
+                                                      ensure_ascii=False)}})["result"]
+    # 🔴 关键：不是「完成但冲突了」，而是「再问一次」
+    assert fed["status"] == "needs_model", fed
+    assert fed.get("retrying_after") == "conflict"
+
+    # 第二轮就能成
+    done = svc.handle({"id": "3", "method": "capture.feed",
+                       "params": {"session_id": fed["session_id"],
+                                  "reply": _json.dumps({"cards": [CARD]},
+                                                       ensure_ascii=False)}})["result"]
+    assert done["status"] == "completed"
+    assert done["result"]["written"] is True, done

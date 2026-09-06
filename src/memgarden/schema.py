@@ -174,6 +174,9 @@ ERROR_CODES = (
     "invalid_request",              # 参数不合法
     "unknown_session",              # capture 会话不存在/已取消/服务重启过
     "model_not_configured",         # 服务没配模型，但这个方法需要模型
+    # 一批改动写了一半 —— 既不是成功也不是失败。调用方要看回执里的
+    # applied / failed_at，只重放剩下的那部分。
+    "partial_failure",
     "internal_error",               # 兜底：出到这个码就是我们的 bug
 )
 
@@ -236,6 +239,25 @@ def _page() -> dict:
         "limit": {"type": "integer", "default": 100, "minimum": 1,
                   "maximum": 1000},
         "cursor": _OPT_STR,
+    }
+
+
+def _import_progress() -> dict:
+    """导入进度。宿主**要把它存起来** —— 断点续跑全靠它。"""
+    return {
+        "type": "object",
+        "properties": {
+            "cursor": {"type": "integer", "default": 0},
+            "total": {"type": "integer", "default": 0},
+            "batches_done": {"type": "integer", "default": 0},
+            "cards_written": {"type": "integer", "default": 0},
+            "skipped": {"type": "array", "items": {"type": "object"}},
+            "failed": {"type": "array", "items": {"type": "object"}},
+            "done": {"type": "boolean"},
+            "percent": {"type": "integer"},
+            "schema_version": {"type": "integer", "default": 1},
+        },
+        "additionalProperties": True,
     }
 
 
@@ -353,6 +375,55 @@ def method_schemas() -> dict[str, Any]:
                         "additionalProperties": True},
             "response": _ok_envelope({"type": "object"}),
         },
+        "records.write": {
+            "request": {"type": "object", "required": ["scope", "text"],
+                        "properties": {"scope": _scope_ref(), "text": _STR,
+                                       "bucket": _OPT_STR, "mount": _OPT_STR,
+                                       "locale": _OPT_STR,
+                                       "idempotency_key": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(receipt),
+        },
+        "records.promote": {
+            "request": {"type": "object",
+                        "required": ["scope", "record_id", "to_mount",
+                                     "authorized"],
+                        "properties": {"scope": _scope_ref(),
+                                       "record_id": _STR, "to_mount": _STR,
+                                       # 🔴 授权由**宿主**给，不是模型能决定的。
+                                       "authorized": {"type": "boolean"},
+                                       "reason": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(receipt),
+        },
+        "records.migrate": {
+            "request": {"type": "object", "required": ["scope", "old_cards"],
+                        "properties": {"scope": _scope_ref(), "old_cards": _STR,
+                                       "allowed_ids": {"type": "array",
+                                                       "items": _STR},
+                                       "vocab": _OPT_STR, "mount": _OPT_STR,
+                                       "locale": _OPT_STR, "ai_name": _OPT_STR,
+                                       "user_name": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(receipt),
+        },
+        "history.import": {
+            "request": {"type": "object",
+                        "required": ["scope", "material", "locale"],
+                        "properties": {"scope": _scope_ref(), "material": _STR,
+                                       "locale": _STR,
+                                       "material_kind": _OPT_STR,
+                                       "policy": _OPT_STR, "mount": _OPT_STR,
+                                       "ai_name": _OPT_STR,
+                                       "user_name": _OPT_STR,
+                                       "idempotency_key": _OPT_STR,
+                                       # 断点续跑：把上次的 progress 传回来
+                                       "progress": _import_progress(),
+                                       "max_batches": {"type": "integer",
+                                                       "minimum": 1}},
+                        "additionalProperties": True},
+            "response": _ok_envelope(_import_progress()),
+        },
         "records.delete": {
             "request": {"type": "object",
                         "required": ["scope", "record_id", "requested_by"],
@@ -387,6 +458,7 @@ def schemas() -> dict[str, Any]:
         "ErrorCode": {"type": "string", "enum": list(ERROR_CODES)},
         "ErrorEnvelope": _error_envelope(),
         "MaintenanceState": _maintenance_state(),
+        "ImportProgress": _import_progress(),
     }
 
 
@@ -400,6 +472,8 @@ WIRE_OPERATIONS: tuple[str, ...] = (
     "context.get",
     "maintenance.check", "maintenance.run",
     "records.browse", "records.export", "records.delete",
+    "records.write", "records.promote", "records.migrate",
+    "history.import",
     "tool.list", "tool.invoke",
 )
 
@@ -417,14 +491,17 @@ _CAPABILITY_BACKING: dict[str, tuple[str, ...]] = {
     # 🔴 下面这三项 wire 上**没有**入口。内核的 Python API 做得到，
     # 但陌生 Runtime 调不到 —— 对它而言就是做不到。声明成 True 的后果是
     # 对方照着 manifest 写代码，然后发现没有这个方法。
-    "curated_write": (),
-    "promote": (),
-    "migrate": (),
+    "curated_write": ("records.write",),
+    "promote": ("records.promote",),
+    "migrate": ("records.migrate",),
+    "history_import": ("history.import",),
 }
 
-#: 不由方法撑着的纯策略开关 —— 它们表达「这个版本要不要做这件事」，
-#: 和有没有 wire 入口无关。
-_POLICY_FLAGS = frozenset({"history_import"})
+#: 不由方法撑着的纯策略开关。**现在是空的** —— 曾经 history_import 在这里，
+#: 因为提示词模板只支持 conversation_capture 一档，即使有 wire 入口也做不成。
+#: 那个限制 2026-09-06 解除了（三档的模板全部策略化），所以它回到了
+#: 「有方法撑着就是 true」这条统一规则下。
+_POLICY_FLAGS: frozenset[str] = frozenset()
 
 
 def manifest(operations: tuple[str, ...] | None = None) -> dict[str, Any]:

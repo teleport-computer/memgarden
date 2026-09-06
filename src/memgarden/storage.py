@@ -51,9 +51,8 @@ fail-open —— 适配器漏声明会被当成「全支持」，正好错在最
 3. 读侧只定义了 ``load``，没定义「挑完候选之后怎么取内容」（index → fetch →
    decrypt 那一段现在还在 IO 侧的 ``memory_readside_core``，没进 port）。
 4. ~~冲突与部分失败没有标准表达~~ —— ``RevisionConflict`` /
-   ``IdempotencyConflict`` 已定义（2026-08-27）。仍缺的是「部分失败」：
-   一批 mutation 里前几条成功、后面失败时，调用方现在只能看到一个异常，
-   看不到哪几条已经落库。
+   ``IdempotencyConflict`` 已定义（2026-08-27）；``PartialFailure``
+   补齐了「部分失败」（2026-09-06）。
 """
 from __future__ import annotations
 
@@ -223,6 +222,40 @@ def mutations_digest(mutations: list[dict]) -> str:
 
     blob = json.dumps(mutations, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+class PartialFailure(RuntimeError):
+    """一批改动里，**前几条已经落库、后面失败了**。
+
+    ## 为什么必须有这个类型
+
+    两个官方 Store 都是原子的，所以在它们上面永远不会抛这个。但契约是给
+    **任意适配器**用的，而「原子批量」是一项可以声明不支持的能力
+    （``supports_atomic_batch``）—— 做不到的后端就会产生这种状态。
+
+    以前这种情况只能抛一个普通异常，调用方看到的是「这批失败了」，
+    于是它有两个选择，而**两个都是错的**：
+
+        当成全失败去重试  → 已经落库的那几条被写第二遍（重复的记忆卡）
+        当成全成功        → 没落库的那几条永远丢了，且没人知道
+
+    正确的做法是知道**分界线在哪**：``applied`` 里是已经生效的，
+    ``failed_at`` 是断掉的位置。调用方据此只重放剩下的那部分。
+
+    ⚠️ 抛这个之前，适配器应当**已经尽力回滚**。它表示的是「回滚不了、
+    库里现在是半成品」，不是「我懒得回滚」。
+    """
+
+    def __init__(self, applied: list[dict], failed_at: int,
+                 cause: str = "") -> None:
+        self.applied = list(applied)
+        self.failed_at = int(failed_at)
+        self.cause = cause
+        super().__init__(
+            f"partial failure: {len(self.applied)} mutation(s) already applied, "
+            f"failed at index {self.failed_at}"
+            + (f": {cause}" if cause else "")
+        )
 
 
 class MutationRejected(ValueError):

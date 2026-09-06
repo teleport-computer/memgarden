@@ -198,6 +198,24 @@ class Delete(Mutation):
 
 
 @dataclass
+class Promote(Mutation):
+    """把一张卡换到另一个挂载点（私密 → 家庭共享…）。
+
+    **刻意和 update 分开。** update 明确禁止改 ``mount``，因为那条路绕过了
+    授权检查：只有 agent-private 权限的调用，可以靠「改个字段」把私密卡
+    提升成共享的。
+
+    换挂载点是用户的授权行为，不是模型能决定的事 —— 所以它有自己的类型，
+    而落卡的解析器**永远不会**产出这个类型：它只可能由宿主显式构造。
+    """
+
+    record_id: str = ""
+    to_mount: str = ""
+    reason: str = ""
+    op: str = "promote"
+
+
+@dataclass
 class NoOp(Mutation):
     """什么都不做，但要留个痕。
 
@@ -212,6 +230,7 @@ class NoOp(Mutation):
 _OPS: dict[str, type[Mutation]] = {
     "add": Add, "update": Update, "supersede": Supersede,
     "archive": Archive, "delete": Delete, "no_op": NoOp,
+    "promote": Promote,
 }
 
 
@@ -317,6 +336,11 @@ def _require_fields(index: int, m: Mutation) -> None:
             _fail("record_id")
         if not isinstance(m.changes, dict) or not m.changes:
             _fail("changes")
+    elif isinstance(m, Promote):
+        if not str(m.record_id or "").strip():
+            _fail("record_id")
+        if not str(m.to_mount or "").strip():
+            _fail("to_mount")
     elif isinstance(m, (Archive, Delete)):
         # 🔴 字段名是 ``record_id`` —— ``Archive`` / ``Delete`` 的 dataclass 就是
         # 这么定义的。以前这里查的是 ``target_id``，于是**照着类型定义构造的

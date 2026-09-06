@@ -41,9 +41,14 @@ import sys
 from typing import Any, Callable, TextIO
 
 from .contracts import Actor, CaptureRequest, MaintenanceRequest, ToolCall
-from .mounted import MountPermissionError, MountedGarden, Scope
+from .mounted import DEFAULT_MOUNT, MountPermissionError, MountedGarden, Scope
 from .schema import WIRE_OPERATIONS, manifest, method_schemas, schemas
 from .validate import SchemaViolation, validate
+
+
+#: 冲突后最多重来几轮判断。**必须有界** —— 每一轮都要烧一次模型调用。
+#: 到顶了就如实回 revision_conflict，绝不对用户说「记住了」。
+_MAX_CAPTURE_RETRIES = 3
 
 
 class ServiceError(Exception):
@@ -122,6 +127,10 @@ class Service:
             "records.browse": self._browse,
             "records.export": self._export,
             "records.delete": self._delete,
+            "records.write": self._write_one,
+            "records.promote": self._promote,
+            "records.migrate": self._migrate,
+            "history.import": self._import,
             # ---- 模型工具面 ----
             "tool.list": lambda p: [_as_dict(t) for t in self.garden.tools()],
             "tool.invoke": self._invoke,
@@ -228,11 +237,35 @@ class Service:
         if prompt is not None:
             return {"session_id": sid, "status": "needs_model",
                     "next_prompt": prompt}
+        result = session.result()
+        receipt = self.garden.store_capture_result(
+            entry["scope"], entry["request"], result,
+            expected_revision=entry.get("revision"))
+
+        # 🔴 冲突了就**重来一轮判断**，而不是把这一轮丢掉。
+        #
+        # host-driven 这条路的模型由宿主调，服务自己没法重问 —— 所以它把
+        # 「再问一次」交回给宿主：重新读库、重新构造 prompt、发回
+        # needs_model。宿主那边的循环本来就在处理这个状态，无需改动。
+        #
+        # 不这么做的后果实测过：并发写一冲突，那一轮的记忆直接没了，
+        # 而 capture.feed 回的是一个「完成」的回执，只是 error=revision_conflict
+        # —— 宿主多半只看 written，于是这条记忆悄悄消失。
+        attempts = int(entry.get("attempts") or 0)
+        if receipt.error == "revision_conflict" and attempts < _MAX_CAPTURE_RETRIES:
+            prepared, revision = self.garden.prepare_capture(
+                entry["scope"], entry["request"])
+            fresh = self.garden.component.capture_session(prepared)
+            prompt = fresh.next_prompt()
+            if prompt is not None:
+                self._sessions[sid] = {"session": fresh, "scope": entry["scope"],
+                                       "request": prepared, "revision": revision,
+                                       "attempts": attempts + 1}
+                return {"session_id": sid, "status": "needs_model",
+                        "next_prompt": prompt, "retrying_after": "conflict"}
+
         self._sessions.pop(sid, None)
-        return {"status": "completed",
-                "result": self.garden.store_capture_result(
-                    entry["scope"], entry["request"], session.result(),
-                    expected_revision=entry.get("revision"))}
+        return {"status": "completed", "result": receipt}
 
     def _capture_cancel(self, p: dict) -> Any:
         """宿主主动放弃这次落卡(用户按了停止、turn 被取消)。
@@ -254,6 +287,75 @@ class Service:
             requested_by=str(p.get("requested_by") or ""),
             reason=str(p.get("reason") or ""),
         )
+
+    def _write_one(self, p: dict) -> Any:
+        """用户明说要记的一件事 —— 不做「值不值得」的判断。"""
+        from .contracts import CuratedWriteRequest
+
+        return self.garden.write_one(_scope_from(p), CuratedWriteRequest(
+            text=str(p.get("text") or ""),
+            bucket=str(p.get("bucket") or ""),
+            mount=str(p.get("mount") or DEFAULT_MOUNT),
+            locale=str(p.get("locale") or ""),
+            idempotency_key=str(p.get("idempotency_key") or ""),
+        ))
+
+    def _promote(self, p: dict) -> Any:
+        """换挂载点。``authorized`` 必须由**宿主**给 —— 这是用户的授权。"""
+        from .contracts import PromoteRequest
+
+        return self.garden.promote(_scope_from(p), PromoteRequest(
+            record_id=str(p.get("record_id") or ""),
+            to_mount=str(p.get("to_mount") or ""),
+            authorized=bool(p.get("authorized")),
+            reason=str(p.get("reason") or ""),
+        ))
+
+    def _migrate(self, p: dict) -> Any:
+        from .contracts import MigrateRequest
+
+        return self.garden.migrate_and_store(_scope_from(p), MigrateRequest(
+            old_cards=str(p.get("old_cards") or ""),
+            allowed_ids=tuple(str(x) for x in (p.get("allowed_ids") or ())),
+            vocab=str(p.get("vocab") or ""),
+            mount=str(p.get("mount") or DEFAULT_MOUNT),
+            locale=str(p.get("locale") or ""),
+            ai_name=str(p.get("ai_name") or ""),
+            user_name=str(p.get("user_name") or ""),
+        ))
+
+    def _import(self, p: dict) -> Any:
+        """历史导入，**分批 + 可断点续跑**。
+
+        宿主把上次返回的 progress 原样传回来就从断点继续。
+        """
+        from dataclasses import asdict
+
+        from .contracts import ImportRequest
+        from .importing import ImportProgress
+
+        prior = p.get("progress") or None
+        progress = None
+        if isinstance(prior, dict):
+            known = set(ImportProgress.__dataclass_fields__)
+            progress = ImportProgress(
+                **{k: v for k, v in prior.items() if k in known})
+        out = self.garden.import_history(
+            _scope_from(p),
+            ImportRequest(
+                material=str(p.get("material") or ""),
+                mount=str(p.get("mount") or DEFAULT_MOUNT),
+                locale=str(p.get("locale") or ""),
+                material_kind=str(p.get("material_kind") or ""),
+                policy=p.get("policy"),
+                ai_name=str(p.get("ai_name") or ""),
+                user_name=str(p.get("user_name") or ""),
+                idempotency_key=str(p.get("idempotency_key") or ""),
+            ),
+            progress=progress,
+            max_batches=p.get("max_batches"),
+        )
+        return {**asdict(out), "done": out.done, "percent": out.percent}
 
     def _context(self, p: dict) -> Any:
         mount = p.get("mount")

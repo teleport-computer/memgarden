@@ -103,13 +103,15 @@ class GardenCapabilities:
     migrate: bool = True
     #: 历史导入**专用的判断尺子**。
     #:
-    #: ⚠️ 现在是 ``False``：``policies`` 里有 ``history_import`` 档，但
-    #: ``build_capture_prompt`` 只实现了 ``conversation_capture`` 的模板结构。
-    #: ``import_history()`` 仍可用，只是会用日常聊天那把（偏保守）的尺子。
+    #: 2026-09-06 起为 ``True``：三档的提示词模板全部策略化了（开场白、
+    #: 动作偏好、日期字段、tags 播种、张数上限都随 ``CapturePolicy`` 的
+    #: 标志位变），``MountedGarden.import_history`` 也做了分批 + 游标 +
+    #: 断点续跑。
     #:
-    #: 声明成 False 而不是假装支持 —— 后者的表现是「导入成功但几乎没记住
-    #: 什么」，用户和宿主都查不出原因。
-    history_import: bool = False
+    #: 在那之前它是 ``False``，因为模板只实现了 conversation_capture 的结构 ——
+    #: 硬用那把偏保守的尺子去读用户交出的三年记录，表现是「导入成功但几乎
+    #: 没记住什么」，用户和宿主都查不出原因。宁可明说不支持。
+    history_import: bool = True
     #: 逻辑可见范围。第一阶段只保证 agent-private —— 声明清楚，
     #: 别让宿主以为写进 shared 会生效。
     mounts: tuple[str, ...] = ("agent-private",)
@@ -663,34 +665,26 @@ class GardenComponent:
         走同一条落卡链路，**但该换一把尺子** —— 这是他自己给的东西，宁可多记；
         自动落卡那把「克制」的尺子在这里是错的。
 
-        ## ⚠️ 当前状态：尺子有，模板没有
+        ## 这是单批的判断入口
 
-        ``policies`` 里有 ``history_import`` 档（判据写好了），但
-        ``build_capture_prompt`` 只实现了 ``conversation_capture`` 的模板结构，
-        其余档位的动作偏好/日期/输出 schema **尚未策略化**。
+        真正的导入要分批 —— 见 :meth:`memgarden.mounted.MountedGarden.import_history`，
+        那里有游标、断点续跑和跨批去重。这个方法只负责「这一批里有什么值得记」。
 
-        所以这条路现在**只能用日常聊天那把尺子**，判断会偏保守 ——
-        用户交出三年记录，可能只蒸出很少几张。
-
-        这件事写在 ``capabilities().history_import`` 里（值是 ``False``），
-        不靠调用方读源码发现。**宁可明说不支持，也不要悄悄用错的尺子** ——
-        后者的表现是「导入成功但几乎没记住什么」，而且没有任何错误可查。
+        ⚠️ 直接用它处理一大批材料会有三个坏法，且都不报错：上下文撑爆导致
+        后半段被静默截断、一次产出几百张卡淹掉之后的召回、中途失败前功尽弃。
 
         ``max_cards`` 仍然必要：三年的聊天记录一次能蒸出几百张，
         之后的召回会被这批淹没，而用户看不出发生了什么。
         """
-        policy = request.policy
-        if policy and policy != "conversation_capture":
-            # 明确拒绝，而不是退回默认档假装做了。
-            return CaptureResult(
-                error=f"policy_not_supported_by_prompt_template:{policy}",
-                trace={"supported": ["conversation_capture"]},
-            )
+        # 三档都支持了（2026-09-06），不再需要拒绝非默认档。
+        # 留空时用 history_import —— 这是用户主动交出的材料，
+        # 拿日常聊天那把克制的尺子去量是错的。
+        policy = request.policy or "history_import"
         result = self.capture(CaptureRequest(
             window=request.material,
             actor=request.actor, mount=request.mount, locale=request.locale,
             ai_name=request.ai_name, user_name=request.user_name,
-            policy=None,   # 见上：其余档位的模板结构尚未策略化
+            policy=policy,
             idempotency_key=request.idempotency_key,
         ))
         if len(result.mutations) > request.max_cards:

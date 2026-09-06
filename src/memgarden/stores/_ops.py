@@ -15,6 +15,8 @@ sevenfloor 2026-09-06 复现的正是这个形状 —— 声明里有六个 op�
     update     就地改字段。**不能改 id / 归属 / 生命周期状态** ——
                那三样要走专门的 op，否则「改一个字段」可以偷偷换掉卡的归属
     archive    不再参与召回，内容还在、可追溯（integrity: 历史可见）
+    promote    换挂载点。**和 update 分开**：update 禁改 mount，因为那条路
+               绕过授权检查
     supersede  N 张旧卡收敛成 1 张新卡，旧卡留着并指回新卡
     delete     真删。用户要求或合规，**正文不再可读**
     no_op      什么都不做，但要留痕 —— 「看过了、结论是不用改」和「漏了」
@@ -139,6 +141,20 @@ def apply_ops(
                 raise MutationRejected(f"delete target not found: {target}")
             staged.pop(target, None)
             results.append({"id": target, "status": "deleted"})
+
+        elif op == "promote":
+            # 换挂载点。授权在上一层（MountedGarden.promote）检查过了 ——
+            # 这里只负责改，因为存储层看不到 scope。
+            target = _target(m, "record_id")
+            current = staged.get(target)
+            if current is None:
+                raise MutationRejected(f"promote target not found: {target}")
+            to_mount = str(m.get("to_mount") or "").strip()
+            if not to_mount:
+                raise MutationRejected("promote without to_mount")
+            staged[target] = {**current, "mount": to_mount}
+            results.append({"id": target, "status": "promoted",
+                            "mount": to_mount})
 
         elif op == "no_op":
             results.append({"id": "", "status": "no_op",

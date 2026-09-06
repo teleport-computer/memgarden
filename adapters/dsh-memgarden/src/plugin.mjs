@@ -9,7 +9,10 @@
  * 判断全部回到 Python 那边（memgarden serve），这里只翻译和接线。
  */
 import { spawn } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+import {
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
+} from 'node:fs'
+import nodePath from 'node:path'
 
 // SDK 会吞掉子进程的 stderr，所以自己再落一份文件 ——
 // 否则「插件没跑」和「跑了但报错」区分不开，而这两件事的处置完全不同。
@@ -167,20 +170,26 @@ class Client {
  * Garden 全程不碰 key，也不知道用的是哪个 provider。
  */
 async function driveCapture(ctx, client, scope, locale, text, agent, turn, config) {
+  // 🔴 幂等身份必须包含 tenant + owner + session + turn。
+  //
+  // 以前是 `tenant + ':dsh:' + turn` —— 两个会话都从 turn 1 开始时会**撞
+  // 同一个键**，于是第二个会话的第一轮被当成第一个会话的重放，
+  // 那一轮什么都不会写，而且回的是「成功」。
+  const key = [scope.tenant_id, scope.memory_owner_id,
+               sessionIdOf(agent) || 'nosession', 'turn', turn].join(':')
+  return driveCaptureRaw(ctx, client, scope, locale, text, key, config)
+}
+
+
+/** 幂等键由调用方给的版本 —— 崩溃恢复要用**原来那个键**重放。 */
+async function driveCaptureRaw(ctx, client, scope, locale, text, key, config) {
   let state = await client.request('capture.begin', {
     scope,
     window: '用户：' + text,
     locale,
     // 稳定幂等键：崩溃后重放同一轮不会写第二遍。**它不依赖会话还在** ——
     // 进程重启会丢掉在途会话，但重放同一轮仍然不会写出第二条记忆。
-    // 🔴 幂等身份必须包含 tenant + owner + session + turn。
-    //
-    // 以前是 `tenant + ':dsh:' + turn` —— 两个会话都从 turn 1 开始时会**撞
-    // 同一个键**，于是第二个会话的第一轮被当成第一个会话的重放，
-    // 那一轮什么都不会写，而且回的是「成功」。
-    idempotency_key: [scope.tenant_id, scope.memory_owner_id,
-                      sessionIdOf(agent) || 'nosession',
-                      'turn', turn].join(':'),
+    idempotency_key: key,
   })
 
   let rounds = 0
@@ -311,6 +320,63 @@ function textOf(content) {
 }
 
 
+/**
+ * 落卡的持久待办本。
+ *
+ * ## 为什么必须落盘
+ *
+ * `turn-stopping` 返回 promise 只解决**正常退出**：DSH 会等落卡做完。
+ * 但进程在 turn 中途被 kill、崩溃、机器断电时，那一轮的落卡就没了 ——
+ * 没有报错，只是那条记忆不存在。而用户那边刚刚说完一件重要的事。
+ *
+ * 幂等键保证「重放不会写两遍」，但**得有人去重放**。这就是那个人。
+ *
+ * ## 为什么是 JSON 行而不是数据库
+ *
+ * 一个只需要「追加、读全部、删一条」的待办本，用文件就够了；引入第二个
+ * 数据库意味着第二套一致性问题，而它和记忆本身的库还不是同一个。
+ */
+class Outbox {
+  constructor(dir) {
+    this.path = dir ? nodePath.join(dir, 'memgarden-outbox.jsonl') : ''
+  }
+
+  /** 记下「这一轮要落卡」。**在调模型之前写** —— 之后写就白写了。 */
+  add(entry) {
+    if (!this.path) return
+    try {
+      mkdirSync(nodePath.dirname(this.path), { recursive: true })
+      appendFileSync(this.path, JSON.stringify(entry) + '\n')
+    } catch (e) {
+      // 待办本写不了不该挡住落卡本身 —— 那样是为了防丢反而先丢了。
+      log('[memgarden] outbox 写入失败（本轮崩溃将无法恢复）: ' + e.message + '\n')
+    }
+  }
+
+  /** 落卡成功（或明确失败）之后划掉。 */
+  done(key) {
+    if (!this.path) return
+    try {
+      const left = this.readAll().filter((e) => e.key !== key)
+      writeFileSync(this.path, left.map((e) => JSON.stringify(e)).join('\n')
+                               + (left.length ? '\n' : ''))
+    } catch (e) {
+      log('[memgarden] outbox 清理失败: ' + e.message + '\n')
+    }
+  }
+
+  readAll() {
+    if (!this.path || !existsSync(this.path)) return []
+    try {
+      return readFileSync(this.path, 'utf8')
+        .split('\n').filter(Boolean)
+        .map((line) => { try { return JSON.parse(line) } catch { return null } })
+        .filter(Boolean)
+    } catch { return [] }
+  }
+}
+
+
 export function apply(ctx, config) {
   log('[memgarden] apply 被调用 tenant=' + config.tenant + '\n')
 
@@ -339,6 +405,7 @@ export function apply(ctx, config) {
   // memgarden 进程、建出一个空库文件，然后因为我们直接 return 而**永远没人
   // 关掉它** —— 泄漏一个进程，还留下一个会让人以为「记忆在工作」的 db 文件。
   const client = new Client(config.bin, config.storage)
+  const outbox = new Outbox(config.outboxDir || config.stateDir || '')
 
   const scopeFor = (agentId, sessionId) => ({
     tenant_id: config.tenant,
@@ -372,6 +439,27 @@ export function apply(ctx, config) {
     log('[memgarden] 握手失败: ' + e.message + '\n')
     throw e
   })
+
+  // ---- 崩溃恢复：把上次没做完的落卡补上 --------------------------------- //
+  //
+  // 幂等键保证「重放不会写两遍」，但得有人去重放。就是这里。
+  // 只在启动时跑一次，串行做，做完就把待办划掉。
+  void ready.then(async () => {
+    const pending = outbox.readAll()
+    if (!pending.length) return
+    log('[memgarden] 上次有 ' + pending.length + ' 轮落卡没做完，正在补\n')
+    for (const entry of pending) {
+      try {
+        const r = await driveCaptureRaw(ctx, client, entry.scope, entry.locale,
+                                        entry.window, entry.key, config)
+        log('[memgarden] 补落卡 ' + entry.key + ' written=' + r.written + '\n')
+        outbox.done(entry.key)
+      } catch (e) {
+        // 补不上就留着，下次启动再试。**不能划掉** —— 划掉等于放弃那条记忆。
+        log('[memgarden] 补落卡失败 ' + entry.key + ': ' + e.message + '\n')
+      }
+    }
+  }).catch(() => { /* 握手都没成功时不必补，服务本来就不可用 */ })
 
   // ---- 每轮自动召回 ---------------------------------------------------- //
   ctx.on('agent/pre-step', async (payload, next) => {
@@ -499,13 +587,26 @@ export function apply(ctx, config) {
     // 代价是 turn 的结束会等落卡（几秒）。生产上如果不能接受这个延迟，
     // 正确做法是后台跑 + 在 dispose 时 drain，**而不是** fire-and-forget ——
     // 后者在进程退出时必然丢数据。
+    // 🔴 **在调模型之前**记进待办本。之后记就白记了 —— 崩溃恰好发生在
+    // 模型调用中途时，待办本里什么都没有，那一轮就真的没了。
+    const outboxKey = [turnScope.tenant_id, turnScope.memory_owner_id,
+                       sessionIdOf(payload.agent) || 'nosession',
+                       'turn', payload.turn].join(':')
+    outbox.add({ key: outboxKey, scope: turnScope, locale, window,
+                 session: sessionIdOf(payload.agent), turn: payload.turn,
+                 at: new Date().toISOString() })
+
     const job = ready
       .then(() => driveCapture(ctx, client, turnScope, locale, window,
                                payload.agent, payload.turn, config))
-      .then((r) => log('[memgarden] 落卡 written=' + r.written +
-                       ' ids=' + JSON.stringify(r.record_ids) +
-                       ' reason=' + (r.reason || '-') +
-                       ' error=' + (r.error || '-') + '\n'))
+      .then((r) => {
+        log('[memgarden] 落卡 written=' + r.written +
+            ' ids=' + JSON.stringify(r.record_ids) +
+            ' reason=' + (r.reason || '-') +
+            ' error=' + (r.error || '-') + '\n')
+        // 「没什么可记」也是**做完了**，要划掉；只有真失败才留着重试。
+        if (!r.error) outbox.done(outboxKey)
+      })
       // 落卡完成之后才考虑整理 —— 整理要基于最新的花园状态，
       // 和落卡抢同一个 revision 只会白白触发一次 CAS 冲突重算。
       .then(() => maybeTidy(turnScope))

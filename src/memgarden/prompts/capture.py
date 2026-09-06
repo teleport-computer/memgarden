@@ -37,8 +37,7 @@ _EMPTY_CAPTURE_REPLY = '{"cards": []}'
 
 # action 取值:并入(merge)/ 新增(add)/ 覆盖(supersede)/ 不动(noop)
 
-_CAPTURE_PROMPT_TEMPLATE = """You are {ai_name}, {user_name}'s companion. The two of you have just finished a stretch of conversation, and it has come to a natural pause.
-Nobody is waiting on a reply right now. You look back over it quietly and decide whether anything here is worth remembering for the long run.
+_CAPTURE_PROMPT_TEMPLATE = """{framing}
 
 [What you are looking for]
 {selection_rubric}
@@ -46,16 +45,12 @@ Nobody is waiting on a reply right now. You look back over it quietly and decide
 [For each thing you decide to remember]
 1. First check the existing buckets and threads given below — which existing bucket does this belong to?
 2. Choose an action:
-   · merge (preferred): an existing card already covers this same ongoing thing → fold this into it and make it thicker, rather than opening a new card.
-       - If the new material says the same thing as the old card with nothing new → noop. Do not update just to restate.
-       - If the new material makes the thing more complete or moves it forward → rewrite the old card thicker (old content + new).
-   · add: this is genuinely new and no existing card covers it → open a new card.
-   · supersede: the new information directly contradicts an old card (this person changed their mind or corrected themselves) → write a new card and mark the old one superseded. Do NOT delete it.
+{action_block}
 3. Write the card:
    · content: a "thick" body, the way you would hold the whole thing in your own mind — what happened, what led to it and what followed, what it means for this person, the feeling in the moment. Not a one-line title.
    · summary: one line, so that a future you knows at a glance what this card is.
    · bucket: one main bucket. Short, reuse an existing one, do not mint near-synonyms.
-   · threads: a few threads (people / events / feelings / key points). Reuse existing threads — do not open a near-synonym thread when one already covers it.
+   · threads: a few threads (people / events / feelings / key points). Reuse existing threads — do not open a near-synonym thread when one already covers it.{thread_seed}{date_rule}
 {language_rule}
    · How to refer to them: {naming_rule}{referent_rule}
    · importance: how much this matters for understanding this person (0-1). Passing mention .1-.3 / preferences and habits .4-.6 / feelings, relationship, boundaries .7-.85 / core commitments and turning points .9-1.
@@ -67,8 +62,8 @@ Nobody is waiting on a reply right now. You look back over it quietly and decide
 [Existing threads]{threads}
 [Existing memory index (merge/supersede may only copy an exact target_id from here)]{cards}
 [Your relationship]{identity}
-[This conversation]{window}
-
+[{window_label}]{window}
+{cap_note}
 [Output] Output JSON only, nothing else. If nothing is worth remembering, output {{"cards": []}}.
 {{
   "cards": [
@@ -79,7 +74,7 @@ Nobody is waiting on a reply right now. You look back over it quietly and decide
       "bucket": "...",
       "threads": ["...", "..."],
       "summary": "...",
-      "content": "...",
+      "content": "...",{occurred_at_field}
       "importance": 0.0,
       "pulse": 0.0
     }}
@@ -92,6 +87,113 @@ About type: something that happened, with causes and consequences → event; a p
 # 落卡只产这四类;insight/reflection 是做梦(Dream)/Inner Thought 的事,需要 anchor。
 CAPTURE_TYPES = ("event", "fact", "quote", "moment")
 _DEFAULT_CAPTURE_TYPE = "event"
+
+
+# --------------------------------------------------------------------------- #
+# 随档位变化的模板片段
+# --------------------------------------------------------------------------- #
+#
+# 三档的取舍**已经在 CapturePolicy 的标志位里**（prefer_merge / keep_dates /
+# seed_threads_from_tags / max_cards），只是模板以前没用上，于是写死了
+# 「对话」「并入优先」「没有日期字段」—— 传别的档位会让 prompt 自相矛盾。
+#
+# 🔴 conversation_capture 必须逐字不变：它有 golden 守着，也是线上正在跑的
+# 那条路。所以这些函数在该档位下返回的字符串，和策略化之前的模板一模一样。
+
+
+def _framing(policy: CapturePolicy, ai_name: str, user_name: str) -> str:
+    """开场：这批材料是什么、你现在在做什么。
+
+    对话和「用户翻出三年的日记交给你」是完全不同的处境。用同一段开场的话，
+    模型会带着「刚聊完天」的克制去读一份档案，于是只挑出几条 ——
+    表现是「导入成功但几乎没记住」，而且没有任何错误。
+    """
+    if policy.name == "history_import":
+        return (f"You are {ai_name}, {user_name}'s companion. "
+                f"{user_name} has handed you a batch of material from their past "
+                "and asked you to take it in.\n"
+                "This is not a conversation you just had — it is history they are "
+                "choosing to give you. Read it carefully and take in everything "
+                "that would help you know them. Err on the side of keeping: "
+                "they went to the trouble of handing this over.")
+    if policy.name == "curated_archive":
+        return (f"You are {ai_name}, {user_name}'s companion. "
+                f"{user_name} has written out a set of facts about themselves "
+                "and handed them to you directly.\n"
+                "Every entry here was typed by them on purpose. Your job is to "
+                "take them in faithfully, not to judge which ones are worth it — "
+                "**do not drop or compress entries**. Losing one is losing "
+                "something they chose to tell you.")
+    return (f"You are {ai_name}, {user_name}'s companion. The two of you have "
+            "just finished a stretch of conversation, and it has come to a "
+            "natural pause.\n"
+            "Nobody is waiting on a reply right now. You look back over it "
+            "quietly and decide whether anything here is worth remembering "
+            "for the long run.")
+
+
+def _action_block(policy: CapturePolicy) -> str:
+    """动作偏好。``prefer_merge`` 决定 merge 还是 add 排在前面并标 preferred。"""
+    merge = ("   · merge{merge_tag}: an existing card already covers this same "
+             "ongoing thing → fold this into it and make it thicker, rather "
+             "than opening a new card.\n"
+             "       - If the new material says the same thing as the old card "
+             "with nothing new → noop. Do not update just to restate.\n"
+             "       - If the new material makes the thing more complete or "
+             "moves it forward → rewrite the old card thicker (old content + "
+             "new).")
+    add = ("   · add{add_tag}: this is genuinely new and no existing card "
+           "covers it → open a new card.")
+    supersede = ("   · supersede: the new information directly contradicts an "
+                 "old card (this person changed their mind or corrected "
+                 "themselves) → write a new card and mark the old one "
+                 "superseded. Do NOT delete it.")
+    if policy.prefer_merge:
+        return "\n".join([merge.format(merge_tag=" (preferred)"),
+                           add.format(add_tag=""), supersede])
+    # 宁多勿漏：add 优先，并明确禁止「为了合并而丢条目」。
+    return "\n".join([
+        add.format(add_tag=" (preferred)"),
+        merge.format(merge_tag=" (only when the old card is literally about the "
+                               "same entry — never merge two distinct entries "
+                               "to save space)"),
+        supersede])
+
+
+def _thread_seed(policy: CapturePolicy) -> str:
+    if not policy.seed_threads_from_tags:
+        return ""
+    return ("\n     If the source entry carries tags, seed the threads from "
+            "them before inventing new ones.")
+
+
+def _date_rule(policy: CapturePolicy) -> str:
+    if not policy.keep_dates:
+        return ""
+    return ("\n   · occurred_at: when this actually happened, copied from the "
+            "source (ISO date, or null if the source does not say). "
+            "**Do not guess a date** — a wrong date is worse than none, "
+            "because later reasoning will trust it.")
+
+
+def _occurred_at_field(policy: CapturePolicy) -> str:
+    return '\n      "occurred_at": "YYYY-MM-DD or null",' if policy.keep_dates else ""
+
+
+def _window_label(policy: CapturePolicy) -> str:
+    if policy.name == "history_import":
+        return "The material they handed you"
+    if policy.name == "curated_archive":
+        return "The entries they wrote"
+    return "This conversation"
+
+
+def _cap_note(policy: CapturePolicy) -> str:
+    """张数上限。**不设上限时要明说**，否则模型会自己保守。"""
+    if policy.max_cards is None:
+        return ("\nThere is no cap on how many cards you may produce here. "
+                "Produce as many as the material genuinely warrants.\n")
+    return ""
 
 
 def _clamp01(value) -> float:
@@ -297,23 +399,21 @@ def build_capture_prompt(
     留空 = 日常聊天档，其 rubric 与本模板原先内联的那段逐字相同，
     所以默认调用的产出与重构前**字节一致**（golden fixture 守着这一点）。
 
-    ⚠️ **本模板目前只支持 conversation_capture 档**。其余两档（history_import /
-    curated_archive）的 rubric 已经收在 ``policies`` 里，但这个模板的其余部分
-    还没有随档位变化——它写死了「并入（优先）」、输出 schema 里没有
-    ``occurred_at``、也没有 tags→threads 的指令。若此时允许传 curated_archive，
-    prompt 会自相矛盾：一边说「宁多勿漏」，一边说「并入优先」且无处放日期。
-    （codex code_review 2026-08-14 指出。）
+    ## 三档都支持了（2026-09-06）
 
-    完整的策略化 —— 动作偏好、张数、日期、tags 与输出 schema 全部随档位变 ——
-    要和 genesis 接线一起做（批 7），并为每个档位建立与旧 prompt 对照的 golden。
+    以前这里只认 ``conversation_capture``，别的档位直接抛 ``NotImplementedError``：
+    模板写死了「并入优先」、输出 schema 里没有 ``occurred_at``、也没有
+    tags→threads 的指令，硬传 ``curated_archive`` 会让 prompt 自相矛盾。
+
+    现在开场白、动作偏好、日期字段、tags 播种、张数上限都随
+    ``CapturePolicy`` 的标志位渲染。那些标志位本来就在（``prefer_merge`` /
+    ``keep_dates`` / ``seed_threads_from_tags`` / ``max_cards``），
+    只是模板一直没用上。
+
+    🔴 ``conversation_capture`` 的产出**逐字不变** —— 它有 golden 守着，
+    也是线上正在跑的那条路。
     """
     resolved = policy if isinstance(policy, CapturePolicy) else get_policy(policy)
-    if resolved is not CONVERSATION_CAPTURE:
-        raise NotImplementedError(
-            f"本模板暂只支持 conversation_capture 档，收到 {resolved.name!r}。"
-            "其余档位的模板结构（动作偏好/日期/tags/输出 schema）尚未策略化，"
-            "见批 7。"
-        )
     # 不知道名字时的兜底称呼，跟着花园语言走 —— 英文花园里冒出「这个人」会被
     # 模型当成一个中文线索，进而把整张卡写成中文。
     unknown = "this person" if str(locale or "").strip() == "en" else "这个人"
@@ -329,9 +429,18 @@ def build_capture_prompt(
     prompt_user_name = str(user_name or "").strip()
     if prompt_user_name == "TA":
         prompt_user_name = unknown
+    resolved_ai = (ai_name or unknown).strip()
+    resolved_user = prompt_user_name or unknown
     return _CAPTURE_PROMPT_TEMPLATE.format(
-        ai_name=(ai_name or unknown).strip(),
-        user_name=prompt_user_name or unknown,
+        framing=_framing(resolved, resolved_ai, resolved_user),
+        action_block=_action_block(resolved),
+        thread_seed=_thread_seed(resolved),
+        date_rule=_date_rule(resolved),
+        occurred_at_field=_occurred_at_field(resolved),
+        window_label=_window_label(resolved),
+        cap_note=_cap_note(resolved),
+        ai_name=resolved_ai,
+        user_name=resolved_user,
         naming_rule=naming_rule,
         referent_rule=_referent_rule(locale, indent='     '),
         selection_rubric=resolved.selection_rubric,
