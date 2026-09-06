@@ -39,28 +39,53 @@ pip install memgarden
 export DSH_HOME=/absolute/path/to/dsh-home
 npx dsh --profile sdk-minimal --dump-default-config >/dev/null
 
-# 3. 把插件挂进 $DSH_HOME/profiles/sdk-minimal/cordis.patch.yml
-#    （见下面的配置示例）
+# 3. 一条命令挂上去 —— 不用手工连 symlink、拼 YAML
+npx dsh-memgarden-install --dsh-home "$DSH_HOME" --profile sdk-minimal \
+    --tenant acme --owner user-42
 
 # 4. 跑
 export DEEPSEEK_API_KEY=...
-python e2e/dsh_e2e.py
+python e2e/dsh_acceptance.py
 ```
 
-`cordis.patch.yml`：
+> 第 3 步以前是「照着下面的示例把插件挂进 cordis.patch.yml」，而真正能跑的
+> 步骤（建目录、连 symlink、删掉默认文件里那个 `[]` 占位再拼 YAML）藏在
+> E2E 脚本里。陌生工程师照 README 做不出来 —— 那说明这个 Adapter 还不算
+> 能被别人装。现在装机脚本自己处理这些。
+
+### `--owner` 为什么没有默认值
+
+```
+tenant    账户 / 组织 / 部署的安全边界
+owner     一座长期花园的稳定所有者          ← 这个
+agent /   此刻在执行的是谁（来源身份，不是归属）
+session
+```
+
+给默认值的话，同一个 tenant 下所有用户共用一座花园，而且不报错 ——
+`agent-private` 这个名字就没有意义了。拿不到 owner 时插件**直接不启用记忆**
+（也不会起子进程、不建库），并在日志里说明原因。
+
+**别拿 session 当 owner**：用户换个设备、重开一轮就会拿到一座空花园，
+而这在测试里看不出来 —— 测试都是新建的。
+
+装出来的 `cordis.patch.yml` 长这样：
 
 ```yaml
 - insert:
     - id: memgarden
       name: 'dsh-memgarden'
-      inject: [tools]
+      inject: [tools, llm]
       config:
         bin: /path/to/memgarden          # pip 装出来的可执行文件
         storage: 'sqlite:////path/to/garden.db'
-        tenant: 'user-1'                 # 🔴 来自你的可信上下文
+        tenant: 'acme'                   # 🔴 来自你的可信上下文
+        memoryOwner: 'user-42'           # 🔴 同上，且必填
         locale: 'zh-Hans'
-        model: 'python3 e2e/deepseek_cli.py'
 ```
+
+注意**没有 `model`**：模型调用走 DSH 自己的 provider（`inject: [llm]`），
+Garden 不持有 key，也不知道你用的哪个 provider。
 
 ## 接线点（都是 DSH 的正式扩展点）
 
@@ -100,28 +125,35 @@ Adapter **只做翻译和接线**，不复制任何提示词 / 解析 / 挑卡 /
 Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
 而这两件事的处置完全不同。
 
-## 验收：四组，25 + 14 条，全绿
+## 验收
 
 ```bash
 # 真模型的正向场景（会花钱，慢）
 export DEEPSEEK_API_KEY=...
-python e2e/dsh_acceptance.py          # 14/14
+python e2e/dsh_acceptance.py
 
 # 坏情况（不联网、不花钱，秒级，随便跑）
 python e2e/failure_paths.py           # 25/25
 ```
 
+⚠️ **这两组不是一回事，别合并成一个数字报**：`failure_paths.py` 直接对
+`memgarden serve` 发请求，**不穿过 DSH Adapter**。把它算进「DSH 端到端
+证据」会高估覆盖 —— 它证明的是服务在坏情况下的行为，不是 Adapter 的。
+
+    dsh_acceptance.py   DSH 正向 / 部分失败验收（真 DSH + 真模型）
+    failure_paths.py    MemGarden Service 离线失败路径（不经过 DSH）
+
 | 组 | 验的是 |
 |---|---|
 | A 自动落卡 + 跨会话召回 | 会话 A 说「不吃辣」→ 全新会话 B 问「晚饭吃什么」→ 模型答「温和养胃又不辣」。**模型全程没主动调任何记忆工具** |
 | B 模型主动调工具 | `memgarden_memory_search` / `memgarden_memory_write` 注册进 DSH 的 Tool Registry，模型调了、真的落库 |
-| C 多 agent 隔离 | 另一个租户挂**同一个花园库**，读不到别人的记忆 |
+| C 同租户跨 owner 隔离 | **同一个 tenant、同一个 SQLite 文件**，`user-42` 写的 `user-99` 读不到（召回 0 条）；不配 owner 时记忆不启用、对话照常 |
 | D 失败路径 | 服务起不来 / 中途退出 / 会话过期 / 越权挂载 / 卡住不回 / 快速两轮 / 整理与前台并发 / 幂等重放 |
 
 模型调用**全部走 DSH 的 provider**（`ctx.llm.stream`）——
 服务端启动时不带 `--model`，Garden 全程不碰 key。
 
-## 真跑才抓到的五件事
+## 真跑才抓到的这些
 
 写这个 Adapter 的过程本身就说明了「照文档写」和「真跑一遍」的差距。
 下面每一条都是**先跑绿了、才发现是错的**那一类。
@@ -161,6 +193,55 @@ memgarden 没装、路径写错、没执行权限，后果都是「用户的 age
 
 Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
 而这两件事的处置完全不同。
+
+**⑦ `truncated` 读的是字符串的属性 → 恒为 `undefined`**
+
+```js
+const reply = await callModel(...)     // 返回的是**字符串**
+capture.feed({ truncated: reply.truncated === true })   // ❌ 永远 false
+```
+
+模型输出被截断时，内核以为拿到的是完整回复，把半个 JSON 当成「没什么可记」，
+而不是重问一次。表现是长对话偶尔莫名其妙什么都没记住 —— 每一步都「成功」。
+现在模型桥返回 `{ text, truncated, finishReason }`。
+
+**⑧ 幂等键里没有 session → 两个会话的第一轮撞键**
+
+`tenant + ':dsh:' + turn` 这个键，在两个会话都从 turn 1 开始时是同一个。
+第二个会话的第一轮被当成第一个会话的重放：什么都不写，还回「成功」。
+现在键是 `tenant + owner + session + turn`。
+
+**⑨ 一个模块级 `turnText` → 两个会话串台**
+
+`let turnText = ''` 是整个插件实例共用的。两个会话并发时，A 的 pre-step 会
+覆盖掉 B 刚存的文本，于是 B 的落卡记的是 A 说的话。不报错，只是记忆里出现
+「用户从没说过的事」。现在按 `(session, turn)` 存。
+
+**⑩ 装机脚本生成了非法 YAML**
+
+dsh 的默认 `cordis.patch.yml` 里有一个空数组字面量 `[]`。直接往后追加
+`- insert:` 得到的是「一个文档里既有 flow 序列又有 block 序列」，
+启动直接失败，而报错完全看不出跟装记忆插件有关：
+
+```
+failed to parse overlay ...: end of the stream or a document separator
+is expected (5:1)
+```
+
+**⑪ 子进程在 owner 检查之前就起了**
+
+没配 owner 的部署本该「什么都不做」，实际却 spawn 了一个 memgarden 进程、
+建出一个空库，然后因为直接 `return` 而**永远没人关掉它** —— 泄漏一个进程，
+还留下一个会让人以为「记忆在工作」的 db 文件。
+
+## 还没做的
+
+- **崩溃恢复只做到「不重复写」**。进程在 turn 中途被杀时，那一轮的落卡会丢。
+  幂等键保证重放不写第二遍，但没有持久 outbox 把它补回来。正确做法是
+  accepted 的落卡先落一条 cursor 再异步执行 —— 下一阶段。
+- **大规模数据**。SQLite 参考实现会把一个 owner 的卡读进内存；它面向
+  「开箱即用」，不面向超大库。
+- **History Import**。Garden 侧声明为 `false`，这边也就没有入口。
 
 ## 版本纪律
 

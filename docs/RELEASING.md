@@ -1,13 +1,23 @@
 # 发版
 
-打 tag 就发。CI 会跑测试、构建两个包、生成构建出处凭证、发 PyPI 和 GitHub Release。
+打 tag 就发。CI 会先跑**发布闸**（全量测试 + 版本一致性），过了才构建、
+生成构建出处凭证、发 PyPI 和 GitHub Release。
 
 ```bash
-# 两个包的版本必须一致 —— 发布闸会检查，不一致直接失败
-sed -i '' 's/^version = ".*"/version = "0.13.0"/' \
-  pyproject.toml packages/agent-protocol-core/pyproject.toml
-git commit -am "v0.13.0: ..." && git tag v0.13.0 && git push origin HEAD --tags
+sed -i '' 's/^version = ".*"/version = "0.17.0"/' pyproject.toml
+uv lock                      # 锁文件也要跟上，闸会检查
+git commit -am "v0.17.0: ..." && git tag v0.17.0 && git push origin HEAD --tags
 ```
+
+## 🔴 发布必须过测试闸
+
+`release.yml` 的 `build` job `needs: gate`，gate 跑全量 pytest 和
+`scripts/check_version_consistency.py`（tag / pyproject / uv.lock 三者一致）。
+
+**这条是 2026-09-06 补的，因为出过反例**：`tests` workflow 因为还在
+`cd` 一个已经删掉的目录而长期失败，而 release 不依赖它，照样把包发上了
+PyPI。那不只是流程瑕疵 —— 红灯一旦变成常态，它就不再是信号，
+后面真正该拦下的那次也拦不住。
 
 ## PyPI：一次性配置（还没做）
 
@@ -18,71 +28,41 @@ git commit -am "v0.13.0: ..." && git tag v0.13.0 && git push origin HEAD --tags
 > 装的时候不会去核对是谁发的。OIDC 每次签发短期凭证，作用域限定到
 > 「这个仓库的这个 workflow」。
 
-在 <https://pypi.org/manage/account/publishing/> 各加一次，**两个包都要**，
-注意 Environment name **两条不一样**：
+在 <https://pypi.org/manage/account/publishing/> 加一次：
 
-| 字段 | memgarden | agent-protocol-core |
-|---|---|---|
-| PyPI Project Name | `memgarden` | `agent-protocol-core` |
-| Owner | `teleport-computer` | `teleport-computer` |
-| Repository name | `memgarden` | `memgarden` |
-| Workflow name | `release.yml` | `release.yml` |
-| **Environment name** | **`pypi-memgarden`** | **`pypi-core`** |
+| 字段 | 值 |
+|---|---|
+| PyPI Project Name | `memgarden` |
+| Owner | `teleport-computer` |
+| Repository name | `memgarden` |
+| Workflow name | `release.yml` |
+| **Environment name** | **`pypi-memgarden`** |
 
-### ⚠️ Environment 不能留空，两条也不能一样
+> 历史：这里曾经要配**两个**包（`memgarden` + `agent-protocol-core`）。
+> 后者在 0.16.0 被移回宿主 io —— 它做的是宿主协议解析（剥模型的思维链），
+> 不是记忆判断，不该让每个接 Garden 的人都吃下 io 的协议假设。
+> 现在这个包**零第三方依赖**。
 
-PyPI 的 Trusted Publisher 按「owner + 仓库 + workflow + environment」匹配。
-两个包在**同一个仓库、同一个 workflow**里 —— 都不填 environment 的话，
-两条配置除了项目名完全一样，PyPI 判为歧义，直接拒绝注册第二条：
-
-```
-A pending trusted publisher matching this configuration has already been
-registered for a different project name.
-```
-
-这就是为什么 `release.yml` 把 PyPI 发布拆成了 `publish-core` 和
-`publish-memgarden` 两个 job，各带一个 environment。改 environment 名字的话
-两边要一起改，否则匹配不上（表现是 `invalid-publisher`）。
-
-顺带解决了发布顺序：`publish-memgarden` 的 `needs` 指向 `publish-core`，
-core 一定先上 PyPI —— memgarden 依赖它的精确版本，反过来的话
-PyPI 上会短暂存在一个装不上的 memgarden。
-
-### 第一次发成功之后
-
-改 `README.md` 的安装说明为 `pip install memgarden`，
-并把 `tests/test_purity.py::test_the_readme_install_command_matches_how_we_actually_publish`
 的断言改成认 PyPI。
 
 **在那之前 README 不许写 `pip install memgarden`** —— 照着做的人第一步就失败，
 而那是别人对这个项目的第一印象。这条有测试守着。
 
-## 顺序：core 必须先发
+## 🔴 不要给 publish 步骤加 `continue-on-error`
 
-`memgarden` 依赖 `agent-protocol-core` 的**精确版本**。反过来发的话，
-PyPI 上会短暂存在一个装不上的 `memgarden`。
+`continue-on-error: true` 会让 job 在步骤失败时仍判定为 success，
+下游 `needs` 照样放行 —— **闸被直接架空**。
 
-CI 里 `packages-dir: out/` 一次上传两个，PyPI 按依赖解析，不用管顺序；
-手工发的话要注意。
+v0.12.2 就是这么翻车的：当时还有两个包，core 因为 PyPI 侧没注册而发布失败，
+job 却是绿的，memgarden 照发不误，结果 PyPI 上躺了一个装不上的版本。
 
-## 版本锁步
+那个具体形状（双包依赖）已经不存在了，但**教训对现在的 gate 一样成立**：
+让它红是安全的，GitHub Release 在 `build` job 里已经发完，publish 失败不影响它。
 
-两个包永远同版本号，发布闸强制。它们共享内部约定，不保证跨版本兼容 ——
-所以 `memgarden` 对 core 的依赖写的是 `==`，不是 `>=`。
+## 发版前自查
 
-看起来严苛，但代价对比很清楚：多发一个版本号 vs 用户装到不匹配的组合、
-在运行时才炸。
-
-## 🔴 发布顺序闸：不要给 publish 步骤加 `continue-on-error`
-
-`publish-memgarden` 的 `needs` 指向 `publish-core`，用意是 **core 一定先上 PyPI**
-（memgarden 依赖它的精确版本）。
-
-但 `continue-on-error: true` 会让 job 在步骤失败时仍判定为 success，
-`needs` 照样放行 —— **顺序闸被直接架空**。
-
-v0.12.2 就是这么翻车的：core 因为 PyPI 侧还没注册而发布失败，job 却是绿的，
-memgarden 照发不误，结果 PyPI 上躺了一个 `pip install memgarden` 装不上的版本
-（依赖 `agent-protocol-core==0.12.2` 不存在）。
-
-让它红是安全的：GitHub Release 在 `build` job 里已经发完了，publish 失败不影响它。
+- `pytest -q` 全绿
+- `python scripts/check_version_consistency.py` 通过
+- 全新环境只装 wheel 能跑：`pip install --no-index --find-links dist memgarden`
+  之后 `memgarden manifest` 和 `from memgarden import GardenComponent` 都要成
+- 动过 Adapter 的话，`adapters/dsh-memgarden` 在 pinned DSH 上跑一遍真机验收

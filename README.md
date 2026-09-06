@@ -43,6 +43,13 @@ result = garden.capture(CaptureRequest(
     locale="zh-Hans",
 ))
 my_store.apply(result.mutations)                       # 落库是你的事
+
+# 不想自己编排 load/CAS/幂等/生命周期的话，用 MountedGarden：
+garden = MountedGarden(model=my_model, store=SqliteStore("memory.db"))
+garden.capture_and_store(
+    Scope(tenant_id="acme", memory_owner_id="user-42"),
+    CaptureRequest(window="用户：我不吃辣", locale="zh-Hans"),
+)                                                      # 读库、判断、原子写回
 ```
 
 装完也能直接敲命令：
@@ -121,7 +128,9 @@ cards, err = parse_capture_cards(raw, policy="conversation_capture")
 # 4. 存哪由你定
 store = SqliteStore("memory.db")
 store.apply("user_1", [{"op": "add", "card": c} for c in cards],
-            idempotency_key="turn_42")
+            # owner 是这座花园的稳定所有者。必填 —— 只用 tenant 的话，
+            # 同一个账户下的两个 agent 会互相读到对方的 agent-private。
+            owner="user_1", idempotency_key="turn_42")
 ```
 
 ---
