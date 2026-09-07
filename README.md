@@ -105,6 +105,8 @@ Capture 与 Maintenance 都支持宿主驱动：Garden 返回提示词，DSH 用
 
 内置 `InMemoryStore` 和 `SqliteStore` 两个参考实现，共用 mutation 执行语义和契约测试。SQLite 存储的是明文 JSON 卡片及并发、幂等、整理辅助状态；[数据参考](docs/INTEGRATION-AND-DATA.md)列出了六张表与真实字段形状。
 
+新卡自动记录创建／更新时间；实际修改才更新修改时间，读取和幂等重放不刷新。事情发生时间 `occurred_at` 与这两个写入时间分开；旧卡缺失的历史创建时间不补造。
+
 当前读写路径会加载 owner 的卡片集合。接口分页限制响应大小，不代表数据库读取已按页执行；大规模导入、并发导出和跨进程共享 outbox 需要另外验证。[当前验收状态](docs/STATUS.md)集中记录这些边界。
 
 ## 开发验证

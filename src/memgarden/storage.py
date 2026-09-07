@@ -582,6 +582,15 @@ class StoragePort(Protocol):
 
         ``idempotency_key`` 保证同一批重放不产生第二份。
 
+        卡片写入时间由存储维护，不由模型猜测：新增时补齐缺失的
+        ``created_at`` / ``updated_at``；实际修改（含归档、取代、提升）更新
+        ``updated_at``，不改 ``created_at``。读取、无变化操作和幂等重放
+        不刷新时间，失败批次的时间也必须回滚。已有旧卡缺失的创建时间
+        不补造；可信恢复在新增时显式提供的历史时间保留，普通 update
+        不得覆盖这两个存储管理字段。``occurred_at`` 仍是原材料的发生时间。
+        参考实现使用可注入的 ClockPort，在重放检查后取得一次批次写入时间；
+        不把新生成的时间写进调用方 mutation 或重放指纹。
+
         ``maintenance_state`` 是整理账本（signature / seed_card_count / …）。
         给了就**必须和这批卡改动在同一个提交里**成或败：
         账本先走一步 → 这批整理永远不会重跑，改动丢了也没人知道；

@@ -29,13 +29,15 @@ from ..storage import (
     apply_digest,
 )
 from ._ops import apply_ops, new_seed_mounts
+from ..ports import ClockPort, SystemClock
 
 
 class InMemoryStore:
     """线程安全的最小实现。CAS 用一个单调递增的整数当版本号。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: ClockPort | None = None) -> None:
         self._lock = threading.RLock()
+        self._clock = clock if clock is not None else SystemClock()
         # 🔴 key 是 (tenant, owner) —— 只按 tenant 分桶就是同租户越权的根因。
         self._cards: dict[tuple[str, str], dict[str, dict]] = {}
         self._revision: dict[tuple[str, str], int] = {}
@@ -112,7 +114,8 @@ class InMemoryStore:
                 next_id += 1
                 return f"m_{value}"
 
-            results = apply_ops(staged, mutations, new_id=allocate)
+            results = apply_ops(staged, mutations, new_id=allocate,
+                                written_at=self._clock.now_iso())
 
             seed_mounts = new_seed_mounts(
                 mutations, before=bucket, staged=staged)

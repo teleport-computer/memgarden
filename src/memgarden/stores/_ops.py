@@ -27,9 +27,11 @@ from __future__ import annotations
 from typing import Callable
 
 from ..storage import MutationRejected
+from ..timestamps import normalize
 
 #: ``update`` 不许碰的字段。改这些等于换一张卡，必须走专门的 op。
 _IMMUTABLE = frozenset({"id", "owner", "tenant", "archived", "superseded_by",
+                        "created_at", "updated_at",  # Store owns write times, not model updates.
                         "deleted",
                         # 创建来源身份只能由可信 Scope 在 add/supersede 时写入；
                         # 普通 update 若能改它，provenance 就只是可伪造的标签。
@@ -50,6 +52,7 @@ def apply_ops(
     mutations: list[dict],
     *,
     new_id: Callable[[], str],
+    written_at: str,
 ) -> list[dict]:
     """在 ``staged``（会被就地修改的卡表）上执行一批 mutation。
 
@@ -57,6 +60,9 @@ def apply_ops(
     任何一条失败就抛，绝不留半成品 —— 半成功的表现是「旧卡还活着、新卡也
     活着」的双活状态，事后极难查。
     """
+    timestamp = normalize(written_at)
+    if "T" not in timestamp:
+        raise MutationRejected("store clock must provide an ISO date-time")
     results: list[dict] = []
     for m in mutations:
         op = str(m.get("op") or "add")
@@ -78,6 +84,7 @@ def apply_ops(
                     f"add 的 id 已存在: {supplied}（要改已有的卡请用 update）")
             if not supplied:
                 card["id"] = _fresh_id(staged, new_id)
+            _stamp_new_card(card, timestamp)
             staged[card["id"]] = card
             results.append({"id": card["id"], "status": "written"})
 
@@ -94,7 +101,7 @@ def apply_ops(
                 raise MutationRejected(
                     f"update may not change {sorted(touched)}; "
                     "归属和生命周期状态要走专门的 op")
-            staged[target] = {**current, **changes}
+            staged[target] = _stamp_change(current, changes, timestamp)
             results.append({"id": target, "status": "updated"})
 
         elif op == "archive":
@@ -102,8 +109,8 @@ def apply_ops(
             current = staged.get(target)
             if current is None:
                 raise MutationRejected(f"archive target not found: {target}")
-            staged[target] = {**current, "archived": True,
-                              "archive_reason": str(m.get("reason") or "")}
+            staged[target] = _stamp_change(current, {
+                "archived": True, "archive_reason": str(m.get("reason") or "")}, timestamp)
             results.append({"id": target, "status": "archived"})
 
         elif op == "supersede":
@@ -126,10 +133,10 @@ def apply_ops(
                     "（新卡必须是新的，否则会盖掉它要取代的历史）")
             if not supplied:
                 new_card["id"] = _fresh_id(staged, new_id)
+            _stamp_new_card(new_card, timestamp)
             for old_id in targets:
-                staged[old_id] = {**staged[old_id],
-                                  "superseded_by": new_card["id"],
-                                  "archived": True}
+                staged[old_id] = _stamp_change(staged[old_id], {
+                    "superseded_by": new_card["id"], "archived": True}, timestamp)
             staged[new_card["id"]] = new_card
             results.append({
                 "id": new_card["id"], "status": "superseded",
@@ -157,7 +164,7 @@ def apply_ops(
             to_mount = str(m.get("to_mount") or "").strip()
             if not to_mount:
                 raise MutationRejected("promote without to_mount")
-            staged[target] = {**current, "mount": to_mount}
+            staged[target] = _stamp_change(current, {"mount": to_mount}, timestamp)
             results.append({"id": target, "status": "promoted",
                             "mount": to_mount})
 
@@ -169,6 +176,21 @@ def apply_ops(
             raise MutationRejected(f"unknown op: {op}")
 
     return results
+
+
+def _stamp_new_card(card: dict, timestamp: str) -> None:
+    """Fill missing write times; preserve explicit metadata from trusted restores."""
+    for field in ("created_at", "updated_at"):
+        if not str(card.get(field) or "").strip():
+            card[field] = timestamp
+
+
+def _stamp_change(current: dict, changes: dict, timestamp: str) -> dict:
+    """Do not age a card on a no-op or invent a legacy card's creation time."""
+    changed = {**current, **changes}
+    if changed != current:
+        changed["updated_at"] = timestamp
+    return changed
 
 
 def _fresh_id(staged: dict[str, dict], new_id: Callable[[], str]) -> str:

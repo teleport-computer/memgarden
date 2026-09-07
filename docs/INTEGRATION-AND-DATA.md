@@ -94,13 +94,31 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
   "pulse": 0.0,
   "mount": "agent-private",
   "source": "conversation_capture",
+  "created_at": "2026-09-08T00:00:00Z",
+  "updated_at": "2026-09-08T00:00:00Z",
   "source_actor": {"user_id":"u-42","agent_id":"a-1","session_id":"s-1"}
 }
 ```
 
 归档时平铺记录增加 `archived: true`、`archive_reason`；取代时旧卡增加 `archived: true`、`superseded_by`。新卡可能没有显式 `lifecycle`、`schema_version` 或逐卡 `revision`。
 
-当前自动 Capture / 参考 Store 不统一补写每张卡的 `created_at`、`updated_at`。`Record` 定义中存在这些字段，不代表实际数据库已记录它们。依赖写入时间排序、严格历史追溯时，必须另行明确并实现时间戳规则；`occurred_at` 不能替代写入时间。并发版本目前由 owner 级快照和回执提供。
+### 三种时间及写入规则
+
+| 字段 | 含义与写入责任 |
+|---|---|
+| `occurred_at` | 事情发生时间，来自素材，按 Capture 策略保留；缺失时不推测。不能用导入时间替代。 |
+| `created_at` | 卡片创建时间，新卡由 Store 自动补齐；后续普通修改不能改写。 |
+| `updated_at` | 卡片最后修改时间，新卡由 Store 初始化，实际持久化变化时更新。 |
+
+两个参考 Store 共用以下规则，第三方 StoragePort 应保持相同语义：
+
+- `add` 与 `supersede` 产生的新卡补齐缺失的创建／更新时间；一次批次使用同一个 UTC 时间，保留时钟提供的亚秒精度。可信迁移／恢复在新卡中显式提供的历史时间仍保留，不强行改成今天；普通模型 Capture 不提供这两个字段。
+- `update`、`archive`、`promote` 及被 `supersede` 的旧卡，只要内容或状态实际变化，就更新 `updated_at`；保留原有 `created_at`。普通 `update.changes` 不允许直接覆盖这两个字段。
+- 读取、召回、无变化 update、重复相同归档／提升、`no_op` 和幂等重放不刷新时间。自动时间不进入调用方的 mutation 指纹，重试不会因此变成幂等冲突；失败批次不会留下新的时间值。
+- 既有旧卡缺失 `created_at` 时，读取、重新打开数据库和修改都不补造过去；真正修改时只记录新的 `updated_at`。旧卡上的空值仍表示未知。
+- `InMemoryStore(clock=...)` 与 `SqliteStore(path, clock=...)` 可注入已有 `ClockPort`，不传时使用 `SystemClock`。这是 Store 的写入时钟，不是依赖模型生成，也不要求宿主在每次 Capture 手工填写。
+
+时间字段存进原有平铺 JSON，不新增表，也不修改 SQLite schema 版本。`maintenance_state.updated_at` 只属于整理账本，不能替代每张卡的时间。时间值也不代替并发控制：并发版本仍由 owner 级快照和回执提供。
 
 ## 4. SQLite 实际有哪些表
 

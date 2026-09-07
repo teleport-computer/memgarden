@@ -82,8 +82,8 @@ class Record:
     lifecycle: Lifecycle = "active"
     #: 乐观并发用。宿主自己定它怎么递增。
     revision: str = ""
-    created_at: str = ""
-    updated_at: str = ""
+    created_at: str = ""  # Store fills on new writes; legacy missing values stay unknown.
+    updated_at: str = ""  # Store advances only for an actual persisted card change.
     #: 被哪张卡取代了（整理合并的结果）。
     superseded_by: str = ""
     schema_version: int = RECORD_SCHEMA_VERSION

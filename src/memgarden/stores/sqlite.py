@@ -30,6 +30,7 @@ import threading
 from pathlib import Path
 
 from ._ops import apply_ops, new_seed_mounts
+from ..ports import ClockPort, SystemClock
 from ..storage import (
     FULL_CAPABILITIES,
     ApplyResult,
@@ -106,9 +107,11 @@ CREATE TABLE IF NOT EXISTS seed_generations (
 class SqliteStore:
     """单文件存储。并发写用 sqlite 自己的事务 + 一把进程内的锁。"""
 
-    def __init__(self, path: str | Path = "memgarden.db") -> None:
+    def __init__(self, path: str | Path = "memgarden.db", *,
+                 clock: ClockPort | None = None) -> None:
         self._path = str(path)
         self._lock = threading.RLock()
+        self._clock = clock if clock is not None else SystemClock()
         with self._connect() as conn:
             conn.executescript(_SCHEMA)
             self._migrate(conn)
@@ -399,7 +402,8 @@ class SqliteStore:
                 self._reserve_supplied_ids(conn, tenant, owner, mutations)
                 results = apply_ops(
                     staged, mutations,
-                    new_id=lambda: self._next_id(conn, tenant, owner))
+                    new_id=lambda: self._next_id(conn, tenant, owner),
+                    written_at=self._clock.now_iso())
 
                 for gone in set(before) - set(staged):
                     conn.execute(
