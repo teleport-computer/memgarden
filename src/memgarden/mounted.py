@@ -818,7 +818,9 @@ class MountedGarden:
 
     def browse(self, scope: Scope, *, include_archived: bool = False,
                limit: int | None = None, cursor: str = ""):
-        cards = self._readable_cards(scope, include_archived=include_archived)
+        cards = self._readable_cards(
+            scope, include_archived=include_archived,
+            include_superseded=include_archived)
         page, next_cursor = _paginate(cards, limit, cursor,
                                       self.DEFAULT_PAGE, self.MAX_PAGE)
         return Page(items=self.component.browse(page), next_cursor=next_cursor,
@@ -828,7 +830,9 @@ class MountedGarden:
                limit: int | None = None, cursor: str = ""):
         from .contracts import ExportRequest
 
-        cards = self._readable_cards(scope, include_archived=include_archived)
+        cards = self._readable_cards(
+            scope, include_archived=include_archived,
+            include_superseded=include_archived)
         page, next_cursor = _paginate(cards, limit, cursor,
                                       self.DEFAULT_PAGE, self.MAX_PAGE)
         return Page(
@@ -941,14 +945,19 @@ class MountedGarden:
         return out
 
     def _readable_cards(
-        self, scope: Scope, *, include_archived: bool = False
+        self, scope: Scope, *, include_archived: bool = False,
+        include_superseded: bool = False,
     ) -> list[dict]:
         """这个作用域能看见的卡。
 
         **过滤在这里做，不在调用方**。放给调用方做的话，25 个接入点就有 25 种
         理解，而漏掉一处的表现是「读到了别人的记忆」——不会报错。
         """
-        snapshot = self._snapshot(scope, include_archived=include_archived)
+        # Store 分别过滤普通归档和被取代记录。历史浏览/导出显式包含两类；
+        # 其他调用者仍各自决定允许读取的生命周期。
+        snapshot = self._snapshot(
+            scope, include_archived=include_archived,
+            include_superseded=include_superseded)
         return self._visible(scope, snapshot.cards)
 
     def _apply(
