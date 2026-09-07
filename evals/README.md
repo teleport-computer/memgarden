@@ -13,7 +13,7 @@ evals 问的是「**跑出来的结果对吗**」。
 | 中文用户的花园两天翻成英文 | 判据函数**就是**按写的那样跑的，写错的是判据本身 |
 | 落库闸吃掉真记忆 | 闸门函数返回了它该返回的值，错的是「该返回什么」 |
 
-共同点：**代码没坏，判断坏了。** 判断力要用语料测，不能用断言测。
+这些案例需要有代表性的语料与明确的期望来验证。单测、契约测试和 eval 相互补充；不能因为函数按实现运行，就认为产品行为正确。
 
 ## 五层
 
@@ -30,8 +30,17 @@ evals 问的是「**跑出来的结果对吗**」。
 
 ```bash
 python evals/run.py                 # 前四层
-python evals/run.py --with-model    # 全部，发布前必跑
+python evals/run.py --with-model    # 全部；缺少模型凭据时退出失败
 ```
+
+当前 PR CI 在配置 `EVAL_DEEPSEEK_API_KEY` 时会运行真实 Capture 评测；没有 key
+时该步骤明确 SKIP。release workflow 本身没有运行真实模型评测，发布者需要
+另行核对对应 commit 的执行证据。当前结果统一见 [STATUS](../docs/STATUS.md)，
+不能从 CI job 绿色推定模型步骤实际执行过。
+
+`--with-model` 会向 Capture 评测传 `--require-key`，缺 key 时整个验收退出非零，
+不会再打印“全部通过”。单独执行 `capture.py` 默认仍允许显式 SKIP，方便无凭据的
+普通 PR CI；要求单独模型验收时使用 `capture.py --require-key`。
 
 **④ 不是凑数的。** 语料被清空时，①②③ 会打印「0/0 通过」、退出码 0 ——
 看起来比任何时候都健康。④ 是唯一能发现这件事的一层。
@@ -80,12 +89,12 @@ run(decider=my_decider)   # decider(buckets, fallbacks) -> {"locale", "basis"}
 ## 语料里有什么
 
 ```
-corpus/cards.jsonl          17 张卡：中英混、含敏感卡、含转折点、含噪声
-corpus/queries.jsonl        10 条查询，带 must / must_not / why / incident
-corpus/gardens.jsonl        15 个花园的桶构成，含 2026-08-24 事故当天的真实构成
+corpus/cards.jsonl          卡片素材：中英混、含敏感卡、含转折点、含噪声
+corpus/queries.jsonl        查询，带 must / must_not / why / incident
+../src/memgarden/contract/gardens.jsonl  花园桶构成与语言判定案例，随包分发
 corpus/gate.jsonl           该拦 / 该放的硬字段用例
 corpus/gate_leak.jsonl      协议残片泄漏，含「一个弱证据不该打回」这条反向用例
-corpus/conversations.jsonl   5 段对话窗口，给 ⑤ 用
+corpus/conversations.jsonl   对话窗口，给 ⑤ 用
 ```
 
 **语料是编的，不是真实用户数据。** 内容全部虚构，不含任何真实用户的话、id

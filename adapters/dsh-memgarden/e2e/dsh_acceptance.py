@@ -5,7 +5,7 @@
     A  自动落卡 + 跨会话自动召回（模型不主动调工具）
     B  模型主动调 memgarden_memory_search / memory_write
     C  多 agent 隔离：另一个 agent 读不到别人的私有记忆
-    D  失败路径：子进程不存在 / 握手不兼容 / 模型返回空 / 会话不存在
+    D  失败路径：子进程不存在 / 会话不存在 / 无模型错误 / manifest
     E  modelless service 下 Maintenance/Dream 仍由 DSH 模型驱动
 
 跑法：
@@ -14,6 +14,8 @@
     python e2e/dsh_acceptance.py
 
 ⚠️ 会真实调用模型，每跑一次有成本。
+除 npm DSH 外还需 deepseek_harness Python SDK。当前仓库未锁定其来源/版本，
+需由验收环境先明确安装；详见 Adapter README 的验证方式。
 """
 from __future__ import annotations
 
