@@ -194,6 +194,9 @@ def build_parser() -> argparse.ArgumentParser:
     mnt.add_argument("--last-seed-card-count", type=int, default=0)
     mnt.set_defaults(func=_cmd_maintain)
 
+    from .install_dsh import add_parser as _add_install_dsh
+    _add_install_dsh(sub)
+
     man = sub.add_parser("manifest", help="这个组件会做什么（机器可读）")
     man.set_defaults(func=_cmd_manifest)
 

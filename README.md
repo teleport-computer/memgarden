@@ -23,6 +23,13 @@ MountedGarden     判断 + 存储都接上：load → 判断 → 原子写回 �
 pip install memgarden
 ```
 
+装完就有一个可用的 DeepSeek Harness Adapter（随包发布，不是单独的 npm 包 ——
+它和这个包共用同一套 wire 协议，拆开会漂）：
+
+```bash
+memgarden install-dsh --tenant <租户> --owner <这座花园的所有者>
+```
+
 想验来源的话，每次发版的 wheel 都同时挂在 GitHub Release 上，带**构建出处凭证**：
 
 ```bash

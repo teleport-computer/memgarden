@@ -1,0 +1,10 @@
+{
+  "name": "dsh-memgarden",
+  "version": "0.19.0",
+  "description": "Mount Memory Garden into DeepSeek Harness.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "plugin.mjs",
+  "exports": { ".": "./plugin.mjs" },
+  "engines": { "node": ">=20" }
+}

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memgarden"
-version = "0.18.0"
+version = "0.19.0"
 description = "记忆的编辑判断：什么值得记、归哪个桶、几张卡、什么时候该整理。不调模型、不碰存储。"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -48,6 +48,10 @@ memgarden = "memgarden.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/memgarden"]
+# Adapter 的 .mjs / package.json 要进 wheel —— 它们和 Python 代码共用
+# 同一套 wire 协议，必须同版本发布，不能拆成单独的 npm 包。
+artifacts = ["src/memgarden/adapters/dsh/*.mjs",
+             "src/memgarden/adapters/dsh/package.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

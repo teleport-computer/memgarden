@@ -66,7 +66,11 @@ class Env:
         plugin_link.parent.mkdir(parents=True, exist_ok=True)
         if plugin_link.exists() or plugin_link.is_symlink():
             plugin_link.unlink()
-        plugin_link.symlink_to(ROOT)
+        # 走产品路：用随包发布的 Adapter + CLI 装，不再手工连 symlink。
+        subprocess.run([_memgarden_bin(), 'install-dsh',
+                        '--dsh-home', str(self.home),
+                        '--tenant', self.tenant, '--owner', self.tenant],
+                       check=True, stdout=subprocess.DEVNULL)
 
     def _write_patch(self, bin_path: str) -> None:
         patch = self.home / "profiles" / "sdk-minimal" / "cordis.patch.yml"

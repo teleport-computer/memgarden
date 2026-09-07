@@ -28,10 +28,22 @@
 > 这正是「只注册 MCP 工具做不到」的那件事：自动召回、自动落卡不依赖模型
 > 记得去查。
 
+## Adapter 为什么随 Python 包发布，而不是单独发 npm
+
+它和 `memgarden` 共用**同一套 wire 协议**。拆成两个包、两个版本号之后，
+用户就能装出一个我们从没测过的组合（adapter 0.1.0 + memgarden 0.20.0），
+而症状不是启动失败 —— 是某一类记忆悄悄记不进去。
+
+放在一起，版本永远同步：`pip install memgarden` 装到哪一版，Adapter 就是哪一版。
+用户本来就要装这个 Python 包（Adapter 靠它跑 `memgarden serve`），所以零成本。
+
+代价是 JS 那边用不上 npm 的依赖解析 —— 但这个 Adapter **零 npm 依赖**，
+本来也没什么可解析的。
+
 ## 怎么跑
 
 ```bash
-# 1. 装 DSH 和 memgarden
+# 1. 装 DSH 和 memgarden（Adapter 随 memgarden 一起装上，不是单独的 npm 包）
 npm install @deepseek-ai/dsh@0.1.2-alpha.4
 pip install memgarden
 
@@ -39,13 +51,10 @@ pip install memgarden
 export DSH_HOME=/absolute/path/to/dsh-home
 npx dsh --profile sdk-minimal --dump-default-config >/dev/null
 
-# 3. 一条命令挂上去 —— 不用手工连 symlink、拼 YAML
-npx dsh-memgarden-install --dsh-home "$DSH_HOME" --profile sdk-minimal \
-    --tenant acme --owner user-42
+# 3. 一条命令装好（写 profile 配置 + 拷插件）
+memgarden install-dsh --tenant <你的租户> --owner <这座花园的所有者>
 
-# 4. 跑
-export DEEPSEEK_API_KEY=...
-python e2e/dsh_acceptance.py
+# 4. 照常起 dsh
 ```
 
 > 第 3 步以前是「照着下面的示例把插件挂进 cordis.patch.yml」，而真正能跑的
