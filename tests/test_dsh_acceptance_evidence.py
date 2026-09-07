@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +59,24 @@ def test_maintenance_log_alone_does_not_prove_durable_success():
     assert acceptance._maintenance_is_proven(success, cards, ledger)
 
 
+def test_maintenance_failure_diagnostic_is_bounded_without_card_bodies():
+    logs = "\n".join([
+        "[memgarden] 召回 0 条",
+        "[memgarden] 该整理了: threshold",
+        "[memgarden] 整理失败: timeout",
+    ])
+    detail = acceptance._maintenance_diagnostic(
+        logs,
+        [{"id": "old", "source": "history_import", "summary": "PRIVATE",
+          "archived": False}],
+        {"signature": "sig", "seed_card_count": 10},
+    )
+    assert "PRIVATE" not in detail
+    assert "整理失败" in detail
+    assert '"source":"history_import"' in detail
+    assert len(detail) <= 4000
+
+
 def test_pinned_sdk_requires_same_official_source_commit():
     assert acceptance._sdk_compatibility_error("0.1.2a3", "")
     assert acceptance._sdk_compatibility_error("0.0.0.dev0", "wrong")
@@ -72,6 +92,23 @@ def test_dsh_version_timeout_is_a_diagnostic_failure(monkeypatch):
     monkeypatch.setattr(acceptance.subprocess, "run", time_out)
     error = acceptance._dsh_version_error(Path("/stuck/dsh"))
     assert "无法执行 dsh --version" in error
+
+
+def test_group_selection_defaults_to_all_and_supports_single_group():
+    assert acceptance._selected_groups([]) == list(acceptance._GROUPS.values())
+    assert acceptance._selected_groups(["--group", "E"]) == [acceptance.group_e]
+
+
+def test_help_does_not_require_a_key_or_installed_dsh():
+    env = dict(os.environ)
+    env.pop("DEEPSEEK_API_KEY", None)
+    env["PATH"] = ""
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        env=env, capture_output=True, text=True, timeout=10,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert "--group" in proc.stdout
 
 
 def test_published_dsh_requires_a_uniform_alpha4_dependency_closure(tmp_path):

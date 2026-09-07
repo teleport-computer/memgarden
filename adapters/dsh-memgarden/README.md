@@ -132,6 +132,10 @@ export DEEPSEEK_API_KEY=...
 
 uv run --project /absolute/path/to/deepseek-harness/python/sdk \
   python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py
+
+# 失败后只复跑某一组，避免重复调用已通过的真实模型场景
+uv run --project /absolute/path/to/deepseek-harness/python/sdk \
+  python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py --group E
 ```
 
 这一 source-mode 步骤来自官方该 commit 的

@@ -286,11 +286,11 @@ async function callModel(ctx, config, prompt, purpose = 'capture') {
   const truncated = Boolean(finish && (finish.kind === 'length'
                                        || finish.reason === 'length'
                                        || finish.truncated === true))
-  if (!out.trim()) {
-    // 空回复要当失败报出来。当成正常结果喂回去的话，Garden 会解析失败，
-    // 而调用方看到的是「没什么值得记」—— 和真的没内容分不开。
-    throw new Error('模型返回空（finish=' + JSON.stringify(finish) + '）')
-  }
+  // 空白 stop 不是合法 noop，但也不该在 Adapter 这层直接抛错。
+  // Capture/Maintenance 状态机会只对「no_json_object 且原文为空白」给出
+  // 一次有界的格式重试；非空纯 prose 不会被泛化重试。第二答仍空白才返回
+  // 显式 error，且不推进 Capture frontier / Maintenance ledger。在这里
+  // throw 会绕过那个唯一语义 owner，让真实 DSH 的空 stop 没有重试机会。
   return { text: out, truncated, finishReason: String(finish?.kind || '') }
 }
 

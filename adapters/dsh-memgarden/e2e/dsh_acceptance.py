@@ -19,6 +19,7 @@ Python SDK；详见 Adapter README 的验证方式。
 """
 from __future__ import annotations
 
+import argparse
 import importlib
 import importlib.metadata
 import json
@@ -355,6 +356,25 @@ def _maintenance_is_proven(logs: str, cards: list[dict], ledger: dict) -> bool:
     return successful_receipt and durable_chain and durable_ledger
 
 
+def _maintenance_diagnostic(logs: str, cards: list[dict], ledger: dict) -> str:
+    """Bounded failure evidence without card summary/content bodies."""
+    relevant = [
+        line[:240] for line in logs.splitlines()
+        if any(word in line for word in ("整理", "maintenance", "dispose", "capture 失败"))
+    ][-12:]
+    card_state = [{
+        "id": str(card.get("id") or ""),
+        "source": str(card.get("source") or ""),
+        "archived": card.get("archived") is True,
+        "superseded_by": str(card.get("superseded_by") or ""),
+    } for card in cards]
+    return json.dumps({
+        "logs": relevant,
+        "ledger": ledger,
+        "cards": card_state,
+    }, ensure_ascii=False, separators=(",", ":"))[:4000]
+
+
 # --------------------------------------------------------------------------- #
 # A. 自动落卡 + 跨会话召回
 # --------------------------------------------------------------------------- #
@@ -497,9 +517,11 @@ def group_e() -> None:
             h.run("请简短回答：好的。", session_id="M")
         logs = env.logs()
         check("该整理了" in logs, "达到阈值后确实进入整理")
-        check(_maintenance_is_proven(logs, env.cards(), env.maintenance_state()),
+        current_cards = env.cards()
+        ledger = env.maintenance_state()
+        check(_maintenance_is_proven(logs, current_cards, ledger),
               "Maintenance 成功，且整理账本与 supersede 卡链持久化",
-              next((line for line in logs.splitlines() if "整理结果" in line), ""))
+              _maintenance_diagnostic(logs, current_cards, ledger))
     finally:
         env.cleanup()
 
@@ -518,8 +540,23 @@ def _rpc(request: dict) -> dict:
 
 # --------------------------------------------------------------------------- #
 
-def main() -> int:
+_GROUPS = {"A": group_a, "B": group_b, "C": group_c, "D": group_d, "E": group_e}
+
+
+def _selected_groups(argv: list[str] | None = None) -> list:
+    parser = argparse.ArgumentParser(description="MemGarden pinned DSH acceptance")
+    parser.add_argument(
+        "--group", action="append", choices=tuple(_GROUPS), dest="groups",
+        help="只跑指定组；可重复传入，默认跑 A–E 全部",
+    )
+    selected = parser.parse_args(argv).groups or list(_GROUPS)
+    return [_GROUPS[name] for name in selected]
+
+
+def main(argv: list[str] | None = None) -> int:
     global _HARNESS_CLASS
+    # 先交给 argparse：`--help` 应当在没有 key / SDK / DSH 的机器上也能看。
+    groups = _selected_groups(argv)
     if not os.environ.get("DEEPSEEK_API_KEY"):
         print("需要 DEEPSEEK_API_KEY")
         return 2
@@ -538,18 +575,27 @@ def main() -> int:
     if closure_error:
         print(f"验收环境不满足：{closure_error}")
         return 2
+    service_binary = pathlib.Path(_memgarden_bin())
+    if not service_binary.is_file():
+        print(f"验收环境不满足：memgarden 可执行文件不存在: {service_binary}")
+        return 2
 
     print("=" * 66)
     print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden")
     print("=" * 66)
 
-    for group in (group_a, group_b, group_c, group_d, group_e):
+    for group in groups:
         try:
             if not binary.exists():
                 raise FileNotFoundError(
                     f"pinned DSH executable disappeared after preflight: {binary}; "
                     "do not place the npm installation inside TMPDIR and wait for "
                     "the package install to finish before acceptance"
+                )
+            if not service_binary.exists():
+                raise FileNotFoundError(
+                    "memgarden executable disappeared after preflight: "
+                    f"{service_binary}; do not rebuild its environment during acceptance"
                 )
             group()
         except Exception as exc:      # noqa: BLE001

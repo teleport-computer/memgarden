@@ -27,6 +27,8 @@ SDK 完整参数见 [contracts.py](../src/memgarden/contracts.py) 和 [mounted.p
 
 Python 模型接口是 `complete(prompt, *, purpose="") -> str`。凭据、超时、取消和模型选择由宿主实现。需要使用 Runtime 自己的模型调度时，走 begin/feed 路径。
 
+Capture 与 Maintenance 的 SDK / 宿主驱动入口分别共用各自的内核状态机。成功调用却返回空白正文时，会按现有重试预算请求一次格式修正（默认最多额外一次）；连续空白明确失败，不当作“无需记忆／整理”，也不推进处理进度或整理账本。非空但没有 JSON 的纯文本仍按原策略报解析失败。截断、格式修正共享同一预算，provider 明确报错不伪装成空正文。SDK 可接既有 `{text, truncated}` 回复信封；宿主驱动时将正文和 `truncated` 分开传入 feed。
+
 `capture.run`、`maintenance.run`、`history.import`、`records.migrate` 需要服务侧配置模型。前两项另有 begin/feed 路径；后两项当前没有。因此默认 DSH 无模型服务的 `history_import`、`migrate` 为 false，这是明确的接入边界。
 
 独立 `memgarden manifest` 是静态声明；连接后的 `manifest.get` 才按实际模型和 Store 给出能力。`manifest.storage.capabilities`、`degradations`、`user_notices` 用于识别缺失条件，不是外部 Store 已经通过测试的证明。

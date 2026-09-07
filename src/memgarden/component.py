@@ -137,6 +137,14 @@ def _is_truncated(reply) -> bool:
     return bool(getattr(reply, "truncated", False))
 
 
+def _reply_text(reply) -> str:
+    """Unwrap the same optional model envelope in Capture and Maintenance."""
+    if isinstance(reply, str):
+        return reply
+    text = reply.get("text", "") if isinstance(reply, dict) else getattr(reply, "text", reply)
+    return "" if text is None else str(text)
+
+
 class _CapturePlan:
     """落卡的状态机 —— **同步和异步共用这一份**。
 
@@ -226,9 +234,7 @@ class _CapturePlan:
                     "truncated": truncated},
             reply=raw if isinstance(raw, str) else None,
         ))
-        raw = raw if isinstance(raw, str) else (
-            raw.get("text", "") if isinstance(raw, dict) else str(getattr(raw, "text", raw))
-        )
+        raw = _reply_text(raw)
         strict = self._stage == "first"
         cards, err = parse_capture_cards(
             raw, strict=strict, policy=self.request.policy, signals=self.owner._signals
@@ -270,7 +276,7 @@ class _CapturePlan:
         ))
 
         if err:
-            if is_retryable_parse_error(err) and self.retried < self.owner._max_retries:
+            if is_retryable_parse_error(err, raw=raw) and self.retried < self.owner._max_retries:
                 self._stage = "format_retry"
                 self.owner._step(Step(
                     kind="retrying", purpose="capture", attempt=self.calls,
@@ -415,7 +421,7 @@ class _MaintenancePlan:
 
     def feed(self, raw, *, truncated: bool = False) -> None:
         self.calls += 1
-        text = raw if isinstance(raw, str) else str(raw)
+        text = _reply_text(raw)
         self.owner._step(Step(
             kind="model_called", purpose="dream", attempt=self.calls,
             detail={"reply_chars": len(text), "stage": self._stage,
@@ -441,7 +447,7 @@ class _MaintenancePlan:
             self.retried += 1
         self.owner._step(Step(kind="parsed", purpose="dream", attempt=self.calls,
                               detail={"consolidations": len(cons), "error": err}))
-        if err and is_retryable_parse_error(err) and self.retried < self.owner._max_retries:
+        if err and is_retryable_parse_error(err, raw=text) and self.retried < self.owner._max_retries:
             self._stage = "format_retry"
             self.owner._step(Step(kind="retrying", purpose="dream",
                                   attempt=self.calls,
@@ -915,67 +921,16 @@ class GardenComponent:
         ``dry_run=True`` 只回答前半句 —— 宿主的调度器用它决定要不要排这个活，
         不必为了问一句就烧一次模型调用。
         """
-        snapshot = dream_snapshot(
-            available_cards=request.cards,
-            all_cards=request.all_cards or request.cards,
-        )
-        if request.current_seed_generation > 0:
-            snapshot = replace(
-                snapshot, seed_card_count=request.current_seed_generation)
-        verdict = needs_dream(
-            snapshot,
-            DreamLedger(
-                last_seed_card_count=request.last_seed_card_count,
-                last_signature=request.last_signature,
-            ),
-            min_new_cards=self._min_new_cards,
-        )
-        if not verdict.needed or request.dry_run:
-            return MaintenanceResult(
-                needed=verdict.needed,
-                trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
-                       # 整理完宿主要把这两个存回自己的账本，否则下次判断不出增量。
-                       "signature": snapshot.signature,
-                       "seed_card_count": snapshot.seed_card_count},
-            )
-
-        rendered = "\n".join(
-            f"- [{c.get('id')}] {c.get('summary','')}" for c in request.cards
-        )
-        prompt = build_dream_prompt(
-            ai_name=request.ai_name,
-            user_name=request.user_name,
-            cards=rendered,
-            recent_conversations=request.recent_conversations,
-            locale=request.locale,
-        )
-        raw = self._model.complete(prompt, purpose="dream")
-        consolidations, _questions, err = parse_dream_consolidations(
-            raw, signals=self._signals, known_ids=frozenset(request.known_ids),
-        )
-        if err:
-            return MaintenanceResult(needed=True, error=err,
-                                     trace={"reason": verdict.reason})
-        return MaintenanceResult(
-            needed=True,
-            # 🔴 这里必须转换,不能把建议原样当 mutation 返回。
-            #
-            # 建议侧的 op 是 merge/thicken/supersede,存储侧是 add/update/
-            # supersede/… —— 两套词汇表。2026-09-02 之前这行写的是
-            # `[dict(c, mount=…) for c in consolidations]`,交给官方 Store 就是
-            # `ValueError: unknown op: merge`,用户那头的症状是「说整理好了,
-            # 但记忆没变」。转换归 Garden,见 dreaming.consolidations_to_mutations。
-            mutations=consolidations_to_mutations(
-                consolidations, mount=request.mount
-            ),
-            # 原始建议照旧给出去 —— 宿主有自己的写入格式时要从这里构造
-            # (宿主的 action 里带着 mutations 表达不了的溯源信息)。
-            consolidations=list(consolidations),
-            trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
-                   "consolidations": len(consolidations),
-                   "signature": snapshot.signature,
-                   "seed_card_count": snapshot.seed_card_count},
-        )
+        # The SDK and host-driven lane must share parsing, retries and guards.
+        plan = _MaintenancePlan(self, request)
+        if plan.rejected is not None:
+            return plan.rejected
+        while True:
+            ask = plan.next_prompt()
+            if ask is None:
+                return plan.finish()
+            reply = self._model.complete(ask, purpose="dream")
+            plan.feed(reply, truncated=_is_truncated(reply))
 
     # -- 给模型的工具 ----------------------------------------------------- #
 
