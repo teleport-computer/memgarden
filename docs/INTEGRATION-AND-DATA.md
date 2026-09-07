@@ -65,14 +65,14 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 | `threads` | 线索，字符串数组 | 关联记忆与检索 |
 | `type` | Capture 类型字符串 | 当前解析器产出 `event` / `fact` / `quote` / `moment`；平铺卡可包含，`Card` 类型未单独声明 |
 | `importance` / `pulse` | 重要度 / 情绪激活度，数值 | 供判断或策略使用；不是额外原始材料 |
-| `occurred_at` | 事情发生时间，字符串 | 与写入时间不同；无可信时间时不能推定 |
+| `occurred_at` | 事情发生时间，字符串 | 历史导入/人工档案按 `keep_dates=True` 保留；对话档 `keep_dates=False` 不传递；空值不推定日期 |
 | `role` / `is_sensitive` | 记忆角色 / 敏感标识 | 供策略与宿主展示判断；敏感标识不替代访问权限 |
 | `source` | 来源，开放字符串 | 内置工作流写入 `conversation_capture`、`history_import`、`curated`、`model_tool` |
 | `source=memory_dream` | 整理产物，保留值 | 排除在下一轮原始卡新增水位之外 |
 | `source_material_kind` | 导入材料类型 | 例如 `diary` / `chat_export`，由可信调用参数提供 |
 | `source_actor` | 操作者对象 | MountedGarden 新增/取代时用可信 Scope 覆盖；普通 update 不得更改来源三个字段 |
 
-字段定义见 [Card](../src/memgarden/records.py)。空的可选字段可省略。`occurred_at`、`role`、`is_sensitive` 虽有类型声明，但当前自动 Capture 解析器不透传这些模型字段，不能据此承诺自动写入；需分别核对所用写入入口。字段映射工具 [FieldMap](../src/memgarden/adapt.py) 可以把外部字段转成候选卡；它不是完整的外部记忆系统适配器。
+字段定义见 [Card](../src/memgarden/records.py)。空的可选字段可省略。Capture 解析器保留模型提供的合法 `role` 字符串和 `is_sensitive` 布尔值；不保证模型每次都产出这些可选字段，也不把它们当作授权证据。日期按策略保留，日期字符串只有日期时不补时间，带时区时间转换为 UTC；未带时区的日期时间沿用现有解析约定按 UTC 解释，调用方应提供明确时区以免产生歧义。非法日期或元数据类型触发现有格式重试；字符串 `"false"` 不会被当作布尔值使用。字段映射工具 [FieldMap](../src/memgarden/adapt.py) 可以把外部字段转成候选卡；它不是完整的外部记忆系统适配器。
 
 `summary` 和 `search_text` 用途不同：后者可以包含用于匹配的更多文本，不能因此直接作为公开摘要。挑卡过程的内容无关指标由 [observability.py](../src/memgarden/observability.py) 生成；查询指纹仍可用于关联、也可能被猜测，不应宣称绝对无法还原或等同匿名化。
 

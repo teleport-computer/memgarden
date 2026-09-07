@@ -1,20 +1,10 @@
-"""落卡 capture prompt (v1) — 会话断点触发的回顾落卡。
+"""Capture 提示词和解析，共用于对话、历史导入与人工档案三种策略。
 
-承接《IO 记忆 · 落卡 + Dream 完整方案》第一部分。这是 A-full Phase-1 capture lane
-的 handler 喂给 resident agent 的指令:被会话断点触发后,agent 安静地回看这段对话,
-决定有没有值得长久记住的事,产出 0–2 张「厚卡」(并入优先于新增)。
+策略定义在 policies.py：对话档默认少而厚、并入优先；导入与档案档保留
+素材中的日期。可选元数据按 Card 字段类型校验，缺失日期不推测。
 
-设计要点(对齐方案):
-  - 少而厚:默认 0–2 张厚卡,不是 N 张薄卡;强迫归纳,不穷举。
-  - 并优于增:落卡前先看现有桶/卡,能并进已有卡就别新开。
-  - 事件倾向:优先记有前因后果/场景的事件;孤立信息点通常不单独成卡,
-    除非是这个人明确在意的或反复出现的偏好。
-  - importance(对理解这个人多重要,固有不衰) vs pulse(在这个人自己心里激起多大波动,
-    只影响鲜活度/语气,不进保留)。
-  - 输出严格 JSON;没有值得记的就 {"cards": []}。
-
-写入边界(A-full):agent 产出的是「卡的明文草稿 + 动作」;consumer 侧据此封 v1
-信封(客户端加密)再走 /v1/memory/actions。本模块只负责 prompt 文本与上下文注入。
+本模块只构造提示词、解析明文模型回复。GardenComponent 将合法卡转换为
+mutations；宿主或 MountedGarden 负责存储，不依赖任何原宿主 API 或加密协议。
 """
 from __future__ import annotations
 
@@ -31,6 +21,7 @@ from ..text import card_guard
 from ..naming import referent_rule as _referent_rule
 from ..policies import CONVERSATION_CAPTURE, CapturePolicy, get_policy
 from ..policies import language_rule as policies_language_rule
+from ..timestamps import normalize as normalize_timestamp
 from .buckets import common_buckets_guidance
 
 _EMPTY_CAPTURE_REPLY = '{"cards": []}'
@@ -207,6 +198,30 @@ def _clamp01(value) -> float:
     return max(0.0, min(1.0, f))
 
 
+def _capture_metadata(row: dict, policy: CapturePolicy) -> tuple[dict, str | None]:
+    """保留 Card 已声明的可选字段，不从未知值发明日期或布尔判断。"""
+    metadata = {}
+    if policy.keep_dates and row.get("occurred_at") is not None:
+        value = row["occurred_at"]
+        if not isinstance(value, str):
+            return {}, "occurred_at_must_be_a_date_string_or_null"
+        date = normalize_timestamp(value)
+        if value.strip() and not date:
+            return {}, "occurred_at_must_be_a_valid_ISO_date"
+        if date:
+            metadata["occurred_at"] = date
+    if row.get("role") is not None:
+        if not isinstance(row["role"], str):
+            return {}, "role_must_be_a_string"
+        if row["role"].strip():
+            metadata["role"] = row["role"].strip()
+    if "is_sensitive" in row:
+        if not isinstance(row["is_sensitive"], bool):
+            return {}, "is_sensitive_must_be_a_boolean"
+        metadata["is_sensitive"] = row["is_sensitive"]
+    return metadata, None
+
+
 def parse_capture_cards(
     raw: str,
     *,
@@ -218,9 +233,11 @@ def parse_capture_cards(
 
     Returns (cards, error). On parse failure returns ([], reason). A valid
     "nothing worth keeping" reply yields ([], None). Each returned card is
-    normalized and safe to hand to the envelope builder:
+    normalized and ready for Garden mutations:
       {action, type, target_id, bucket, threads[], summary, content,
-       importance, pulse}
+       importance, pulse, optional occurred_at/role/is_sensitive}
+    occurred_at is retained only by policies with keep_dates=True. Missing
+    metadata stays missing; malformed supplied metadata is rejected for retry.
     `noop` cards are dropped (nothing to write). Unknown types fall back to
     the default; insight/reflection are coerced out (capture never writes them).
 
@@ -245,6 +262,7 @@ def parse_capture_cards(
     if not isinstance(rows, list):
         return [], "missing_cards_list"
 
+    resolved = policy if isinstance(policy, CapturePolicy) else get_policy(policy)
     out: list[dict] = []
     hard_rejections: list[str] = []
     _guard_on = card_guard.guard_enabled()
@@ -263,6 +281,10 @@ def parse_capture_cards(
         if rejection:
             # 占位符/空正文/协议残片的卡不写进花园 —— 用户会亲眼看到它。
             hard_rejections.append(rejection)
+            continue
+        metadata, metadata_error = _capture_metadata(row, resolved)
+        if metadata_error:
+            hard_rejections.append(metadata_error)
             continue
         mem_type = str(row.get("type") or "").strip().lower()
         if mem_type not in CAPTURE_TYPES:
@@ -285,6 +307,7 @@ def parse_capture_cards(
             "content": content,
             "importance": _clamp01(row.get("importance")),
             "pulse": _clamp01(row.get("pulse")),
+            **metadata,
         })
     if hard_rejections:
         if strict:
@@ -297,7 +320,6 @@ def parse_capture_cards(
 
     # 张数约束 —— 由档位决定（codex review 2026-08-14:此前 max_cards 声明了
     # 却没有任何调用方消费,「少而厚」只写在 prompt 里、代码上不设防)。
-    resolved = policy if isinstance(policy, CapturePolicy) else get_policy(policy)
     limit = resolved.max_cards
     if limit is not None and len(out) > limit:
         if strict:

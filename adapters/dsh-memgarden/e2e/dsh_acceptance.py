@@ -3,7 +3,7 @@
 覆盖五组：
 
     A  自动落卡 + 跨会话自动召回（模型不主动调工具）
-    B  模型主动调 memgarden_memory_search / memory_write
+    B  模型主动调 memgarden_memory_write
     C  多 agent 隔离：另一个 agent 读不到别人的私有记忆
     D  失败路径：子进程不存在 / 会话不存在 / 无模型错误 / manifest
     E  modelless service 下 Maintenance/Dream 仍由 DSH 模型驱动
@@ -14,24 +14,31 @@
     python e2e/dsh_acceptance.py
 
 ⚠️ 会真实调用模型，每跑一次有成本。
-除 npm DSH 外还需 deepseek_harness Python SDK。当前仓库未锁定其来源/版本，
-需由验收环境先明确安装；详见 Adapter README 的验证方式。
+除 npm DSH 外还需要从同一官方 commit 源码运行 deepseek_harness
+Python SDK；详见 Adapter README 的验证方式。
 """
 from __future__ import annotations
 
+import importlib
+import importlib.metadata
 import json
 import os
 import pathlib
+import re
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
-from deepseek_harness import DeepSeekHarness
+from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parent                       # adapters/dsh-memgarden
 RESULTS: list[tuple[bool, str, str]] = []
+DSH_VERSION = "0.1.2-alpha.4"
+DSH_COMMIT = "4e84901e6471b79ec0338099867ebb4606d12bb5"
+TOOL_PROBE = "MG_TOOL_PROBE_20260908"
+_HARNESS_CLASS: type | None = None
 
 
 def check(ok: bool, name: str, detail: str = "") -> bool:
@@ -89,9 +96,11 @@ class Env:
         assert f"memoryOwner: '{self.owner}'" in installed
         assert f"stateDir: '{self.state_dir}'" in installed
 
-    def harness(self) -> DeepSeekHarness:
+    def harness(self) -> Any:
         os.environ["MEMGARDEN_DEBUG_LOG"] = str(self.log)
-        return DeepSeekHarness(
+        if _HARNESS_CLASS is None:
+            raise RuntimeError("deepseek_harness SDK 尚未通过环境校验")
+        return _HARNESS_CLASS(
             provider="deepseek-official", model="deepseek-v4-flash",
             max_tokens=4096, cwd=str(self.workspace),
             dsh_home=str(self.home), dsh_bin=str(self.dsh_bin),
@@ -103,7 +112,28 @@ class Env:
             return []
         conn = sqlite3.connect(self.garden)
         try:
-            return [json.loads(d) for (d,) in conn.execute("SELECT doc FROM cards")]
+            return [json.loads(d) for (d,) in conn.execute(
+                "SELECT doc FROM cards WHERE tenant=? AND owner=?",
+                (self.tenant, self.owner),
+            )]
+        finally:
+            conn.close()
+
+    def maintenance_state(self) -> dict:
+        if not self.garden.exists():
+            return {}
+        conn = sqlite3.connect(self.garden)
+        try:
+            row = conn.execute(
+                "SELECT signature, seed_card_count, revision, updated_at, schema_version "
+                "FROM maintenance_state WHERE tenant=? AND owner=? AND mount=?",
+                (self.tenant, self.owner, "agent-private"),
+            ).fetchone()
+            if row is None:
+                return {}
+            keys = ("signature", "seed_card_count", "revision", "updated_at",
+                    "schema_version")
+            return dict(zip(keys, row))
         finally:
             conn.close()
 
@@ -121,7 +151,9 @@ class Env:
         requests = [
             {"id": str(i), "method": "records.write", "params": {
                 "scope": scope,
-                "text": f"验收用稳定事实 {i}",
+                # 故意放入高度重叠的原始卡：真正的 Dream 应把它们
+                # 收敛成新卡并留下 supersede 链，不只是打一行“整理结果”日志。
+                "text": f"验收事实 {i}：对方每个周末早上八点都会去公园跑步。",
                 "bucket": "general",
                 "idempotency_key": f"acceptance-seed-{i}",
             }}
@@ -152,12 +184,126 @@ def _dsh_bin() -> pathlib.Path:
     sys.exit(2)
 
 
+def _checkout_commit(module_file: str) -> str:
+    """Return the git commit for an editable official SDK checkout, if any."""
+    resolved = pathlib.Path(module_file).resolve()
+    for parent in resolved.parents:
+        if not (parent / "python" / "sdk" / "src" / "deepseek_harness").is_dir():
+            continue
+        proc = subprocess.run(
+            ["git", "-C", str(parent), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    return ""
+
+
+def _sdk_compatibility_error(version: str, source_commit: str) -> str:
+    """Exact alpha.4 evidence requires the SDK source from the same commit."""
+    if source_commit == DSH_COMMIT:
+        return ""
+    where = f"source commit={source_commit}" if source_commit else "无可验证的源码 commit"
+    return (
+        f"deepseek-harness-sdk {version} 不能证明与 DSH {DSH_VERSION} "
+        f"同源（{where}）。请按 Adapter README 从官方 {DSH_COMMIT} "
+        "checkout 的 python/sdk 环境运行验收。"
+    )
+
+
+def _load_harness_class() -> type:
+    try:
+        module = importlib.import_module("deepseek_harness")
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "找不到 deepseek_harness。PyPI 当前没有与 DSH "
+            f"{DSH_VERSION} 精确对应的 SDK 发行版；请按 Adapter README "
+            f"从官方 commit {DSH_COMMIT} 的 python/sdk 环境运行。"
+        ) from exc
+    try:
+        version = importlib.metadata.version("deepseek-harness-sdk")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    source_commit = _checkout_commit(str(getattr(module, "__file__", "")))
+    mismatch = _sdk_compatibility_error(version, source_commit)
+    if mismatch:
+        raise RuntimeError(mismatch)
+    harness = getattr(module, "DeepSeekHarness", None)
+    if not isinstance(harness, type):
+        raise RuntimeError("deepseek_harness.DeepSeekHarness 不存在")
+    return harness
+
+
+def _dsh_version_error(binary: pathlib.Path) -> str:
+    try:
+        proc = subprocess.run(
+            [str(binary), "--version"], capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"无法执行 dsh --version: {exc}"
+    got = (proc.stdout or proc.stderr).strip().splitlines()
+    actual = got[-1].strip() if got else ""
+    if proc.returncode != 0 or actual != DSH_VERSION:
+        return f"需要 dsh {DSH_VERSION}，当前是 {actual or '无版本输出'}"
+    return ""
+
+
 def _memgarden_bin() -> str:
     found = os.environ.get("MEMGARDEN_BIN") or shutil.which("memgarden")
     if found:
         return found
     print("找不到 memgarden —— 先 pip install memgarden")
     sys.exit(2)
+
+
+def _has_tool_call(events: list[dict], name: str) -> bool:
+    return any(
+        event.get("type") == "tool/call"
+        and isinstance(event.get("data"), dict)
+        and event["data"].get("name") == name
+        for event in events
+        if isinstance(event, dict)
+    )
+
+
+def _recall_is_proven(logs: str, reply: str, events: list[dict]) -> bool:
+    counts = [int(value) for value in re.findall(r"召回 (\d+) 条", logs)]
+    return bool(
+        counts and counts[-1] > 0 and "胃疼" in reply
+        and not _has_tool_call(events, "memgarden_memory_search")
+    )
+
+
+def _tool_call_is_proven(events: list[dict], cards: list[dict], marker: str) -> bool:
+    called = _has_tool_call(events, "memgarden_memory_write")
+    persisted = any(
+        card.get("source") == "model_tool"
+        and marker in f"{card.get('summary', '')}\n{card.get('content', '')}"
+        for card in cards
+    )
+    return called and persisted
+
+
+def _maintenance_is_proven(logs: str, cards: list[dict], ledger: dict) -> bool:
+    result_lines = [line for line in logs.splitlines() if "整理结果" in line]
+    successful_receipt = bool(
+        result_lines and "written=true" in result_lines[-1]
+        and "error=-" in result_lines[-1]
+        and "整理失败" not in logs
+    )
+    dream_ids = {
+        str(card.get("id") or "") for card in cards
+        if card.get("source") == "memory_dream"
+    }
+    durable_chain = bool(dream_ids) and any(
+        card.get("archived") is True
+        and str(card.get("superseded_by") or "") in dream_ids
+        for card in cards
+    )
+    durable_ledger = bool(
+        ledger.get("signature") and int(ledger.get("seed_card_count") or 0) >= 10
+    )
+    return successful_receipt and durable_chain and durable_ledger
 
 
 # --------------------------------------------------------------------------- #
@@ -172,19 +318,21 @@ def group_a() -> None:
             h.run("我不吃辣，一吃就胃疼。简短回一句就行。", session_id="A")
 
         cards = env.cards()
-        check(len(cards) == 1, "轮末自动落卡", f"{len(cards)} 张")
-        if cards:
-            check("辣" in (cards[0].get("summary") or ""),
-                  "卡的内容是那件事", cards[0].get("summary", ""))
+        captured = [card for card in cards
+                    if card.get("source") == "conversation_capture"
+                    and "辣" in f"{card.get('summary', '')}\n{card.get('content', '')}"
+                    and "胃疼" in f"{card.get('summary', '')}\n{card.get('content', '')}"]
+        check(bool(captured), "轮末自动落卡且来源正确", f"{len(cards)} 张")
 
         # 🔴 模型调用必须走 DSH：服务端没有 --model，能落卡就说明是宿主调的
         check("--model" not in env.logs(), "模型调用归 DSH（服务没有模型配置）")
 
         with env.harness() as h:
-            r = h.run("晚饭吃什么？给一个具体建议，一句话。", session_id="B")
+            r = h.run("根据你自动想起的长期记忆，我吃辣会有什么具体身体反应？"
+                      "只回答这个反应。", session_id="B")
             reply = r.final_response or ""
-        check(any(w in reply for w in ("辣", "清淡", "温和", "不辣")),
-              "全新会话自动召回（模型未主动调工具）", reply[:40])
+        check(_recall_is_proven(env.logs(), reply, r.events),
+              "全新会话实际召回注入并用到独特细节", reply[:80])
     finally:
         env.cleanup()
 
@@ -194,17 +342,17 @@ def group_a() -> None:
 # --------------------------------------------------------------------------- #
 
 def group_b() -> None:
-    print("\nB. 模型主动调工具")
+    print("\nB. 模型主动调 memory_write 工具")
     env = Env(tenant="bob")
     try:
         with env.harness() as h:
-            h.run("请调用 memgarden_memory_write 工具，"
-                  "把「周末要去看医生」记下来。", session_id="W")
+            result = h.run("请务必调用 memgarden_memory_write 工具，"
+                           f"把验收标记「{TOOL_PROBE}」原样写入 summary 和 "
+                           "content；工具成功后只回答“完成”。", session_id="W")
         check("注册了" in env.logs(), "工具注册进了 DSH 的 Tool Registry",
               next((l for l in env.logs().splitlines() if "注册了" in l), ""))
-        wrote = [c for c in env.cards() if "医生" in (c.get("summary") or "")]
-        check(bool(wrote), "memory_write 真的落了库",
-              wrote[0].get("summary", "") if wrote else "没找到")
+        check(_tool_call_is_proven(result.events, env.cards(), TOOL_PROBE),
+              "memory_write 有 tool/call 事件且以 model_tool 来源落库")
     finally:
         env.cleanup()
 
@@ -292,14 +440,16 @@ def group_e() -> None:
     env = Env(tenant="dream-tenant", owner="dream-owner")
     try:
         # 默认阈值是 10 张 seed card。用 wire 写入而不是直接改表，
-        # 确保验收不依赖 SQLite 内部结构。
+        # 确保验收不依赖 SQLite 内部结构。本验收夹具特意写入
+        # 高度重复的卡，所以预期真正产生 dream + supersede 链；
+        # 这不意味着一般 Maintenance 的合法 no-op 应被视为失败。
         env.seed_cards(10)
         with env.harness() as h:
             h.run("请简短回答：好的。", session_id="M")
         logs = env.logs()
         check("该整理了" in logs, "达到阈值后确实进入整理")
-        check("整理结果" in logs and "model_not_configured" not in logs,
-              "Maintenance 穿过 begin/feed，没调 modelless maintenance.run",
+        check(_maintenance_is_proven(logs, env.cards(), env.maintenance_state()),
+              "Maintenance 成功，且整理账本与 supersede 卡链持久化",
               next((line for line in logs.splitlines() if "整理结果" in line), ""))
     finally:
         env.cleanup()
@@ -320,8 +470,20 @@ def _rpc(request: dict) -> dict:
 # --------------------------------------------------------------------------- #
 
 def main() -> int:
+    global _HARNESS_CLASS
     if not os.environ.get("DEEPSEEK_API_KEY"):
         print("需要 DEEPSEEK_API_KEY")
+        return 2
+
+    try:
+        _HARNESS_CLASS = _load_harness_class()
+    except RuntimeError as exc:
+        print(f"验收环境不满足：{exc}")
+        return 2
+    binary = _dsh_bin()
+    version_error = _dsh_version_error(binary)
+    if version_error:
+        print(f"验收环境不满足：{version_error}")
         return 2
 
     print("=" * 66)

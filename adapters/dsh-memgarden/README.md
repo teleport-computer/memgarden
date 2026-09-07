@@ -86,37 +86,64 @@ outbox 写入失败会记日志并继续尝试 Capture，此时不能保证崩�
 # 不联网：假 DSH 上下文 + 实际 Adapter + 真实服务
 uv run --extra dev pytest -q tests/test_dsh_adapter_offline.py
 
+# 不联网：验收判据本身能否拒绝假阳性
+uv run --extra dev pytest -q tests/test_dsh_acceptance_evidence.py
+
 # 不联网：只检查 MemGarden Service，不经过 Adapter
 uv run python adapters/dsh-memgarden/e2e/failure_paths.py
-
-# 还需下文所述 deepseek_harness Python SDK；当前仓库未锁定其安装来源
-uv run python adapters/dsh-memgarden/e2e/dsh_acceptance.py
 ```
 
-真实脚本通过 `dsh` 命令启动宿主；若只在项目本地安装 npm 包，需让对应可执行文件进入该验收进程的 PATH。
+### pinned alpha.4 的 Python SDK 来源
 
-**真实验收还缺一个可复现的依赖准备说明**：`dsh_acceptance.py` 顶层导入
-`deepseek_harness.DeepSeekHarness`，仅安装 npm DSH 和 memgarden 并不会提供该
-Python 模块。当前仓库没有锁定该 SDK 的安装来源和版本；工程师应先补齐与
-pinned DSH 匹配的来源/版本及安装步骤，再在验收解释器中验证
-`import deepseek_harness`。本轮因此不能承诺从干净环境照上面的命令直接完成真实验收。
+Python import 名是 `deepseek_harness`，官方 distribution 名是
+`deepseek-harness-sdk`。但 DSH `0.1.2-alpha.4` 的官方 commit 中，
+`python/sdk/pyproject.toml` 仍使用构建时注入的 `0.0.0.dev0`；截至
+2026-09-08，[PyPI 官方 release history](https://pypi.org/project/deepseek-harness-sdk/#history)
+只有 `0.1.2a3` 和之后的 `0.1.2rc1`，没有能和 npm alpha.4
+精确对应的 Python 发行版。不得用 a3 或新版 rc 代替并声称验证了 alpha.4。
+
+此基线的可复现方式是在同一官方 commit 的源码 SDK 环境运行：
+
+```bash
+git clone https://github.com/deepseek-ai/deepseek-harness.git /absolute/path/to/deepseek-harness
+git -C /absolute/path/to/deepseek-harness checkout --detach 4e84901e6471b79ec0338099867ebb4606d12bb5
+
+export UV_PROJECT_ENVIRONMENT=/absolute/path/to/dsh-sdk-venv
+uv sync --project /absolute/path/to/deepseek-harness/python/sdk --group test
+
+# npm alpha.4 的绝对路径；避免 SDK 环境中的其他 dsh 抢占 PATH
+export DSH_BIN=/absolute/path/to/node_modules/.bin/dsh
+export MEMGARDEN_BIN=/absolute/path/to/memgarden-venv/bin/memgarden
+export DEEPSEEK_API_KEY=...
+
+uv run --project /absolute/path/to/deepseek-harness/python/sdk \
+  python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py
+```
+
+这一 source-mode 步骤来自官方该 commit 的
+[`python/development.md`](https://github.com/deepseek-ai/deepseek-harness/blob/4e84901e6471b79ec0338099867ebb4606d12bb5/python/development.md)
+和 [`python/sdk`](https://github.com/deepseek-ai/deepseek-harness/tree/4e84901e6471b79ec0338099867ebb4606d12bb5/python/sdk)。
+验收脚本会检查 SDK 模块所在 checkout 的 git HEAD，并检查
+`dsh --version` 精确等于 `0.1.2-alpha.4`；缺模块、错 commit 或错版本
+都会在调模型前诊断失败。
 
 | 证据 | 覆盖范围 |
 |---|---|
 | pytest 离线 Adapter | 实际加载插件；模型桥、Capture/Maintenance、outbox、故障注入 |
+| 验收判据离线测试 | 反证“通用回复”、自动 Capture 卡、单行日志不能冒充召回/工具/整理成功 |
 | `failure_paths.py` | 服务错误边界；不能算 DSH 端到端证据 |
-| `dsh_acceptance.py` | 真实验收的候选脚本：覆盖意图包括跨会话、工具、owner 隔离与整理；A/B/E 判据仍需补强，见下文 |
+| `dsh_acceptance.py` | 真 DSH 与模型的候选验收；未实际运行前不能宣称通过 |
 
 真实脚本 D 组当前只覆盖服务路径不存在、unknown_session、无模型错误和 manifest；
 不应将握手不兼容、模型空回复等离线用例算成该组的真实环境证据。
 
-工程师还应补强以下断言，避免真实脚本自己出现假通过：
+脚本中 A/B/E 不再使用原先可假通过的判断：
 
-- A 组仅看回复中出现“辣/清淡/温和”等常见词，不能排除模型没用记忆也作出类似回答；需补该会话实际召回和注入的证据。
-- B 组检查工具注册及数据库中的相关卡，但轮末自动 Capture 也可能写出该卡；需断言真实工具调用及 `source=model_tool` 等可区分的写入证据。
-- E 组只看“整理结果”日志及没有 `model_not_configured`，其他错误也可能通过；需检查回执无 error，并核对整理账本/卡片结果（合法 no-op 也需证明账本推进）。
+- A 组同时要求 Adapter 日志有非空召回，全新会话回答准确使用“胃疼”这个独特细节，且该轮没有主动调 `memory_search`，以区分自动注入。
+- B 组同时要求 DSH `tool/call` 事件和含唯一标记的 `source=model_tool` 持久卡，自动 Capture 不能冒充。
+- E 组同时要求回执 `written=true, error=-`、持久的 Maintenance 账本、`memory_dream` 新卡和旧卡的 `superseded_by` 链。
 
-这些断言补齐前，脚本跑绿也不足以证明三个场景全部完成。离线 pytest 的通过范围仍按自身测试报告解释。
+离线 pytest 只证明这些判据能拒绝已知假阳性；真正的 provider、插件事件和模型输出仍必须由完整验收脚本实测。
 
 真实验收报告需记录 Garden commit、DSH 版本/commit、模型、脚本结果和跳过项。不要保存凭据或真实用户对话。
 
