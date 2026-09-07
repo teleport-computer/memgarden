@@ -130,14 +130,17 @@ def main() -> int:
     ap.add_argument("--provider", default="deepseek", choices=sorted(_ENDPOINTS))
     ap.add_argument("--model", default="deepseek-chat")
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--require-key", action="store_true",
+                    help="缺少模型凭据时失败，用于要求真实模型证据的验收")
     args = ap.parse_args()
 
     url, env = _ENDPOINTS[args.provider]
     key = os.environ.get(env, "")
     if not key:
-        print(f"SKIP: 环境变量 {env} 没设 —— 这条 eval 要调真模型才有意义，"
+        status = "ERROR" if args.require_key else "SKIP"
+        print(f"{status}: 环境变量 {env} 没设 —— 这条 eval 要调真模型才有意义，"
               f"不设 key 就不跑，绝不静默通过。")
-        return 0
+        return 1 if args.require_key else 0
 
     cases = [json.loads(l) for l in
              (CORPUS / "conversations.jsonl").read_text(encoding="utf-8").splitlines()

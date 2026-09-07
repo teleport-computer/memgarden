@@ -144,14 +144,15 @@ def main() -> int:
         if name == "recall.py" and args.baseline:
             extra = ["--baseline", args.baseline]
         if name == "capture.py":
-            extra = ["--provider", args.provider, "--model", args.model]
+            extra = ["--provider", args.provider, "--model", args.model,
+                     "--require-key"]
 
         print(f"\n{'=' * 64}\n{title}\n{'=' * 64}")
         rc, out = _run(name, extra)
         print(out.rstrip())
         if rc == 0:
             pass
-        elif rc == 77:  # capture.py 用 77 表示「没有 key，跳过」
+        elif rc == 77:  # 兼容以标准 skip 退出码返回的评测脚本。
             skipped.append(title)
         else:
             failed.append(title)
@@ -173,6 +174,9 @@ def main() -> int:
         print(f"⚠️  {s} 被跳过（没有 API key）。这**不等于通过**。")
     if failed:
         print("🔴 未通过：" + "、".join(failed))
+        return 1
+    if skipped:
+        print("⚠️  验收未完整执行，不能判定全部通过。")
         return 1
     print("✅ 全部通过")
     return 0
