@@ -72,3 +72,35 @@ def test_dsh_version_timeout_is_a_diagnostic_failure(monkeypatch):
     monkeypatch.setattr(acceptance.subprocess, "run", time_out)
     error = acceptance._dsh_version_error(Path("/stuck/dsh"))
     assert "无法执行 dsh --version" in error
+
+
+def test_published_dsh_requires_a_uniform_alpha4_dependency_closure(tmp_path):
+    modules = tmp_path / "node_modules"
+
+    def package(name, version):
+        directory = modules / name
+        directory.mkdir(parents=True)
+        (directory / "package.json").write_text(
+            '{"name": "' + name + '", "version": "' + version + '"}',
+            encoding="utf-8",
+        )
+        return directory
+
+    top = package("@deepseek-ai/dsh", acceptance.DSH_VERSION)
+    binary = top / "lib" / "bin.js"
+    binary.parent.mkdir()
+    binary.write_text("", encoding="utf-8")
+    package("@deepseek-ai/dsh-base", "0.1.2-rc.1")
+    assert "dsh-base@0.1.2-rc.1" in acceptance._dsh_closure_error(binary)
+
+    (modules / "@deepseek-ai/dsh-base/package.json").write_text(
+        '{"name": "@deepseek-ai/dsh-base", '
+        '"version": "' + acceptance.DSH_VERSION + '"}',
+        encoding="utf-8",
+    )
+    assert acceptance._dsh_closure_error(binary) == ""
+
+    (modules / "@deepseek-ai/dsh-base/package.json").write_text(
+        "{broken", encoding="utf-8",
+    )
+    assert "npm 安装损坏" in acceptance._dsh_closure_error(binary)

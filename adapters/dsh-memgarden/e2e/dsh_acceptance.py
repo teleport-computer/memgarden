@@ -30,6 +30,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import traceback
 from typing import Any
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -245,6 +246,54 @@ def _dsh_version_error(binary: pathlib.Path) -> str:
     actual = got[-1].strip() if got else ""
     if proc.returncode != 0 or actual != DSH_VERSION:
         return f"需要 dsh {DSH_VERSION}，当前是 {actual or '无版本输出'}"
+    return ""
+
+
+def _dsh_closure_error(binary: pathlib.Path) -> str:
+    """Reject a published alpha.4 launcher with a mixed rc dependency closure."""
+    # A launcher built from the same exact official checkout is already pinned
+    # by source.  This is the preferred path documented in the README.
+    if _checkout_commit(str(binary)) == DSH_COMMIT:
+        return ""
+
+    resolved = binary.resolve()
+    node_modules = next(
+        (parent for parent in resolved.parents if parent.name == "node_modules"),
+        None,
+    )
+    if node_modules is None:
+        return (
+            "无法证明 dsh 依赖闭包版本；请使用官方 exact commit "
+            "的源码 launcher，或提供可检查的 npm node_modules 安装"
+        )
+
+    manifests = sorted(node_modules.glob("**/@deepseek-ai/dsh*/package.json"))
+    seen = []
+    wrong = []
+    unreadable = []
+    for manifest in manifests:
+        try:
+            package = json.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            unreadable.append(str(manifest))
+            continue
+        name = str(package.get("name") or "")
+        version = str(package.get("version") or "")
+        if name == "@deepseek-ai/dsh" or name.startswith("@deepseek-ai/dsh-"):
+            seen.append(name)
+            if version != DSH_VERSION:
+                wrong.append(f"{name}@{version or '?'}")
+    if "@deepseek-ai/dsh" not in seen:
+        return "npm 安装不完整：找不到 @deepseek-ai/dsh package manifest"
+    if unreadable:
+        return f"npm 安装损坏：无法读取 {unreadable[0]}"
+    if wrong:
+        sample = ", ".join(wrong[:5])
+        suffix = f" 等 {len(wrong)} 个" if len(wrong) > 5 else ""
+        return (
+            f"DSH 依赖闭包混入了非 {DSH_VERSION} 版本：{sample}{suffix}。"
+            "顶层 npm alpha.4 使用 caret 依赖，单独固定顶层包不足以复现该基线。"
+        )
     return ""
 
 
@@ -485,6 +534,10 @@ def main() -> int:
     if version_error:
         print(f"验收环境不满足：{version_error}")
         return 2
+    closure_error = _dsh_closure_error(binary)
+    if closure_error:
+        print(f"验收环境不满足：{closure_error}")
+        return 2
 
     print("=" * 66)
     print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden")
@@ -492,9 +545,17 @@ def main() -> int:
 
     for group in (group_a, group_b, group_c, group_d, group_e):
         try:
+            if not binary.exists():
+                raise FileNotFoundError(
+                    f"pinned DSH executable disappeared after preflight: {binary}; "
+                    "do not place the npm installation inside TMPDIR and wait for "
+                    "the package install to finish before acceptance"
+                )
             group()
         except Exception as exc:      # noqa: BLE001
             check(False, f"{group.__name__} 整组异常", repr(exc)[:120])
+            # 验收只使用本文件里的合成内容；留下完整栈便于定位环境问题。
+            traceback.print_exc()
 
     print("\n" + "=" * 66)
     failed = [r for r in RESULTS if not r[0]]

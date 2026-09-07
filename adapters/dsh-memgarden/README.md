@@ -102,17 +102,31 @@ Python import 名是 `deepseek_harness`，官方 distribution 名是
 只有 `0.1.2a3` 和之后的 `0.1.2rc1`，没有能和 npm alpha.4
 精确对应的 Python 发行版。不得用 a3 或新版 rc 代替并声称验证了 alpha.4。
 
-此基线的可复现方式是在同一官方 commit 的源码 SDK 环境运行：
+顶层 npm 包 `@deepseek-ai/dsh@0.1.2-alpha.4` 的内部 DSH 依赖使用
+`^0.1.2-alpha.4`。在当前 registry 直接执行单个 npm install 会把
+部分内部包解析到之后的 rc；只看 `dsh --version` 仍会显示
+alpha.4，不能证明整个运行时是 alpha.4。如果使用 npm 发行物，
+必须用 lock/overrides 把所有 `@deepseek-ai/dsh` 及 `@deepseek-ai/dsh-*`
+包固定到同版本；验收脚本会在调模型前扫描这个闭包并拒绝混版。
+
+更直接的可复现准备方式是从同一官方 commit 构建 DSH，
+并在它的源码 SDK 环境运行。以下是准备步骤，仍须在目标
+环境实际跑完验收，不代表本仓已经证明了真实 provider 联调：
 
 ```bash
 git clone https://github.com/deepseek-ai/deepseek-harness.git /absolute/path/to/deepseek-harness
 git -C /absolute/path/to/deepseek-harness checkout --detach 4e84901e6471b79ec0338099867ebb4606d12bb5
 
+# 构建同一 commit 的 DSH launcher（官方 run-from-source 流程）
+cd /absolute/path/to/deepseek-harness
+corepack pnpm install --frozen-lockfile
+corepack pnpm run build
+
 export UV_PROJECT_ENVIRONMENT=/absolute/path/to/dsh-sdk-venv
 uv sync --project /absolute/path/to/deepseek-harness/python/sdk --group test
 
-# npm alpha.4 的绝对路径；避免 SDK 环境中的其他 dsh 抢占 PATH
-export DSH_BIN=/absolute/path/to/node_modules/.bin/dsh
+# exact source build 的绝对路径；避免其他 dsh 抢占 PATH
+export DSH_BIN=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js
 export MEMGARDEN_BIN=/absolute/path/to/memgarden-venv/bin/memgarden
 export DEEPSEEK_API_KEY=...
 
@@ -123,9 +137,10 @@ uv run --project /absolute/path/to/deepseek-harness/python/sdk \
 这一 source-mode 步骤来自官方该 commit 的
 [`python/development.md`](https://github.com/deepseek-ai/deepseek-harness/blob/4e84901e6471b79ec0338099867ebb4606d12bb5/python/development.md)
 和 [`python/sdk`](https://github.com/deepseek-ai/deepseek-harness/tree/4e84901e6471b79ec0338099867ebb4606d12bb5/python/sdk)。
-验收脚本会检查 SDK 模块所在 checkout 的 git HEAD，并检查
-`dsh --version` 精确等于 `0.1.2-alpha.4`；缺模块、错 commit 或错版本
-都会在调模型前诊断失败。
+验收脚本会检查 SDK 模块所在 checkout 的 git HEAD，检查
+`dsh --version` 精确等于 `0.1.2-alpha.4`，并验证 DSH 来自
+同一 exact source commit 或可检查且全为 alpha.4 的 npm 闭包。缺模块、
+错 commit、错版本、损坏或混版安装都会在调模型前诊断失败。
 
 | 证据 | 覆盖范围 |
 |---|---|
