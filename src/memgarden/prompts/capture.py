@@ -101,7 +101,8 @@ _DEFAULT_CAPTURE_TYPE = "event"
 # 那条路。所以这些函数在该档位下返回的字符串，和策略化之前的模板一模一样。
 
 
-def _framing(policy: CapturePolicy, ai_name: str, user_name: str) -> str:
+def _framing(policy: CapturePolicy, ai_name: str, user_name: str,
+             material_kind: str = "") -> str:
     """开场：这批材料是什么、你现在在做什么。
 
     对话和「用户翻出三年的日记交给你」是完全不同的处境。用同一段开场的话，
@@ -109,9 +110,11 @@ def _framing(policy: CapturePolicy, ai_name: str, user_name: str) -> str:
     表现是「导入成功但几乎没记住」，而且没有任何错误。
     """
     if policy.name == "history_import":
+        kind = (f" The source describes itself as: {material_kind}."
+                if str(material_kind or "").strip() else "")
         return (f"You are {ai_name}, {user_name}'s companion. "
                 f"{user_name} has handed you a batch of material from their past "
-                "and asked you to take it in.\n"
+                f"and asked you to take it in.{kind}\n"
                 "This is not a conversation you just had — it is history they are "
                 "choosing to give you. Read it carefully and take in everything "
                 "that would help you know them. Err on the side of keeping: "
@@ -382,6 +385,7 @@ def build_capture_prompt(
     cards: str = "",
     policy: CapturePolicy | str | None = None,
     locale: str,
+    material_kind: str = "",
 ) -> str:
     """Render the 落卡 prompt with this session's context injected.
 
@@ -432,7 +436,7 @@ def build_capture_prompt(
     resolved_ai = (ai_name or unknown).strip()
     resolved_user = prompt_user_name or unknown
     return _CAPTURE_PROMPT_TEMPLATE.format(
-        framing=_framing(resolved, resolved_ai, resolved_user),
+        framing=_framing(resolved, resolved_ai, resolved_user, material_kind),
         action_block=_action_block(resolved),
         thread_seed=_thread_seed(resolved),
         date_rule=_date_rule(resolved),

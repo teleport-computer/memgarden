@@ -31,28 +31,16 @@
 
 ## 声明必须显式
 
-``Capabilities`` 没有默认值：外部适配器要逐项写清楚。原实现默认全 True 是
-fail-open —— 适配器漏声明会被当成「全支持」，正好错在最危险的方向。
+``Capabilities`` 的原始六项没有默认值；后加的 Maintenance 两项默认 False，
+兼容旧构造形状但仍 fail closed。原实现默认全 True 会把漏声明当成「全支持」，
+正好错在最危险的方向。
 官方参考实现用 ``FULL_CAPABILITIES``。
 
 ## 现状
 
-本模块只定义接口与降级规划，不接任何真实存储。把 IO 现有的
-把宿主现有的锁与全量替换写法包成适配器，是后续批次的事（会动写入路径，需拍板）。
-
-## ⚠️ 这个接口还没定完（codex review 2026-08-14）
-
-已知的四处不足，**接第一个真实适配器之前必须先定**，否则所有适配器都要返工：
-
-1. ``mutations`` 现在是 ``list[dict]``，无法从类型判断这批操作需要哪些能力。
-   应该改成 ``Add`` / ``Merge`` / ``Supersede`` 之类的类型。
-2. ``ensure_supported`` 依赖每个调用方**记得**手工调用。应该在统一的
-   executor / wrapper 里按 mutation 类型自动校验，而不是靠自觉。
-3. 读侧只定义了 ``load``，没定义「挑完候选之后怎么取内容」（index → fetch →
-   decrypt 那一段现在还在 IO 侧的 ``memory_readside_core``，没进 port）。
-4. ~~冲突与部分失败没有标准表达~~ —— ``RevisionConflict`` /
-   ``IdempotencyConflict`` 已定义（2026-08-27）；``PartialFailure``
-   补齐了「部分失败」（2026-09-06）。
+官方提供 ``InMemoryStore`` 与 ``SqliteStore`` 两个完整参考实现。外部 Store
+实现这个 Port 后，可直接复用 MountedGarden 的权限、生命周期、CAS、幂等、
+mutation 校验、整理账本和分页语义，不需要再抄一份业务编排。
 """
 from __future__ import annotations
 
@@ -68,10 +56,11 @@ from typing import Any, Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class Capabilities:
-    """一个存储后端能做什么。**每一项都必须显式声明** —— 没有默认值。
+    """一个存储后端能做什么。
 
-    不给默认值是有意的：适配器漏写一项时，我们宁可它报错，
-    也不要被静默当成「支持」。
+    原始六项没有默认值，防止适配器漏写时被当成支持。后来增加的两项
+    Maintenance 能力默认 False：旧适配器升级时不会因构造参数变化直接崩溃，
+    但必须主动声明 True 才会开启整理，仍然是 fail closed。
     """
 
     supports_supersede: bool
@@ -120,6 +109,16 @@ class Capabilities:
     而且不报错；量大时还会把别人的数据整批读进本进程内存。
     """
 
+    supports_maintenance_state: bool = False
+    """能不能持久化 Maintenance 账本，并与卡 mutation 原子提交。"""
+
+    supports_monotonic_seed_generation: bool = False
+    """能不能按 mount 提供只增不减的原始卡计数。
+
+    Maintenance 用它区分「从未处理过的新卡」与仍然存在的净卡数。没有它时，
+    hard delete 会把水位倒退，后续新卡可能被静默漏掉，因此只能关闭整理能力。
+    """
+
 
 #: 全部支持 —— 官方参考实现和大多数关系库适配器都能达到这一档。
 FULL_CAPABILITIES = Capabilities(
@@ -129,12 +128,15 @@ FULL_CAPABILITIES = Capabilities(
     supports_metadata_sort=True,
     supports_hard_delete=True,
     supports_owner_scoping=True,
+    supports_maintenance_state=True,
+    supports_monotonic_seed_generation=True,
 )
 
 #: 缺了就必须拒绝对应操作的能力（不是「降级后继续」）。
 CORRECTNESS_CRITICAL = frozenset({
     "supports_supersede", "supports_atomic_batch",
     "supports_hard_delete", "supports_owner_scoping",
+    "supports_maintenance_state", "supports_monotonic_seed_generation",
 })
 
 
@@ -222,6 +224,23 @@ def mutations_digest(mutations: list[dict]) -> str:
 
     blob = json.dumps(mutations, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def apply_digest(
+    mutations: list[dict], maintenance_state: dict | None = None,
+) -> str:
+    """原子 apply 的完整内容指纹。
+
+    整理账本和 mutations 是同一次提交的一部分，幂等摘要也必须覆盖两者；
+    否则相同 no_op 配不同水位会误命中旧回执，账本静默不推进。
+    非 Maintenance 写入维持旧摘要格式，避免普通已落库幂等键升级后失效。
+    """
+    if maintenance_state is None:
+        return mutations_digest(mutations)
+    return mutations_digest([{
+        "mutations": mutations,
+        "maintenance_state": maintenance_state,
+    }])
 
 
 class PartialFailure(RuntimeError):
@@ -314,7 +333,7 @@ class UnsupportedOperation(RuntimeError):
 _DEGRADABLE_RULES: tuple[tuple[str, str, str], ...] = (
     (
         "supports_custom_fields",
-        "把 bucket/threads 塞进对方的 metadata 或正文",
+        "由 Store Adapter 把 bucket/threads 映射进其 metadata 或正文",
         "按桶/线索的检索与展示失效，做梦的归并判断拿不到结构信息",
     ),
     (
@@ -337,6 +356,12 @@ _CRITICAL_REASONS: dict[str, str] = {
     ),
     "supports_atomic_batch": (
         "降级成逐条写会留下半完成状态：两张 active 卡，或旧卡已退休而新卡没写成"
+    ),
+    "supports_maintenance_state": (
+        "缺少与卡 mutation 原子提交的持久账本，整理会重复执行或漏掉已完成状态"
+    ),
+    "supports_monotonic_seed_generation": (
+        "缺少只增不减的原始卡水位，hard delete 后会静默漏掉后续新增卡"
     ),
 }
 
@@ -412,6 +437,12 @@ _USER_FACING_CRITICAL: dict[str, str] = {
         "这个记忆库不支持把一批改动作为整体提交。"
         "为避免出现改了一半的状态，需要多步完成的整理（合并、取代）会被跳过"
     ),
+    "supports_maintenance_state": (
+        "这个记忆库不能原子保存整理进度，因此后台记忆整理会被关闭"
+    ),
+    "supports_monotonic_seed_generation": (
+        "这个记忆库不能可靠区分新增记忆与已删除记忆，因此后台记忆整理会被关闭"
+    ),
 }
 
 _USER_FACING_DEGRADED: dict[str, str] = {
@@ -474,6 +505,10 @@ class Snapshot:
     #: 这份快照属于谁。调用方可以断言它和自己请求的 owner 一致 ——
     #: 存储实现把 owner 过滤漏掉时，这里是唯一能当场发现的地方。
     owner: str = ""
+    #: 每个 mount 已接收过的原始 seed 总数，只增不减。Maintenance 用它计算
+    #: 真正新增量，避免 hard delete 把计数缺口抵消。有 seed 卡却不提供对应
+    #: mount 水位时 Maintenance 会 fail closed，不能静默退回净行数。
+    seed_generations: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -517,6 +552,15 @@ class StoragePort(Protocol):
         ``revision`` 的作用域也必须是 ``(tenant, owner)`` —— 用全局或全租户的
         版本号会让两个互不相干的 owner 互相踢掉对方的 CAS，表现为
         「明明没人跟我抢，我的写入却一直冲突」。
+        """
+        ...
+
+    def maintenance_state(self, tenant: str, *, owner: str, mount: str) -> dict:
+        """读取 ``(tenant, owner, mount)`` 的整理账本。
+
+        这是 Maintenance 正确性的必需契约，不是可选优化。账本必须和整理
+        mutation 在 :meth:`apply` 的同一原子提交中更新；读不到时不能假装空账本
+        继续跑，否则一次短暂存储故障会让同一批卡被重复整理。
         """
         ...
 

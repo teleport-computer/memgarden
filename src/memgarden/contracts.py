@@ -125,6 +125,14 @@ class CaptureRequest:
     #: 哪把「什么值得记」的尺子（见 policies）。留空 = 日常聊天档。
     policy: str | None = None
 
+    #: 历史导入等来源的材料类型，仅用于提示模型理解上下文，不作为记忆正文。
+    material_kind: str = ""
+    #: 可信编排入口标记。和 policy 分开：policy 是筛选尺子，source 是数据
+    #: 从哪条工作流进入。
+    source: str = "conversation_capture"
+    #: 本批最终允许写出的卡数；None 表示使用 policy 自身规则。
+    max_cards: int | None = None
+
     #: 幂等键。同一批对话重放时防止写两遍；宿主自己保证它对同一批输入稳定。
     idempotency_key: str = ""
 
@@ -203,8 +211,8 @@ class ImportRequest:
     #: 用哪把尺子。留空 = ``history_import``（比日常聊天宽：用户主动交出来的
     #: 东西，漏掉才是失职）。``curated_archive`` 是「几乎全收」那一档。
     policy: str | None = None
-    #: 一次最多产出多少张。**必须有上限** —— 三年的聊天记录一次蒸出几百张，
-    #: 之后的召回会被这批淹没，而用户看不出发生了什么。
+    #: 每批最多产出多少张。总导入量不截断，由 MountedGarden 分批续传；
+    #: 单批仍需有界，避免一个模型回复异常膨胀。
     max_cards: int = 50
     ai_name: str = ""
     user_name: str = ""
@@ -385,6 +393,8 @@ class MaintenanceRequest:
     #: 没有它就判断不出「这次和上次比多了多少新卡」，只能每次都整理一遍。
     last_signature: str = ""
     last_seed_card_count: int = 0
+    #: 当前 Store 的只增 seed 水位。0 表示未提供，退回从 all_cards 计数。
+    current_seed_generation: int = 0
 
     actor: Actor = field(default_factory=Actor)
     mount: Mount = DEFAULT_MOUNT

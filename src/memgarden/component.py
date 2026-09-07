@@ -29,7 +29,7 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 from .contracts import (
@@ -176,6 +176,7 @@ class _CapturePlan:
             cards=request.cards,
             policy=request.policy,
             locale=request.locale,
+            material_kind=request.material_kind,
         )
 
     def next_prompt(self) -> str | None:
@@ -314,7 +315,24 @@ class _CapturePlan:
                 kind="dropped", purpose="capture", attempt=self.calls,
                 detail={"why": "semantic", "cards": dropped},
             ))
+        if self.request.max_cards is not None:
+            cap = max(0, int(self.request.max_cards))
+            if len(self.cards) > cap:
+                original = len(self.cards)
+                self.cards = self.cards[:cap]
+                self.owner._step(Step(
+                    kind="dropped", purpose="capture", attempt=self.calls,
+                    detail={"why": "max_cards", "cards": original - cap},
+                ))
+                cap_trace = {"capped_from": original, "cap": cap}
+            else:
+                cap_trace = {}
+        else:
+            cap_trace = {}
         trace = self.owner._trace(self.request, self.calls, cards=len(self.cards))
+        if self.request.max_cards is not None:
+            trace = {**trace, "max_cards": max(0, int(self.request.max_cards)),
+                     **cap_trace}
         self.owner._step(Step(
             kind="done", purpose="capture", attempt=self.calls,
             detail={"cards": len(self.cards), "retried": self.retried, "error": self.err},
@@ -351,6 +369,9 @@ class _MaintenancePlan:
             available_cards=request.cards,
             all_cards=request.all_cards or request.cards,
         )
+        if request.current_seed_generation > 0:
+            snapshot = replace(
+                snapshot, seed_card_count=request.current_seed_generation)
         self.snapshot = snapshot
         verdict = needs_dream(
             snapshot,
@@ -440,7 +461,11 @@ class _MaintenancePlan:
             return MaintenanceResult(needed=True, error=self.err, trace=trace)
         return MaintenanceResult(
             needed=True,
-            mutations=[dict(c, mount=self.request.mount) for c in self.consolidations],
+            # host-driven 与内置模型循环必须产出相同的 storage mutation；
+            # merge/thicken 是整理建议，不是 Store 能直接执行的 op。
+            mutations=consolidations_to_mutations(
+                self.consolidations, mount=self.request.mount
+            ),
             consolidations=list(self.consolidations),
             trace=trace,
         )
@@ -684,17 +709,11 @@ class GardenComponent:
             window=request.material,
             actor=request.actor, mount=request.mount, locale=request.locale,
             ai_name=request.ai_name, user_name=request.user_name,
-            policy=policy,
+            policy=policy, material_kind=request.material_kind,
+            source="history_import",
+            max_cards=request.max_cards,
             idempotency_key=request.idempotency_key,
         ))
-        if len(result.mutations) > request.max_cards:
-            kept = request.max_cards
-            result.trace = {**result.trace, "capped_from": len(result.mutations),
-                            "cap": kept}
-            # 截断要**说出来**。悄悄丢掉一半，用户看到的是「导入成功」，
-            # 实际少了一半，且没有任何痕迹。
-            result.mutations = result.mutations[:kept]
-            result.cards = result.cards[:kept]
         return result
 
     def write_one(self, request: CuratedWriteRequest) -> CaptureResult:
@@ -722,7 +741,8 @@ class GardenComponent:
                 "bucket": bucket, "threads": [], "source": "curated"}
         return CaptureResult(
             mutations=[self._to_mutation(card, CaptureRequest(
-                window="", locale=request.locale, mount=request.mount,
+                window="", actor=request.actor, locale=request.locale,
+                mount=request.mount, source="curated",
                 idempotency_key=request.idempotency_key))],
             cards=[card],
             trace={"source": "curated", "chars": len(text), "mount": request.mount},
@@ -829,8 +849,8 @@ class GardenComponent:
         return ToolResult(
             content="ok",
             mutations=[{
-                "op": "update", "record_id": request.record_id,
-                "changes": {"mount": request.to_mount},
+                "op": "promote", "record_id": request.record_id,
+                "to_mount": request.to_mount,
                 "mount": request.to_mount,
                 "reason": request.reason or "promoted_by_user",
             }],
@@ -899,6 +919,9 @@ class GardenComponent:
             available_cards=request.cards,
             all_cards=request.all_cards or request.cards,
         )
+        if request.current_seed_generation > 0:
+            snapshot = replace(
+                snapshot, seed_card_count=request.current_seed_generation)
         verdict = needs_dream(
             snapshot,
             DreamLedger(
@@ -1017,6 +1040,10 @@ class GardenComponent:
             "card": {k: v for k, v in card.items()
                      if k not in {"action", "target_id"}},
         }
+        out["card"]["source"] = str(request.source or "conversation_capture")
+        if str(request.material_kind or "").strip():
+            out["card"]["source_material_kind"] = str(request.material_kind).strip()
+        out["card"]["source_actor"] = request.actor.as_dict()
         if op == "supersede":
             out["target_id"] = str(card.get("target_id") or "")
         if request.idempotency_key:
@@ -1031,6 +1058,7 @@ class GardenComponent:
             "cards": cards,
             "locale": request.locale,
             "mount": request.mount,
+            "actor": request.actor.as_dict(),
         }
 
 

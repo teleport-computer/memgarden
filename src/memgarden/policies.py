@@ -2,9 +2,8 @@
 
 ## 为什么必须分档
 
-同一件事「把材料变成记忆卡」，IO 里现在有两套实现：日常聊天走
-``prompts/capture.py``，历史导入走 ``genesis/prompts.py``。共用的只有桶指引和
-写入口，中间最核心的「什么值得记」各写一份 —— 这就是要消掉的半拟合。
+同一件事「把材料变成记忆卡」，日常聊天、历史导入、人工档案的保留尺度不同，
+但都由 ``prompts/capture.py`` 的同一条生成、解析与语义校验链路执行。
 
 但**不能把三把尺子统一成一把**：
 
@@ -14,26 +13,17 @@
 所以收进一处的是**结构**（卡长什么样、怎么归桶、怎么去重、怎么写入），
 分档保留的是**尺子**。见 ``docs/MEMORY_GARDEN_EXTRACTION_DESIGN.zh.md`` 第二节。
 
-## 三段的成色不一样，别混
+## 三档都已接入同一条链路
 
-  - ``conversation_capture`` —— **逐字**取自 ``prompts/capture.py`` 原先内联的
-    「你在找什么」段（脚本抽的，不是手抄）。该模板已接线，默认调用的产出与
-    重构前字节一致，由基线快照测试守着。
+  - ``conversation_capture`` —— 少而厚，适合每轮自动落卡。
 
-  - ``curated_archive`` —— **本模块是唯一来源**。``KEEP_ALL_MAP_SUFFIX`` 与
-    ``KEEP_ALL_WRITE_SUFFIX`` 逐字保留 genesis 原文（含半角标点），
-    而 ``genesis/prompts.py`` 反过来引用它们。这一档的重复**已经真正消除**，
-    改一处两边同时生效。
+  - ``curated_archive`` —— 用户人工整理的材料，几乎全收但仍做去重。
 
-  - ``history_import`` —— ⚠️ **目前仍是副本**。它的原文嵌在
-    ``genesis/prompts.py`` 的 ``FACT_MAP_PROMPT`` 里，且**不连续**：
-    「抽什么」在开头、「不抽什么」在防火墙段之后。抽出来必然改动文本顺序，
-    那就是改 prompt 行为，需要真模型 e2e 才能动。
-    本模块这份与那边**逐字相同**，有测试钉住两者不许漂移。
+  - ``history_import`` —— 用户主动交出的历史材料，宁可多记；由 MountedGarden
+    串行分批并提供可续传进度。
 
-⚠️ ``build_capture_prompt`` 目前只接受 ``conversation_capture``；另两档传进去会抛
-``NotImplementedError``，因为那个模板的其余部分（动作偏好/日期/tags/输出 schema）
-还没随档位变。放开它需要为每档建立与旧 prompt 对照的 golden。
+``build_capture_prompt`` 接受以上三档，档位会同时控制 selection rubric、动作偏好、
+日期、tags、输出张数规则和语言规则；golden/contract 测试防止只换一段文案。
 
 ## 为什么是三档，不是四档
 
@@ -54,8 +44,7 @@ recheck 的独特之处不在「什么值得记」，而在**它是个补漏动�
 
 ## 现状
 
-本模块把三把尺子收拢到一处、用测试钉死它们不能被抹平。真正让 genesis 改调内核，
-是批 7 的事（会动 onboarding 流程）。
+本模块是三把尺子的唯一事实源，组件与历史导入入口均直接引用。
 """
 from __future__ import annotations
 
@@ -91,10 +80,7 @@ Restraint:
 · One "meetings + high heart rate + argument" is ONE thick card (one thing), not three thin ones.
 · If nothing is worth remembering, write nothing. Most small talk does not need a card, and that is normal."""
 
-#: history_import 的尺子在 genesis 的 FACT_MAP_PROMPT 里**不连续** ——
-#: 开头讲「抽什么」，中间隔着防火墙段，之后才是「不抽什么」。
-#: 拆成两个片段、由 genesis 在**原位置原顺序**分别拼回，就既消除了副本、
-#: 又不移动任何文本（codex review 2026-08-14 给的解法；此前误判为「抽不出来」）。
+#: history_import 保留 opening/filter 两段，便于提示词在各自语义位置插入。
 HISTORY_IMPORT_OPENING_RUBRIC = """You are reading ONE CHUNK of a real conversation history between this person and their companion.
 Extract candidate FACTS worth keeping long term: durable facts about this person and about their relationship.
 This is the candidate stage — turning them into cards and deduplicating happens later."""
@@ -103,9 +89,7 @@ HISTORY_IMPORT_FILTER_RUBRIC = """Do not extract small talk, passing moods, joke
 
 _RUBRIC_HISTORY_IMPORT = HISTORY_IMPORT_OPENING_RUBRIC + "\n" + HISTORY_IMPORT_FILTER_RUBRIC
 
-#: curated_archive 由两段组成 —— genesis 的 map 阶段与 write 阶段各挂一段。
-#: **本模块是这两段的唯一来源**，genesis/prompts.py 直接引用它们，不再各写一份。
-#: 文字逐字保留原样（含半角标点），因为改措辞就是改 prompt 行为。
+#: curated_archive 由候选筛选与写卡两段规则组成，本模块是唯一来源。
 KEEP_ALL_MAP_SUFFIX = """★ This chunk is an archive this person CURATED BY HAND for long-term keeping — it is not a chat log.
 Nearly every statement in it is something they deliberately wanted kept.
 Preserve EVERY candidate fact. Do not filter with "small talk / one-off / not durable enough" — the only things to drop are blank lines, headings, and obviously meaningless repetition. When in doubt, keep it."""
@@ -119,7 +103,7 @@ _RUBRIC_CURATED_ARCHIVE = KEEP_ALL_MAP_SUFFIX + "\n\n" + KEEP_ALL_WRITE_SUFFIX
 
 
 # --------------------------------------------------------------------------- #
-# 共用的结构性规则（⏸ 已写好，尚未接线 —— 见下方说明）
+# 共用的结构性规则（已由 capture prompt 三档共同使用）
 # --------------------------------------------------------------------------- #
 
 #: ⚠️ 这段有两条来之不易的约束，改之前先读完。
@@ -220,35 +204,8 @@ def language_rule(
     return "\n".join(out)
 
 
-# ⏸ **本模块的 language_rule 目前没有任何调用方** —— 这是有意的。
-#
-# 现状：同一条语言规则在两处各写一遍，措辞和标点都不同：
-#
-#   capture   语言：所有字段（bucket/threads/summary/content）用你们对话的语言记——
-#             中文对话就用中文（用「宠物」不是「pets」、「旅行」不是「travel」），
-#             英文对话用英文；只有专有名词/品牌名/这个人的原话才保留原文。
-#
-#   genesis   语言:bucket/threads/summary/content 用素材原文的语言——中文素材就用中文
-#             (用「宠物」不是「pets」),别归成英文桶/线索;专有名词/原话保留原文。
-#
-# 查过之后发现**差别不只是措辞**：capture 的依据是「当前对话说什么语言」，
-# genesis 的依据是「导入的材料是什么语言」。日常聊天时两者一致，但导入一批英文
-# 历史记录、而用户现在说中文时会分叉 —— 那时 genesis 那条更合理（卡应该跟素材走）。
-#
-# 所以统一的正确形态是：**措辞、举例、标点全部共用，只把「依据」参数化**，
-# 正是上面这个模板。
-#
-# 为什么还没接线：接上去会同时改动 capture 与 genesis 两处的 prompt 文本
-# （上面的模板合并了两边各自独有的要点 —— capture 的「旅行不是 travel」
-# 与 genesis 的「别归成英文桶/线索」）。**prompt 行为的 bug 单测抓不到**
-# （capture/migrate 的单测都 stub 掉了 agent），必须配一次真模型 e2e：
-# 本地起服务，分别跑一轮 capture 与 genesis 导入，比对改前改后的落卡语言分布。
-#
-# 接线方式（e2e 通过后）：
-#   1. capture 模板里那段语言规则换成 {language_rule} 占位符
-#   2. build_capture_prompt 里传 language_rule(resolved.name)
-#   3. genesis/prompts.py 的对应段同样替换
-#   4. 各档位重新生成 golden fixture
+# ``prompts.capture.build_capture_prompt`` 直接调用上面的 ``language_rule``。
+# locale 已知时按花园语言写死；未知时对话档跟随对话、导入档跟随材料主语言。
 
 
 # --------------------------------------------------------------------------- #

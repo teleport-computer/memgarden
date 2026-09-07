@@ -1,11 +1,12 @@
 """DSH 完整验收 —— sevenfloor §8.2 的场景，一次跑完。
 
-覆盖四组：
+覆盖五组：
 
     A  自动落卡 + 跨会话自动召回（模型不主动调工具）
     B  模型主动调 memgarden_memory_search / memory_write
     C  多 agent 隔离：另一个 agent 读不到别人的私有记忆
     D  失败路径：子进程不存在 / 握手不兼容 / 模型返回空 / 会话不存在
+    E  modelless service 下 Maintenance/Dream 仍由 DSH 模型驱动
 
 跑法：
 
@@ -44,19 +45,22 @@ def check(ok: bool, name: str, detail: str = "") -> bool:
 class Env:
     """一套独立的 DSH home + 花园库。每组用例各起一套，互不干扰。"""
 
-    def __init__(self, tenant: str = "u1", *, bad_bin: str | None = None) -> None:
+    def __init__(self, tenant: str = "u1", *, owner: str | None = None,
+                 garden: pathlib.Path | None = None,
+                 bad_bin: str | None = None) -> None:
         self.dir = pathlib.Path(tempfile.mkdtemp(prefix="dsh-acc-"))
         self.home = self.dir / "home"
-        self.garden = self.dir / "garden.db"
+        self.garden = garden or self.dir / "garden.db"
         self.workspace = self.dir / "ws"
         self.workspace.mkdir(parents=True)
         self.log = self.dir / "mg.log"
+        self.state_dir = self.dir / "state"
         self.tenant = tenant
+        self.owner = owner or tenant
         self.dsh_bin = _dsh_bin()
-        self._init_profile()
-        self._write_patch(bad_bin or _memgarden_bin())
+        self._init_profile(bad_bin or _memgarden_bin())
 
-    def _init_profile(self) -> None:
+    def _init_profile(self, bin_path: str) -> None:
         subprocess.run(
             [str(self.dsh_bin), "--profile", "sdk-minimal", "--dump-default-config"],
             env={**os.environ, "DSH_HOME": str(self.home)},
@@ -69,23 +73,19 @@ class Env:
         # 走产品路：用随包发布的 Adapter + CLI 装，不再手工连 symlink。
         subprocess.run([_memgarden_bin(), 'install-dsh',
                         '--dsh-home', str(self.home),
-                        '--tenant', self.tenant, '--owner', self.tenant],
+                        '--tenant', self.tenant, '--owner', self.owner,
+                        '--bin', bin_path,
+                        '--storage', str(self.garden),
+                        '--state-dir', str(self.state_dir)],
                        check=True, stdout=subprocess.DEVNULL)
 
-    def _write_patch(self, bin_path: str) -> None:
+        # 验收必须验「真安装出来的配置」。以前这里 install 后又
+        # 手写覆盖 cordis.patch.yml，恰好把 memoryOwner / stateDir 丢了：
+        # 脚本看似在验 Adapter，实际插件会因没 owner 直接不启用。
         patch = self.home / "profiles" / "sdk-minimal" / "cordis.patch.yml"
-        patch.write_text(
-            "- insert:\n"
-            "    - id: memgarden\n"
-            "      name: 'dsh-memgarden'\n"
-            "      inject: [tools, llm]\n"
-            "      config:\n"
-            f"        bin: '{bin_path}'\n"
-            f"        storage: 'sqlite:///{self.garden}'\n"
-            f"        tenant: '{self.tenant}'\n"
-            "        locale: 'zh-Hans'\n",
-            encoding="utf-8",
-        )
+        installed = patch.read_text(encoding="utf-8")
+        assert f"memoryOwner: '{self.owner}'" in installed
+        assert f"stateDir: '{self.state_dir}'" in installed
 
     def harness(self) -> DeepSeekHarness:
         os.environ["MEMGARDEN_DEBUG_LOG"] = str(self.log)
@@ -107,6 +107,33 @@ class Env:
 
     def logs(self) -> str:
         return self.log.read_text(encoding="utf-8") if self.log.exists() else ""
+
+    def seed_cards(self, count: int) -> None:
+        """用公开 wire API 预置卡，不直接改 SQLite 内部表。"""
+        scope = {
+            "tenant_id": self.tenant,
+            "memory_owner_id": self.owner,
+            "actor": {"user_id": self.tenant, "agent_id": "acceptance-seed"},
+            "allowed_mounts": ["agent-private"],
+        }
+        requests = [
+            {"id": str(i), "method": "records.write", "params": {
+                "scope": scope,
+                "text": f"验收用稳定事实 {i}",
+                "bucket": "general",
+                "idempotency_key": f"acceptance-seed-{i}",
+            }}
+            for i in range(count)
+        ]
+        proc = subprocess.run(
+            [_memgarden_bin(), "serve", "--storage", f"sqlite:///{self.garden}"],
+            input="".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests),
+            capture_output=True, text=True, timeout=60,
+        )
+        replies = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
+        assert proc.returncode == 0 and len(replies) == count
+        assert all(r.get("ok") and not (r.get("result") or {}).get("error")
+                   for r in replies), replies
 
     def cleanup(self) -> None:
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -185,21 +212,22 @@ def group_b() -> None:
 # --------------------------------------------------------------------------- #
 
 def group_c() -> None:
-    print("\nC. 多 agent 隔离")
-    a = Env(tenant="tenant-a")
-    b = Env(tenant="tenant-b")
+    print("\nC. 同租户、跨 owner 隔离")
+    a = Env(tenant="shared-tenant", owner="owner-a")
+    b = Env(tenant="shared-tenant", owner="owner-b", garden=a.garden)
     try:
         with a.harness() as h:
             h.run("我对花生过敏。简短回一句。", session_id="A")
         check(bool(a.cards()), "A 记下了自己的事", f"{len(a.cards())} 张")
 
-        # B 用**同一个花园库**，但 tenant 不同 —— 必须读不到 A 的
-        b.garden.unlink(missing_ok=True)
-        shutil.copy(a.garden, b.garden)
+        # B 用**同一 tenant、同一 SQLite 文件**，只换 owner。
+        # 这才是 memory_owner_id 新增后要证明的隔离边界；旧脚本换的
+        # 是 tenant，只能证明原本就有的 tenant 隔离。
         with b.harness() as h:
             r = h.run("我有什么忌口吗？一句话。", session_id="B")
             reply = r.final_response or ""
-        check("花生" not in reply, "另一个租户读不到（同一个库）", reply[:40])
+        check("花生" not in reply,
+              "同租户的另一个 owner 读不到（同一个库）", reply[:40])
         check("召回 0 条" in b.logs(), "召回结果确实是空的")
     finally:
         a.cleanup()
@@ -238,7 +266,11 @@ def group_d() -> None:
 
     # D3 没配模型时，需要模型的方法要给出说得清的错
     out = _rpc({"id": "1", "method": "capture.run",
-                "params": {"scope": {"tenant_id": "t"}, "window": "x",
+                "params": {"scope": {
+                               "tenant_id": "t", "memory_owner_id": "owner",
+                               "actor": {"user_id": "t", "agent_id": "dsh"},
+                               "allowed_mounts": ["agent-private"],
+                           }, "window": "x",
                            "locale": "zh-Hans"}})
     code = (out.get("error") or {}).get("code", "")
     check(code == "model_not_configured",
@@ -247,6 +279,28 @@ def group_d() -> None:
     # D4 不需要模型的方法照常可用
     out = _rpc({"id": "1", "method": "manifest.get", "params": {}})
     check(out.get("ok") is True, "不需要模型的方法不受影响")
+
+
+# --------------------------------------------------------------------------- #
+# E. modelless service 下的自动整理
+# --------------------------------------------------------------------------- #
+
+def group_e() -> None:
+    print("\nE. Maintenance/Dream 也由 DSH 模型驱动")
+    env = Env(tenant="dream-tenant", owner="dream-owner")
+    try:
+        # 默认阈值是 10 张 seed card。用 wire 写入而不是直接改表，
+        # 确保验收不依赖 SQLite 内部结构。
+        env.seed_cards(10)
+        with env.harness() as h:
+            h.run("请简短回答：好的。", session_id="M")
+        logs = env.logs()
+        check("该整理了" in logs, "达到阈值后确实进入整理")
+        check("整理结果" in logs and "model_not_configured" not in logs,
+              "Maintenance 穿过 begin/feed，没调 modelless maintenance.run",
+              next((line for line in logs.splitlines() if "整理结果" in line), ""))
+    finally:
+        env.cleanup()
 
 
 def _rpc(request: dict) -> dict:
@@ -272,7 +326,7 @@ def main() -> int:
     print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden")
     print("=" * 66)
 
-    for group in (group_a, group_b, group_c, group_d):
+    for group in (group_a, group_b, group_c, group_d, group_e):
         try:
             group()
         except Exception as exc:      # noqa: BLE001

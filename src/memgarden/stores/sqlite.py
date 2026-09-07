@@ -29,7 +29,7 @@ import re
 import threading
 from pathlib import Path
 
-from ._ops import apply_ops
+from ._ops import apply_ops, new_seed_mounts
 from ..storage import (
     FULL_CAPABILITIES,
     ApplyResult,
@@ -37,12 +37,12 @@ from ..storage import (
     IdempotencyConflict,
     RevisionConflict,
     Snapshot,
-    mutations_digest,
+    apply_digest,
 )
 
 #: schema 版本。**加字段/加表就要 +1**,并在 _migrate 里补上对应的升级动作 ——
 #: 只改 _SCHEMA 里的 CREATE TABLE IF NOT EXISTS 对旧库一点作用都没有。
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 #: 这个 store 自己分配的 id 形状。宿主塞进来的 id 不长这样,也不该被计数器管。
 _NUMERIC_ID = re.compile(r"m_(\d+)")
@@ -90,6 +90,15 @@ CREATE TABLE IF NOT EXISTS maintenance_state (
     revision        TEXT NOT NULL DEFAULT '',
     updated_at      TEXT NOT NULL DEFAULT '',
     schema_version  INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (tenant, owner, mount)
+);
+-- 原始 seed 的只增水位。hard delete 只删卡和正文，不让计数回退；否则删除
+-- 一张再新增一张会被净数量抵消，Maintenance 永远看不到那次新增。
+CREATE TABLE IF NOT EXISTS seed_generations (
+    tenant     TEXT NOT NULL,
+    owner      TEXT NOT NULL DEFAULT '',
+    mount      TEXT NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (tenant, owner, mount)
 );
 """
@@ -246,6 +255,38 @@ class SqliteStore:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS cards_by_owner ON cards(tenant, owner)")
 
+        # ④ v3：给只增 seed 水位播种。旧库无法恢复过去已经 hard-delete 的
+        # 次数，只能从仍存在的非 Dream 卡开始；升级后的新增不再被删除抵消。
+        seeded: dict[tuple[str, str, str], int] = {}
+        for tenant, owner, doc in conn.execute(
+            "SELECT tenant, owner, doc FROM cards"
+        ).fetchall():
+            card = json.loads(doc)
+            if str(card.get("source") or "") == "memory_dream":
+                continue
+            key = (tenant, owner,
+                   str(card.get("mount") or "agent-private"))
+            seeded[key] = seeded.get(key, 0) + 1
+        for (tenant, owner, mount), generation in seeded.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO seed_generations"
+                "(tenant, owner, mount, generation) VALUES(?,?,?,?)",
+                (tenant, owner, mount, generation),
+            )
+        # v2 可能已有比当前存量更高的整理水位。若 ledger=10、hard delete 后
+        # 只剩 1 张，仅按现存卡回填为 1 会让后续新增在很长一段时间内仍算 0。
+        # 迁移后的只增水位至少要等于账本已经确认处理过的 seed 数。
+        for tenant, owner, mount, ledger_count in conn.execute(
+            "SELECT tenant, owner, mount, seed_card_count FROM maintenance_state"
+        ).fetchall():
+            conn.execute(
+                "INSERT INTO seed_generations"
+                "(tenant, owner, mount, generation) VALUES(?,?,?,?) "
+                "ON CONFLICT(tenant,owner,mount) DO UPDATE SET generation="
+                "MAX(seed_generations.generation, excluded.generation)",
+                (tenant, owner, mount, int(ledger_count)),
+            )
+
     @staticmethod
     def _seed_next_id(conn: sqlite3.Connection, tenant: str, owner: str) -> int:
         """从已有卡片 id 推出「下一个安全编号」。
@@ -283,8 +324,15 @@ class SqliteStore:
                 cards = [c for c in cards if not c.get("archived")]
             if not filters.get("include_superseded"):
                 cards = [c for c in cards if not c.get("superseded_by")]
+            generations = {
+                str(mount): int(value)
+                for mount, value in conn.execute(
+                    "SELECT mount, generation FROM seed_generations "
+                    "WHERE tenant=? AND owner=?", (tenant, owner)
+                ).fetchall()
+            }
             return Snapshot(cards=cards, revision=self._rev(conn, tenant, owner),
-                            owner=owner)
+                            owner=owner, seed_generations=generations)
 
     def maintenance_state(self, tenant: str, *, owner: str, mount: str) -> dict:
         """上一次整理留下的账本。没有就返回空 dict。
@@ -320,34 +368,35 @@ class SqliteStore:
     ) -> ApplyResult:
         tenant, owner = _scope(tenant, owner)
         with self._lock, self._connect() as conn:
-            digest = mutations_digest(mutations)
-            cached = conn.execute(
-                "SELECT result, digest FROM applied "
-                "WHERE tenant=? AND owner=? AND key=?",
-                (tenant, owner, idempotency_key),
-            ).fetchone()
-            if cached:
-                # 同 key 必须同内容。不同内容不是重放，是两个不同请求撞了 key ——
-                # 静默返回旧结果会让第二批改动凭空消失，而调用方以为写成功了。
-                if cached[1] and cached[1] != digest:
-                    raise IdempotencyConflict(idempotency_key)
-                payload = json.loads(cached[0])
-                return ApplyResult(results=payload["results"],
-                                   revision=payload["revision"])
-
+            digest = apply_digest(mutations, maintenance_state)
+            # 幂等 lookup 必须在写事务里。两个独立进程若都在 BEGIN 之前 miss，
+            # 第二个最后只会撞 applied 唯一键，而不是按契约返回第一次的回执。
             conn.execute("BEGIN IMMEDIATE")
             try:
+                cached = conn.execute(
+                    "SELECT result, digest FROM applied "
+                    "WHERE tenant=? AND owner=? AND key=?",
+                    (tenant, owner, idempotency_key),
+                ).fetchone()
+                if cached:
+                    if cached[1] and cached[1] != digest:
+                        raise IdempotencyConflict(idempotency_key)
+                    payload = json.loads(cached[0])
+                    conn.execute("COMMIT")
+                    return ApplyResult(results=payload["results"],
+                                       revision=payload["revision"])
                 current = self._rev(conn, tenant, owner)
                 if expected_revision is not None and expected_revision != current:
                     raise RevisionConflict(expected_revision, current)
 
-                # 🔴 六个 op 走**和 InMemoryStore 完全同一份**执行器。
+                # 🔴 七个 op 走**和 InMemoryStore 完全同一份**执行器。
                 # 各写一份的后果是行为漂移，而漂移不报错：接入方在一个 store
                 # 上测通、换另一个上线，某个 op 静默变成了别的语义。
                 # 代价是这一批要把该 owner 的卡读进内存 —— 这个参考实现面向
                 # 「开箱即用」，不面向超大库；真要扛量应当自己写适配器。
                 before = self._cards_of(conn, tenant, owner)
                 staged = {k: dict(v) for k, v in before.items()}
+                self._reserve_supplied_ids(conn, tenant, owner, mutations)
                 results = apply_ops(
                     staged, mutations,
                     new_id=lambda: self._next_id(conn, tenant, owner))
@@ -360,13 +409,27 @@ class SqliteStore:
                     if before.get(card_id) != card:
                         self._put(conn, tenant, owner, card)
 
-                new_rev = str(int(current) + 1)
-                conn.execute(
-                    "INSERT INTO revisions(tenant, owner, revision) VALUES(?,?,?) "
-                    "ON CONFLICT(tenant, owner) DO UPDATE SET "
-                    "revision=excluded.revision",
-                    (tenant, owner, int(new_rev)),
-                )
+                seed_mounts = new_seed_mounts(
+                    mutations, before=before, staged=staged)
+                for mount in seed_mounts:
+                    conn.execute(
+                        "INSERT INTO seed_generations"
+                        "(tenant, owner, mount, generation) VALUES(?,?,?,1) "
+                        "ON CONFLICT(tenant, owner,mount) DO UPDATE SET "
+                        "generation=seed_generations.generation+1",
+                        (tenant, owner, mount),
+                    )
+
+                changed = (staged != before or bool(seed_mounts)
+                           or maintenance_state is not None)
+                new_rev = str(int(current) + 1) if changed else current
+                if changed:
+                    conn.execute(
+                        "INSERT INTO revisions(tenant, owner, revision) VALUES(?,?,?) "
+                        "ON CONFLICT(tenant, owner) DO UPDATE SET "
+                        "revision=excluded.revision",
+                        (tenant, owner, int(new_rev)),
+                    )
                 conn.execute(
                     "INSERT INTO applied(tenant, owner, key, result, digest) "
                     "VALUES(?,?,?,?,?)",
@@ -453,6 +516,31 @@ class SqliteStore:
             (tenant, owner, n + 1),
         )
         return f"m_{n}"
+
+    def _reserve_supplied_ids(
+        self, conn: sqlite3.Connection, tenant: str, owner: str,
+        mutations: list[dict],
+    ) -> None:
+        highest = 0
+        for mutation in mutations:
+            card = mutation.get("card")
+            supplied = str(card.get("id") or "") if isinstance(card, dict) else ""
+            match = _NUMERIC_ID.fullmatch(supplied)
+            if match:
+                highest = max(highest, int(match.group(1)))
+        if not highest:
+            return
+        row = conn.execute(
+            "SELECT next_id FROM id_counters WHERE tenant=? AND owner=?",
+            (tenant, owner),
+        ).fetchone()
+        current = int(row[0]) if row else self._seed_next_id(conn, tenant, owner)
+        next_id = max(current, highest + 1)
+        conn.execute(
+            "INSERT INTO id_counters(tenant, owner, next_id) VALUES(?,?,?) "
+            "ON CONFLICT(tenant, owner) DO UPDATE SET next_id=excluded.next_id",
+            (tenant, owner, next_id),
+        )
 
     def _rev(self, conn: sqlite3.Connection, tenant: str, owner: str) -> str:
         """版本号的作用域也是 (tenant, owner)。

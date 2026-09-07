@@ -1,15 +1,15 @@
-"""六个 mutation 落到「一堆卡」上的**唯一**一份实现。
+"""七个 mutation 落到「一堆卡」上的**唯一**一份实现。
 
 ## 为什么要抽出来
 
 两个官方 Store 各写一份的直接后果是行为漂移，而漂移不报错：
 接入方在 InMemory 上测通，换 SQLite 上线，``archive`` 那条静默变成了别的语义。
-sevenfloor 2026-09-06 复现的正是这个形状 —— 声明里有六个 op，
-两个 Store 实际只执行三个，另外三个抛 ``unknown op``。
+sevenfloor 2026-09-06 复现的正是这个形状 —— 声明里有多个 op，
+两个 Store 实际只执行其中一部分，其余抛 ``unknown op``。
 
 所以：**声明了几个 op，这里就必须执行几个**，Store 只负责怎么存。
 
-## 生命周期语义（六个 op 必须一致）
+## 生命周期语义（七个 op 必须一致）
 
     add        新卡进来，active
     update     就地改字段。**不能改 id / 归属 / 生命周期状态** ——
@@ -31,6 +31,9 @@ from ..storage import MutationRejected
 #: ``update`` 不许碰的字段。改这些等于换一张卡，必须走专门的 op。
 _IMMUTABLE = frozenset({"id", "owner", "tenant", "archived", "superseded_by",
                         "deleted",
+                        # 创建来源身份只能由可信 Scope 在 add/supersede 时写入；
+                        # 普通 update 若能改它，provenance 就只是可伪造的标签。
+                        "source_actor", "source", "source_material_kind",
                         # 🔴 mount 也在里面。少了它就是一条**提权路径**：
                         # MountedGarden._apply 只校验 mutation 顶层的 mount，
                         # 而 changes={"mount": "family-shared"} 会绕过那道检查
@@ -73,7 +76,8 @@ def apply_ops(
             if supplied and supplied in staged:
                 raise MutationRejected(
                     f"add 的 id 已存在: {supplied}（要改已有的卡请用 update）")
-            card.setdefault("id", new_id())
+            if not supplied:
+                card["id"] = _fresh_id(staged, new_id)
             staged[card["id"]] = card
             results.append({"id": card["id"], "status": "written"})
 
@@ -120,7 +124,8 @@ def apply_ops(
                 raise MutationRejected(
                     f"supersede 的新卡 id 已存在: {supplied}"
                     "（新卡必须是新的，否则会盖掉它要取代的历史）")
-            new_card.setdefault("id", new_id())
+            if not supplied:
+                new_card["id"] = _fresh_id(staged, new_id)
             for old_id in targets:
                 staged[old_id] = {**staged[old_id],
                                   "superseded_by": new_card["id"],
@@ -164,6 +169,48 @@ def apply_ops(
             raise MutationRejected(f"unknown op: {op}")
 
     return results
+
+
+def _fresh_id(staged: dict[str, dict], new_id: Callable[[], str]) -> str:
+    """从 Store 分配器取得一个确实未占用的 ID，且失败必须有界。
+
+    外部导入允许预置 ID，所以分配器的下一号可能早已存在。直接 upsert 会把
+    用户的旧卡静默覆盖；无限循环则会让坏适配器卡死整个 worker。
+    """
+    for _attempt in range(10_000):
+        candidate = str(new_id() or "").strip()
+        if candidate and candidate not in staged:
+            return candidate
+    raise MutationRejected("store id allocator did not produce a fresh id")
+
+
+def new_seed_mounts(
+    mutations: list[dict], *, before: dict[str, dict] | None = None,
+    staged: dict[str, dict] | None = None,
+) -> list[str]:
+    """返回这批新产生的非 Dream 卡所在 mount；一项代表一个 seed。"""
+    out: list[str] = []
+    for mutation in mutations:
+        op = str(mutation.get("op") or "add")
+        if op == "promote":
+            target = str(mutation.get("record_id") or mutation.get("target_id")
+                         or "").strip()
+            destination = str(mutation.get("to_mount") or "").strip()
+            prior = str(((before or {}).get(target) or {}).get("mount")
+                        or "agent-private")
+            after = str(((staged or {}).get(target) or {}).get("mount")
+                        or "agent-private")
+            if destination and after == destination and prior != after:
+                out.append(destination)
+            continue
+        if op not in {"add", "supersede"}:
+            continue
+        card = dict(mutation.get("card") or {})
+        if str(card.get("source") or "") == "memory_dream":
+            continue
+        out.append(str(mutation.get("mount") or card.get("mount")
+                       or "agent-private"))
+    return out
 
 
 def _target(m: dict, primary: str) -> str:

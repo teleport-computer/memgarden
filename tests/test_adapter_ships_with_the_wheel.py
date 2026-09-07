@@ -12,7 +12,10 @@ Adapter 和这个包共用同一套 wire 协议。哪天有人把 `.mjs` 从 `ar
 from __future__ import annotations
 
 import json
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 from pathlib import Path
 
 from memgarden.adapters.dsh import PACKAGE_JSON, PLUGIN

@@ -241,7 +241,7 @@ def _cmd_serve(args) -> int:
         selection_policy=Chain(stages=(RelevanceStage(limit=8),
                                        RecentStage(limit=4))),
     )
-    Service(garden).serve()
+    Service(garden, model_available=bool(args.model)).serve()
     return 0
 
 
@@ -261,7 +261,8 @@ class _NoModel:
             "model_not_configured",
             "这个服务没有配模型（启动时加 --model），"
             f"但 {purpose or '这次调用'} 需要它；"
-            "宿主自己驱动模型时请改用 capture.begin / capture.feed",
+            "宿主自己驱动模型时请改用对应的 begin / feed "
+            "（capture 或 maintenance）",
         )
 
 

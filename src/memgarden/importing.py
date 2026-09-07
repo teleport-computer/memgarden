@@ -38,6 +38,12 @@ class ImportProgress:
 
     cursor: int = 0
     total: int = 0
+    #: 整份输入材料的摘要。断点只能用于同一份材料；否则旧 cursor 会让新材料
+    #: 的开头被静默跳过。
+    source_digest: str = ""
+    #: 材料 + scope + mount + locale + policy + 名称 + 幂等前缀 + 批次规则的
+    #: 摘要。相同正文换一套导入语义也不能沿用旧 cursor。
+    import_fingerprint: str = ""
     batches_done: int = 0
     cards_written: int = 0
     #: 被跳过的批次和原因。**空结果不算失败** —— 某一批确实没什么可记是正常的。

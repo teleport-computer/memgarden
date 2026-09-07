@@ -60,11 +60,16 @@ class Card:
     role: str = ""
     #: 敏感内容 —— 宿主据此决定要不要在日常闲聊里主动提起。
     is_sensitive: bool = False
-    #: 这张卡从哪来（哪次落卡、哪次导入）。
+    #: 这张卡从哪来（哪次落卡、哪次导入）。``memory_dream`` 是内核保留值。
     source: str = ""
+    #: 导入材料的宿主类型（如 diary/chat_export），由可信调用参数写入。
+    source_material_kind: str = ""
+    #: 可信宿主注入的操作身份。MountedGarden 会覆盖模型给出的同名字段。
+    source_actor: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
-        return {k: v for k, v in asdict(self).items() if v not in ("", [], None)}
+        return {k: v for k, v in asdict(self).items()
+                if v not in ("", [], {}, None)}
 
 
 @dataclass

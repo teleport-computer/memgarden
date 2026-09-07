@@ -15,7 +15,9 @@ MountedGarden     判断 + 存储都接上：load → 判断 → 原子写回 �
                   记忆归属、并发、生命周期、删除这些语义归它管
 ```
 
-模型调用**始终**是宿主的事：这个包不持有 key，也不知道你用的哪个 provider。
+模型与凭证**始终由宿主提供**：可以注入 Python API，也可以通过
+`capture.begin/feed`、`maintenance.begin/feed` 让 Runtime 用自己的 provider、
+超时、取消、用量和重试机制驱动；这个包不持有 key，也不绑定 provider。
 
 装：
 
@@ -33,8 +35,8 @@ memgarden install-dsh --tenant <租户> --owner <这座花园的所有者>
 想验来源的话，每次发版的 wheel 都同时挂在 GitHub Release 上，带**构建出处凭证**：
 
 ```bash
-gh release download v0.12.8 --repo teleport-computer/memgarden --pattern '*.whl'
-gh attestation verify memgarden-0.12.8-py3-none-any.whl --repo teleport-computer/memgarden
+gh release download <tag> --repo teleport-computer/memgarden --pattern '*.whl'
+gh attestation verify <downloaded-wheel.whl> --repo teleport-computer/memgarden
 ```
 
 > 每个 wheel 都由 GitHub Actions 从公开 tag 构建，PyPI 走 Trusted Publishing，
@@ -100,8 +102,9 @@ cd examples/demo-agent && python agent.py --fake     # 不用 key
 ```
 在库里          什么值得记 · 怎么归桶起线索 · 模型输出怎么校验 · 怎么去重
                 这轮该想起哪几张 · 要不要整理了 · 整理时怎么合并消矛盾
+                MountedGarden 的 load/CAS/幂等/生命周期/owner 边界/整理账本编排
 
-不在库里        调模型 · 加解密 · 存储 · 身份装配 · 权限 · 定时器 · 审计
+不在库里        模型/provider 凭证 · 加解密 · 生产存储选型 · 认证 · 定时器 · 审计
 ```
 
 ---
@@ -194,6 +197,14 @@ result = policy.select(cards, query="我的狗是什么品种", limit=8)
 `dreaming.py` 判断攒够了没：新卡计数、快照签名、幂等键。
 「多久整理一次、夜里几点跑、失败怎么退避」是宿主的调度策略，不在库里。
 
+整理有两种等价入口：`maintenance.run` 使用注入给服务的模型；
+`maintenance.begin/feed/cancel` 由宿主调用自己的模型。两条路共用同一状态机、
+Store-aware 快照、CAS 与持久账本；整理产物不计入下一轮水位线。
+
+Host-driven 会话是进程内的短暂编排状态，不是持久记忆：默认闲置 15 分钟过期，
+Capture 与 Maintenance 合计最多 1024 个在途会话。达到上限返回结构化
+`session_capacity`；过期后 feed 返回 `unknown_session`，宿主应重新 begin。
+
 ### 5. 卡该怎么写
 
 `text/` 里是一组硬规则：不许留占位符、不许把协议残片写进正文、
@@ -223,39 +234,61 @@ result = policy.select(cards, query="我的狗是什么品种", limit=8)
 
 ### 插口 1：存储
 
-实现三个方法（`storage.StoragePort`）：
+实现四个方法（`storage.StoragePort`）：
 
 ```python
 capabilities() -> Capabilities                    # 你支持什么、不支持什么
 load(tenant, *, owner, **filters) -> Snapshot     # 卡片 + 版本号（用于 CAS）
 apply(tenant, mutations, *, owner, idempotency_key,
       expected_revision, maintenance_state=None) -> ApplyResult
-maintenance_state(tenant, *, owner, mount) -> dict     # 整理账本（可选）
+maintenance_state(tenant, *, owner, mount) -> dict     # 整理账本（必需）
 ```
+
+`maintenance_state` 不是性能优化：读不到账本时 Maintenance 会 fail closed。
+假装空账本继续跑，会在一次重启或短暂读故障后重复整理同一批记忆。
 
 🔴 **`owner` 必须落到查询条件里**，不能读回整个 tenant 再由调用方过滤。
 两者在正常情况下结果一样，差别只在出错时才看得见：漏一处过滤，
 前者读不到、后者读得到 —— 而后者不会报错。
 
-**四条硬要求**，缺了会被拒绝而不是降级：
+**六项正确性要求**，缺了会拒绝相应能力而不是静默降级：
 
 ```
 supersede        更新记忆必须是「旧的归档 + 新的写入」，不许硬删
 atomic_batch     一批要么全成、要么全不成，不许留半截
 hard_delete      用户说删就真删。降级成归档 = 界面说删了、库里还在
 owner_scoping    查询层能限制在一个 owner 内。降级成事后过滤 = 越权读
+maintenance_state
+                 整理账本和卡改动在同一原子提交中持久化
+monotonic_seed_generation
+                 每个 mount 的原始卡水位只增不减，hard delete 不能让它回退
 ```
 
-`Capabilities` **没有默认值**，每一项都要显式声明；不实现 `capabilities()`
-的存储会被当作**全部不支持**（fail closed）。
+前四项分别约束相关写入/删除/隔离；后两项缺失时，Capture、Browse 等仍可用，
+但 Manifest 会把 `maintenance` 明确声明为 `false`。
+
+`Capabilities` 的原始六项没有默认值；后加的两项 Maintenance 能力默认
+`False`，让旧 Adapter 升级时不因构造参数变化直接崩溃，同时保持 fail closed。
+外部 Store 必须主动声明支持后才会开启 Maintenance；不实现 `capabilities()`
+会被当作**全部不支持**。
 
 其余能力缺了会**显式降级并说明代价**，不会静默变差 ——
-`describe_for_user(caps)` 直接给出人话说明。
+`describe_for_user(caps)` 直接给出人话说明，运行中服务也会在
+`manifest.storage.capabilities/degradations/user_notices` 返回真实 Store 的声明。
+`custom_fields` 的降级映射必须由 Store Adapter 实现（它才知道目标库的字段）；
+Garden 不会假装自己已替第三方库完成转换。DSH Adapter 会把这些提示写入日志。
 
 `stores/memory.py` 与 `stores/sqlite.py` 是两个参考实现，也是接口的活文档：
 两者跑**同一套契约测试**（`tests/test_store_contract.py`），
-六个 mutation 也走同一份执行器（`stores/_ops.py`）——
+七个 mutation（六个会改变卡片状态的操作，加上 `no_op`）也走同一份执行器
+（`stores/_ops.py`）——
 各写一份的话行为会漂，而漂了不报错。
+
+SQLite 参考实现有六类持久状态：`cards`（明文卡）、`revisions`（owner 级 CAS）、
+`applied`（幂等回执）、`id_counters`（只增不减的 ID）和
+`maintenance_state`（按 tenant/owner/mount 的整理账本）、
+`seed_generations`（按 tenant/owner/mount 的只增原始卡水位）。这些是参考实现，
+不是要求外部数据库照抄的表名；外部 Store 只需满足上面的行为契约。
 
 ### 插口 2：字段映射（你的卡片长得不一样）
 
@@ -312,7 +345,14 @@ class MyPolicy:
 ### 插口 4：来源标签
 
 「这张卡打哪来」是开放字符串，具体取值由你定 ——
-内核不该内置某个产品的 17 个来源枚举。
+内核不该内置某个产品的 17 个来源枚举。唯一保留值是 `memory_dream`，
+由 Maintenance 给整理产物打上，用来防止这些产物反过来触发下一轮整理。
+内置路径目前还会写入 `conversation_capture`、`history_import`、`curated` 和
+`model_tool`；外部适配器可以使用自己的来源名。
+
+`source_actor` 不是模型自由填写的标签：`MountedGarden` 会用可信 `Scope.actor`
+覆盖它，记录这张卡由哪个 user/agent/session 操作产生。稳定归属仍由 Store 的
+`(tenant, memory_owner_id)` 分区保证，不能拿 session 代替 owner。
 
 ---
 
@@ -344,7 +384,7 @@ class MyPolicy:
 ```
 已验证        判断逻辑可以独立发布、由外部宿主复用
               数据可以换一种保存方式（InMemory / SQLite 跑同一套契约测试，
-              六个 mutation 走同一份执行器）
+              七个 mutation 走同一份执行器）
               同租户不同 memory owner 的隔离（两个 Store 各跑一遍负向测试）
               在 pinned DSH 0.1.2-alpha.4 上不改 core 即可挂载，
               跨 Session 自动召回、轮末自动落卡、模型工具真实注册
@@ -356,6 +396,16 @@ class MyPolicy:
 ```
 
 **尚未验证的那几条目前只是设计目标，不能称为已经实现的事实。**
+
+### History Import 的完成语义
+
+`history.import` 会按字符边界串行分批，每批重读已写入的卡，返回可持久化的
+`ImportProgress`。续传时必须提交同一份材料；进度中的 `source_digest` 会阻止
+旧 cursor 被误用到新材料而静默跳过开头；`import_fingerprint` 还绑定 tenant、
+owner、mount、locale、policy、材料类型、AI/用户称呼、导入幂等键、单批卡数上限与分批规则，
+其中任一语义变化都必须从头开始。单批失败不推进 cursor，重试成功会
+清除旧失败；全空白材料也会进入完成态。`max_batches` 只限制本次工作量，
+不限制用户可导入的总量。
 
 ### 这一版还没做的
 
@@ -394,6 +444,24 @@ src/memgarden/
   observability.py   内容无关的可落库记录
   guards/            做梦的闸
 ```
+
+---
+
+## 八、开发与验收
+
+```bash
+uv run --extra dev pytest -q
+uv run --extra dev python evals/run.py --baseline evals/baseline.json
+uv run python examples/quickstart.py
+uv run python examples/mount_in_ten_minutes.py
+uv run python adapters/dsh-memgarden/e2e/failure_paths.py
+```
+
+`tests/test_dsh_adapter_offline.py` 会真正加载 DSH Adapter，并穿过真实
+`memgarden serve` 验证 host-driven Capture/Maintenance；它不需要网络和模型 key。
+真模型的提示词质量与真实 DSH 兼容性仍是独立证据，分别按 `evals/capture.py`
+和 `adapters/dsh-memgarden/e2e/dsh_acceptance.py` 的说明运行。没有 key 或 DSH
+安装时必须明确记为未运行，不能把 skip 算作通过。
 
 ---
 

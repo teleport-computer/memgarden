@@ -25,6 +25,14 @@
     → {"id": "2", "method": "capture.run", "params": {"scope": {...}, ...}}
     ← {"id": "2", "ok": false, "error": {"code": "invalid_mutation", "message": "…"}}
 
+自带 provider 的 Runtime 使用 host-driven 会话，不把 key 交给服务：
+
+    capture.begin / feed / cancel
+    maintenance.begin / feed / cancel
+
+两条 lane 都由服务生成 prompt、解析和写库，Runtime 只负责调用模型并把原始
+reply 与截断状态喂回来。
+
 **错误一律是结构化 code**（见 :data:`memgarden.schema.ERROR_CODES`），调用方
 按 code 分支，不要去解析 message 那句人话 —— 那句会改，code 不会。
 
@@ -38,10 +46,19 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from typing import Any, Callable, TextIO
 
 from .contracts import Actor, CaptureRequest, MaintenanceRequest, ToolCall
-from .mounted import DEFAULT_MOUNT, MountPermissionError, MountedGarden, Scope
+from .mounted import (
+    DEFAULT_MOUNT,
+    MaintenanceStorageError,
+    MountPermissionError,
+    MountedGarden,
+    OperationReceipt,
+    Scope,
+    StorageCapabilityError,
+)
 from .schema import WIRE_OPERATIONS, manifest, method_schemas, schemas
 from .validate import SchemaViolation, validate
 
@@ -49,6 +66,11 @@ from .validate import SchemaViolation, validate
 #: 冲突后最多重来几轮判断。**必须有界** —— 每一轮都要烧一次模型调用。
 #: 到顶了就如实回 revision_conflict，绝不对用户说「记住了」。
 _MAX_CAPTURE_RETRIES = 3
+
+#: Host-driven 会话只保存提示词编排状态，不是持久产品数据；宿主断连后若不
+#: cancel，必须自动回收。两个 lane 共用一个上限，避免换 method 绕过背压。
+_SESSION_TTL_SECONDS = 15 * 60
+_MAX_ACTIVE_SESSIONS = 1024
 
 
 class ServiceError(Exception):
@@ -95,7 +117,10 @@ def _as_dict(obj: Any) -> Any:
     from dataclasses import asdict, is_dataclass
 
     if is_dataclass(obj):
-        return asdict(obj)
+        # asdict 只展开 dataclass，本身不会保证 tuple 等嵌套值变成 JSON array。
+        # handle() 的直接调用结果也必须符合公开 schema，不能只靠最后 json.dumps
+        # 恰好替调用方做一次隐式转换。
+        return _as_dict(asdict(obj))
     if isinstance(obj, (list, tuple)):
         return [_as_dict(x) for x in obj]
     if isinstance(obj, dict):
@@ -106,13 +131,31 @@ def _as_dict(obj: Any) -> Any:
 class Service:
     """把一个 :class:`~memgarden.mounted.MountedGarden` 包成可远程调用的方法表。"""
 
-    def __init__(self, garden: MountedGarden) -> None:
+    def __init__(
+        self, garden: MountedGarden, *, model_available: bool | None = None,
+        session_ttl_seconds: float = _SESSION_TTL_SECONDS,
+        max_active_sessions: int = _MAX_ACTIVE_SESSIONS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.garden = garden
+        if session_ttl_seconds <= 0:
+            raise ValueError("session_ttl_seconds 必须大于 0")
+        if max_active_sessions < 1:
+            raise ValueError("max_active_sessions 必须至少为 1")
+        self._session_ttl_seconds = float(session_ttl_seconds)
+        self._max_active_sessions = int(max_active_sessions)
+        self._clock = clock
+        component = getattr(garden, "component", None)
+        inferred_model = getattr(component, "_model", None) is not None
+        self._model_available = (inferred_model if model_available is None
+                                 else bool(model_available))
         #: 进行中的 host-driven 落卡会话。见 _capture_begin。
         self._sessions: dict[str, dict] = {}
+        #: 进行中的 host-driven 整理会话。和 capture 分开，避免类型串用。
+        self._maintenance_sessions: dict[str, dict] = {}
         self._methods: dict[str, Callable[[dict], Any]] = {
             # ---- Runtime 生命周期面 ----
-            "manifest.get": lambda p: manifest(tuple(self._METHOD_NAMES)),
+            "manifest.get": lambda p: self._manifest(),
             "schema.get": lambda p: {"schemas": schemas(),
                                      "methods": method_schemas()},
             "health.get": lambda p: {"ok": True},
@@ -124,6 +167,9 @@ class Service:
             "context.get": self._context,
             "maintenance.check": self._maintenance_check,
             "maintenance.run": self._maintenance_run,
+            "maintenance.begin": self._maintenance_begin,
+            "maintenance.feed": self._maintenance_feed,
+            "maintenance.cancel": self._maintenance_cancel,
             "records.browse": self._browse,
             "records.export": self._export,
             "records.delete": self._delete,
@@ -153,9 +199,87 @@ class Service:
             raise RuntimeError(
                 f"这些方法没有 request/response schema: {sorted(missing_schema)}")
 
+    def _manifest(self) -> dict[str, Any]:
+        """返回当前装配的真实能力，而不是只有方法名的理想清单。"""
+        from dataclasses import asdict
+
+        from .storage import describe_for_user, plan_degradations
+
+        disabled: set[str] = set()
+        storage_info: dict[str, Any] = {"available": False}
+        if not self._model_available:
+            # 这两条没有 begin/feed host-driven lane，只能由服务自己的模型完成。
+            disabled.update({"history_import", "migrate"})
+        storage_capabilities = {
+            "capture", "turn_context", "maintenance", "model_tools", "tools",
+            "browse", "export", "delete", "curated_write", "promote", "migrate",
+            "history_import",
+        }
+        try:
+            store_caps = self.garden._store.capabilities()
+        except Exception:  # noqa: BLE001 - 能力声明坏了必须 fail closed
+            disabled.update(storage_capabilities)
+        else:
+            storage_info = {
+                "available": True,
+                "capabilities": asdict(store_caps),
+                "degradations": [asdict(item)
+                                 for item in plan_degradations(store_caps)],
+                "user_notices": describe_for_user(store_caps),
+            }
+            if not getattr(store_caps, "supports_owner_scoping", False):
+                disabled.update(storage_capabilities)
+            if not getattr(store_caps, "supports_hard_delete", False):
+                disabled.add("delete")
+            if not getattr(store_caps, "supports_atomic_batch", False):
+                disabled.update({"capture", "maintenance", "migrate",
+                                 "history_import"})
+            if not getattr(store_caps, "supports_supersede", False):
+                disabled.update({"capture", "maintenance", "history_import"})
+            if (not getattr(store_caps, "supports_maintenance_state", False)
+                    or not getattr(
+                        store_caps, "supports_monotonic_seed_generation", False)):
+                disabled.add("maintenance")
+        return {
+            **manifest(tuple(self._METHOD_NAMES),
+                       disabled_capabilities=disabled),
+            "storage": storage_info,
+        }
+
+    def _purge_expired_sessions(self) -> None:
+        cutoff = self._clock() - self._session_ttl_seconds
+        for sessions in (self._sessions, self._maintenance_sessions):
+            expired = [sid for sid, entry in sessions.items()
+                       if float(entry.get("_touched_at", 0)) <= cutoff]
+            for sid in expired:
+                sessions.pop(sid, None)
+
+    def _put_session(self, sessions: dict[str, dict], sid: str,
+                     entry: dict) -> None:
+        self._purge_expired_sessions()
+        active = len(self._sessions) + len(self._maintenance_sessions)
+        if sid not in sessions and active >= self._max_active_sessions:
+            raise ServiceError(
+                "session_capacity",
+                "host-driven 在途会话已达到容量上限；请取消旧会话或稍后重试",
+            )
+        sessions[sid] = {**entry, "_touched_at": self._clock()}
+
+    def _get_session(self, sessions: dict[str, dict], sid: str) -> dict | None:
+        self._purge_expired_sessions()
+        entry = sessions.get(sid)
+        if entry is not None:
+            entry["_touched_at"] = self._clock()
+        return entry
+
+    def _pop_session(self, sessions: dict[str, dict], sid: str) -> dict | None:
+        self._purge_expired_sessions()
+        return sessions.pop(sid, None)
+
     # -- 方法 ------------------------------------------------------------- #
 
     def _capture(self, p: dict) -> Any:
+        self._require_model()
         scope = _scope_from(p)
         return self.garden.capture_and_store(scope, CaptureRequest(
             window=str(p.get("window") or ""),
@@ -214,13 +338,16 @@ class Service:
                         scope, prepared, session.result(),
                         expected_revision=revision)}
         sid = uuid.uuid4().hex
-        self._sessions[sid] = {"session": session, "scope": scope,
-                               "request": prepared, "revision": revision}
+        self._put_session(self._sessions, sid, {
+            "session": session, "scope": scope,
+            "request": prepared, "base_request": request,
+            "revision": revision,
+        })
         return {"session_id": sid, "status": "needs_model", "next_prompt": prompt}
 
     def _capture_feed(self, p: dict) -> Any:
         sid = str(p.get("session_id") or "")
-        entry = self._sessions.get(sid)
+        entry = self._get_session(self._sessions, sid)
         if entry is None:
             # 说清楚是「不认识这个会话」,而不是含糊的 internal_error ——
             # 宿主据此决定重新 begin,而不是盲目重试同一个 id。
@@ -254,13 +381,16 @@ class Service:
         attempts = int(entry.get("attempts") or 0)
         if receipt.error == "revision_conflict" and attempts < _MAX_CAPTURE_RETRIES:
             prepared, revision = self.garden.prepare_capture(
-                entry["scope"], entry["request"])
+                entry["scope"], entry["base_request"])
             fresh = self.garden.component.capture_session(prepared)
             prompt = fresh.next_prompt()
             if prompt is not None:
-                self._sessions[sid] = {"session": fresh, "scope": entry["scope"],
-                                       "request": prepared, "revision": revision,
-                                       "attempts": attempts + 1}
+                self._put_session(self._sessions, sid, {
+                    "session": fresh, "scope": entry["scope"],
+                    "request": prepared, "revision": revision,
+                    "base_request": entry["base_request"],
+                    "attempts": attempts + 1,
+                })
                 return {"session_id": sid, "status": "needs_model",
                         "next_prompt": prompt, "retrying_after": "conflict"}
 
@@ -273,7 +403,8 @@ class Service:
         丢掉会话即可 —— 还没写库,没有需要回滚的东西。
         """
         sid = str(p.get("session_id") or "")
-        return {"cancelled": self._sessions.pop(sid, None) is not None}
+        return {"cancelled": self._pop_session(
+            self._sessions, sid) is not None}
 
     def _delete(self, p: dict) -> Any:
         """用户主动删除 —— **真删**。
@@ -312,6 +443,7 @@ class Service:
         ))
 
     def _migrate(self, p: dict) -> Any:
+        self._require_model()
         from .contracts import MigrateRequest
 
         return self.garden.migrate_and_store(_scope_from(p), MigrateRequest(
@@ -322,6 +454,7 @@ class Service:
             locale=str(p.get("locale") or ""),
             ai_name=str(p.get("ai_name") or ""),
             user_name=str(p.get("user_name") or ""),
+            idempotency_key=str(p.get("idempotency_key") or ""),
         ))
 
     def _import(self, p: dict) -> Any:
@@ -329,6 +462,7 @@ class Service:
 
         宿主把上次返回的 progress 原样传回来就从断点继续。
         """
+        self._require_model()
         from dataclasses import asdict
 
         from .contracts import ImportRequest
@@ -347,6 +481,7 @@ class Service:
                 mount=str(p.get("mount") or DEFAULT_MOUNT),
                 locale=str(p.get("locale") or ""),
                 material_kind=str(p.get("material_kind") or ""),
+                max_cards=int(p.get("max_cards") or 50),
                 policy=p.get("policy"),
                 ai_name=str(p.get("ai_name") or ""),
                 user_name=str(p.get("user_name") or ""),
@@ -365,14 +500,105 @@ class Service:
             mount=str(mount) if mount is not None else None)
 
     def _maintenance_check(self, p: dict) -> Any:
-        return self.garden.check_maintenance(_scope_from(p))
+        mount = p.get("mount")
+        return self.garden.check_maintenance(
+            _scope_from(p), mount=str(mount) if mount is not None else None)
 
     def _maintenance_run(self, p: dict) -> Any:
+        self._require_model()
         return self.garden.run_and_store_maintenance(
             _scope_from(p),
             MaintenanceRequest(locale=str(p.get("locale") or ""),
+                               mount=str(p.get("mount") or DEFAULT_MOUNT),
                                ai_name=str(p.get("ai_name") or ""),
-                               user_name=str(p.get("user_name") or "")))
+                               user_name=str(p.get("user_name") or ""),
+                               recent_conversations=str(
+                                   p.get("recent_conversations") or ""),
+                               idempotency_key=str(
+                                   p.get("idempotency_key") or "")))
+
+    # ---- host-driven 整理：服务决定语义，宿主调用自己的模型 ------------ #
+
+    def _maintenance_begin(self, p: dict) -> Any:
+        import uuid
+
+        scope = _scope_from(p)
+        request = MaintenanceRequest(
+            locale=str(p.get("locale") or ""),
+            mount=str(p.get("mount") or DEFAULT_MOUNT),
+            ai_name=str(p.get("ai_name") or ""),
+            user_name=str(p.get("user_name") or ""),
+            recent_conversations=str(p.get("recent_conversations") or ""),
+            idempotency_key=str(p.get("idempotency_key") or ""),
+        )
+        try:
+            prepared, revision = self.garden.prepare_maintenance(scope, request)
+        except MaintenanceStorageError as exc:
+            return {"status": "completed", "result": OperationReceipt(
+                error="storage_failed:maintenance_state",
+                trace={"detail": str(exc)})}
+        session = self.garden.component.maintenance_session(prepared)
+        prompt = session.next_prompt()
+        if prompt is None:
+            return {"status": "completed",
+                    "result": self.garden.store_maintenance_result(
+                        scope, prepared, session.result(),
+                        expected_revision=revision)}
+        sid = uuid.uuid4().hex
+        self._put_session(self._maintenance_sessions, sid, {
+            "session": session, "scope": scope, "request": prepared,
+            "base_request": request, "revision": revision, "attempts": 0,
+        })
+        return {"session_id": sid, "status": "needs_model",
+                "next_prompt": prompt}
+
+    def _maintenance_feed(self, p: dict) -> Any:
+        sid = str(p.get("session_id") or "")
+        entry = self._get_session(self._maintenance_sessions, sid)
+        if entry is None:
+            raise ServiceError(
+                "unknown_session",
+                f"没有这个 maintenance 会话: {sid!r}"
+                "(可能是服务重启过，重新 maintenance.begin)",
+            )
+        session = entry["session"]
+        session.feed(str(p.get("reply") or ""),
+                     truncated=bool(p.get("truncated")))
+        prompt = session.next_prompt()
+        if prompt is not None:
+            return {"session_id": sid, "status": "needs_model",
+                    "next_prompt": prompt}
+
+        receipt = self.garden.store_maintenance_result(
+            entry["scope"], entry["request"], session.result(),
+            expected_revision=entry.get("revision"))
+        attempts = int(entry.get("attempts") or 0)
+        if receipt.error == "revision_conflict" and attempts < _MAX_CAPTURE_RETRIES:
+            prepared, revision = self.garden.prepare_maintenance(
+                entry["scope"], entry["base_request"])
+            fresh = self.garden.component.maintenance_session(prepared)
+            prompt = fresh.next_prompt()
+            if prompt is not None:
+                self._put_session(self._maintenance_sessions, sid, {
+                    "session": fresh, "scope": entry["scope"],
+                    "request": prepared,
+                    "base_request": entry["base_request"], "revision": revision,
+                    "attempts": attempts + 1,
+                })
+                return {"session_id": sid, "status": "needs_model",
+                        "next_prompt": prompt,
+                        "retrying_after": "conflict"}
+            receipt = self.garden.store_maintenance_result(
+                entry["scope"], prepared, fresh.result(),
+                expected_revision=revision)
+
+        self._maintenance_sessions.pop(sid, None)
+        return {"status": "completed", "result": receipt}
+
+    def _maintenance_cancel(self, p: dict) -> Any:
+        sid = str(p.get("session_id") or "")
+        return {"cancelled":
+                self._pop_session(self._maintenance_sessions, sid) is not None}
 
     def _browse(self, p: dict) -> Any:
         return self.garden.browse(
@@ -393,14 +619,32 @@ class Service:
             name=str(p.get("name") or ""),
             arguments=dict(p.get("arguments") or {})))
 
+    def _require_model(self) -> None:
+        if not self._model_available:
+            raise ServiceError(
+                "model_not_configured",
+                "服务没有配置模型；请改用 begin/feed host-driven lane，"
+                "或启动时提供 model",
+            )
+
     # -- 派发 ------------------------------------------------------------- #
 
-    def handle(self, request: dict) -> dict:
+    def handle(self, request: Any) -> dict:
         """处理一个请求。**永远返回一个 dict，不抛。**
 
         抛出去的话，长驻进程会因为一次坏请求整个死掉，把其它调用方一起带走。
         """
+        if not isinstance(request, dict):
+            return {"id": None, "ok": False,
+                    "error": {"code": "invalid_request",
+                              "message": "request 必须是 JSON 对象，"
+                                         f"收到 {type(request).__name__}"}}
         rid = request.get("id")
+        if (rid is not None
+                and (not isinstance(rid, (str, int)) or isinstance(rid, bool))):
+            return {"id": None, "ok": False,
+                    "error": {"code": "invalid_request",
+                              "message": "id 必须是 string、integer 或 null"}}
         method = str(request.get("method") or "")
         fn = self._methods.get(method)
         if fn is None:
@@ -438,6 +682,10 @@ class Service:
         except MountPermissionError as exc:
             return {"id": rid, "ok": False,
                     "error": {"code": "mount_not_allowed", "message": str(exc)}}
+        except StorageCapabilityError as exc:
+            return {"id": rid, "ok": False,
+                    "error": {"code": "storage_lacks_capabilities",
+                              "message": str(exc)}}
         except ValueError as exc:
             return {"id": rid, "ok": False,
                     "error": {"code": "invalid_request", "message": str(exc)}}

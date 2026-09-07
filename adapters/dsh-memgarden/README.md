@@ -2,17 +2,18 @@
 
 把 Memory Garden 挂到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 上的薄 Adapter。
 
-> ## ✅ 已端到端跑通（2026-09-04，39 条验收全绿）
+> ## 验收证据要分层看
 >
-> 不是「照文档写的骨架」—— 用真实的 DSH 和真实的模型跑过：
+> 2026-09-04 曾用真实 DSH 和真实模型跑通自动落卡、跨会话
+> 召回和工具。那次的环境是：
 >
 > ```
 > dsh          0.1.2-alpha.4（commit 4e84901e6471b79ec0338099867ebb4606d12bb5）
-> 模型          deepseek-v4-flash（落卡侧 deepseek-chat）
+> 模型          deepseek-v4-flash
 > 改 DSH 代码   0 行 —— 只在 profile 的用户层加了一个插件
 > ```
 >
-> **验到的场景**（sevenfloor §8.2 的核心几步）：
+> **当时验到的核心场景**：
 >
 > ```
 > 会话 A  用户：「我不吃辣，一吃就胃疼」
@@ -27,6 +28,10 @@
 > **模型全程没有主动调用任何记忆工具** —— 它根本不知道有记忆系统存在。
 > 这正是「只注册 MCP 工具做不到」的那件事：自动召回、自动落卡不依赖模型
 > 记得去查。
+>
+> 但历史数字不会自动证明当前 commit。现在每个 PR 的无网回归会
+> 真正穿过 `plugin.mjs`，验 capture、host-driven maintenance 和 outbox；
+> 真 DSH + 真模型的脚本仍需要 key，必须单独跑、单独报结果。
 
 ## Adapter 为什么随 Python 包发布，而不是单独发 npm
 
@@ -91,10 +96,35 @@ session
         tenant: 'acme'                   # 🔴 来自你的可信上下文
         memoryOwner: 'user-42'           # 🔴 同上，且必填
         locale: 'zh-Hans'
+        stateDir: '/durable/dsh-state'   # 落卡 outbox，必须跨进程重启保留
 ```
 
 注意**没有 `model`**：模型调用走 DSH 自己的 provider（`inject: [llm]`），
 Garden 不持有 key，也不知道你用的哪个 provider。
+
+Capture 和 Maintenance/Dream **两条 lane 都是 host-driven**：
+
+```text
+capture.begin      → DSH llm.stream → capture.feed
+maintenance.begin  → DSH llm.stream → maintenance.feed
+```
+
+不能在 Adapter 里调 `maintenance.run`：`memgarden serve` 是故意不带
+model 起的，这样调会稳定得到 `model_not_configured`。
+
+### Capture 窗口预算
+
+Adapter 会读取本轮的全部消息（用户、助手、工具结果），不再用
+「最后 40 条」或「工具结果前 500 字」静默丢掉内容。单次模型
+上下文仍必须有界：
+
+| 配置 | 默认 | 含义 |
+|---|---:|---|
+| `captureMessageChars` | 16,000 | 一条消息进入 Capture 窗口的字符预算 |
+| `captureWindowChars` | 64,000 | 整个 turn 进入 Capture 窗口的字符预算 |
+
+超出时会保留头尾，并在窗口里写入「省略 N 个字符」；这是可见的
+模型插入降级，不是对持久记忆总量的限制。
 
 ## 接线点（都是 DSH 的正式扩展点）
 
@@ -142,7 +172,8 @@ export DEEPSEEK_API_KEY=...
 python e2e/dsh_acceptance.py
 
 # 坏情况（不联网、不花钱，秒级，随便跑）
-python e2e/failure_paths.py           # 25/25
+node e2e/adapter_offline.mjs          # 真正穿过 Adapter
+python e2e/failure_paths.py           # 只验 MemGarden Service
 ```
 
 ⚠️ **这两组不是一回事，别合并成一个数字报**：`failure_paths.py` 直接对
@@ -150,14 +181,16 @@ python e2e/failure_paths.py           # 25/25
 证据」会高估覆盖 —— 它证明的是服务在坏情况下的行为，不是 Adapter 的。
 
     dsh_acceptance.py   DSH 正向 / 部分失败验收（真 DSH + 真模型）
+    adapter_offline.mjs DSH Adapter 离线回归（假 DSH ctx + 真 service；故障注入时用假 wire service）
     failure_paths.py    MemGarden Service 离线失败路径（不经过 DSH）
 
 | 组 | 验的是 |
 |---|---|
 | A 自动落卡 + 跨会话召回 | 会话 A 说「不吃辣」→ 全新会话 B 问「晚饭吃什么」→ 模型答「温和养胃又不辣」。**模型全程没主动调任何记忆工具** |
 | B 模型主动调工具 | `memgarden_memory_search` / `memgarden_memory_write` 注册进 DSH 的 Tool Registry，模型调了、真的落库 |
-| C 同租户跨 owner 隔离 | **同一个 tenant、同一个 SQLite 文件**，`user-42` 写的 `user-99` 读不到（召回 0 条）；不配 owner 时记忆不启用、对话照常 |
+| C 同租户跨 owner 隔离 | **同一个 tenant、同一个 SQLite 文件**，`user-42` 写的 `user-99` 读不到（召回 0 条）；安装后的真实配置必须保留 `memoryOwner` / `stateDir` |
 | D 失败路径 | 服务起不来 / 中途退出 / 会话过期 / 越权挂载 / 卡住不回 / 快速两轮 / 整理与前台并发 / 幂等重放 |
+| E 自动整理 | 用公开 wire API 预置到阈值，再跑真 DSH turn；必须出现整理结果，且不得出现 `model_not_configured` |
 
 模型调用**全部走 DSH 的 provider**（`ctx.llm.stream`）——
 服务端启动时不带 `--model`，Garden 全程不碰 key。
@@ -243,14 +276,18 @@ is expected (5:1)
 建出一个空库，然后因为直接 `return` 而**永远没人关掉它** —— 泄漏一个进程，
 还留下一个会让人以为「记忆在工作」的 db 文件。
 
-## 还没做的
+## 已闭环的恢复语义与剩余边界
 
-- **崩溃恢复只做到「不重复写」**。进程在 turn 中途被杀时，那一轮的落卡会丢。
-  幂等键保证重放不写第二遍，但没有持久 outbox 把它补回来。正确做法是
-  accepted 的落卡先落一条 cursor 再异步执行 —— 下一阶段。
-- **大规模数据**。SQLite 参考实现会把一个 owner 的卡读进内存；它面向
-  「开箱即用」，不面向超大库。
-- **History Import**。Garden 侧声明为 `false`，这边也就没有入口。
+- `stateDir` 下有持久 JSONL outbox：调模型前先记待办，进程重启后
+  用原幂等键补落卡。只有 receipt 没有 `error` 时才划掉；
+  RPC 本身成功但落库失败时，待办仍保留。清理时先写同目录
+  临时文件再原子 rename，避免进程在 truncate/rewrite 中间崩溃把待办本清空。
+- History Import 已是 Garden wire 能力；它是宿主显式发起的管理操作，
+  不是每个 DSH turn 的自动 hook，所以 Adapter 不会自动导入未经选择的历史。
+- SQLite 参考实现仍面向「开箱即用」，不是超大规模外部记忆库；
+  超过其文档化规模时应替换 Store Adapter。
+- 离线 Adapter 回归能证明接线、状态机和恢复语义，不能证明 DSH
+  未来 alpha/release 版本没有 breaking change。升级 DSH 后仍须跑真实验收。
 
 ## 版本纪律
 

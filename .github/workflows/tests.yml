@@ -19,6 +19,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # tests/test_dsh_adapter_offline.py 会真正 import plugin.mjs；显式固定 Node，
+      # 避免 runner 恰好没有 Node 时 pytest 把关键 Adapter 回归标成 skip。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
       - run: pipx install uv
       - name: 契约测试 + 纯度守卫
         # --extra dev 才会带上 pytest（本机 venv 里碰巧有，CI 是干净环境）
@@ -72,3 +77,22 @@ jobs:
           assert any("LICENSE" in n for n in names), f"wheel 里没有 LICENSE：{whl}"
           print(f"OK {whl} 带许可证")
           PY
+
+  python-compat:
+    name: Python ${{ matrix.python-version }} compatibility
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: pipx install uv
+      - name: 支持版本全量回归
+        run: uv run --python ${{ matrix.python-version }} --extra dev pytest -q

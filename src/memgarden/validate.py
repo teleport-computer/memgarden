@@ -26,6 +26,7 @@ _TYPES: dict[str, tuple[type, ...]] = {
     "integer": (int,),
     "number": (int, float),
     "boolean": (bool,),
+    "null": (type(None),),
 }
 
 
@@ -52,17 +53,40 @@ def validate(value: Any, schema: dict, *, path: str = "",
             validate(value, target, path=path, schemas=schemas)
         return
 
+    if "oneOf" in schema:
+        matched = 0
+        for option in schema.get("oneOf") or ():
+            try:
+                validate(value, option, path=path, schemas=schemas)
+            except SchemaViolation:
+                continue
+            matched += 1
+        if matched != 1:
+            raise SchemaViolation(path, f"应当且只能匹配一个 oneOf 分支，实际 {matched}")
+    if "anyOf" in schema:
+        for option in schema.get("anyOf") or ():
+            try:
+                validate(value, option, path=path, schemas=schemas)
+                break
+            except SchemaViolation:
+                continue
+        else:
+            raise SchemaViolation(path, "不匹配任何 anyOf 分支")
+
     expected = schema.get("type")
     if expected:
-        allowed = _TYPES.get(str(expected))
+        names = list(expected) if isinstance(expected, list) else [str(expected)]
+        allowed = tuple(t for name in names for t in _TYPES.get(name, ()))
         # bool 是 int 的子类 —— 不排掉的话 True 会被当成合法的 integer，
         # 而那多半是调用方传错了字段。
         if allowed and (not isinstance(value, allowed)
-                        or (expected in ("integer", "number")
+                        or (any(name in ("integer", "number") for name in names)
                             and isinstance(value, bool))):
             raise SchemaViolation(path, f"应当是 {expected}，"
                                         f"实际是 {type(value).__name__}")
 
+    if "const" in schema and value != schema["const"]:
+        raise SchemaViolation(path, f"必须等于 {schema['const']!r}")
     if "enum" in schema and value not in schema["enum"]:
         raise SchemaViolation(path, f"只能是 {schema['enum']!r} 之一")
 
@@ -72,6 +96,13 @@ def validate(value: Any, schema: dict, *, path: str = "",
             raise SchemaViolation(path, f"不能小于 {low}")
         if high is not None and value > high:
             raise SchemaViolation(path, f"不能大于 {high}")
+
+    if isinstance(value, str):
+        low, high = schema.get("minLength"), schema.get("maxLength")
+        if low is not None and len(value) < low:
+            raise SchemaViolation(path, f"长度不能小于 {low}")
+        if high is not None and len(value) > high:
+            raise SchemaViolation(path, f"长度不能大于 {high}")
 
     if isinstance(value, dict):
         for name in schema.get("required") or ():
@@ -85,6 +116,11 @@ def validate(value: Any, schema: dict, *, path: str = "",
         # 未知字段一律放行 —— 新版本加字段时旧调用方不该崩。
 
     if isinstance(value, (list, tuple)):
+        low, high = schema.get("minItems"), schema.get("maxItems")
+        if low is not None and len(value) < low:
+            raise SchemaViolation(path, f"元素数量不能小于 {low}")
+        if high is not None and len(value) > high:
+            raise SchemaViolation(path, f"元素数量不能大于 {high}")
         item = schema.get("items")
         if isinstance(item, dict):
             for i, entry in enumerate(value):

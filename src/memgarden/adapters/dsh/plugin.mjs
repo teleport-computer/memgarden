@@ -10,7 +10,8 @@
  */
 import { spawn } from 'node:child_process'
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync,
+  writeFileSync,
 } from 'node:fs'
 import nodePath from 'node:path'
 
@@ -94,7 +95,10 @@ class Client {
   }
 
   failAll(code, message) {
-    for (const [, r] of this.pending) r({ ok: false, error: { code, message } })
+    for (const [, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.resolve({ ok: false, error: { code, message } })
+    }
     this.pending.clear()
     this.buf = ''
   }
@@ -115,8 +119,12 @@ class Client {
       if (!line) continue
       try {
         const res = JSON.parse(line)
-        const r = this.pending.get(String(res.id))
-        if (r) { this.pending.delete(String(res.id)); r(res) }
+        const pending = this.pending.get(String(res.id))
+        if (pending) {
+          this.pending.delete(String(res.id))
+          clearTimeout(pending.timer)
+          pending.resolve(res)
+        }
       } catch {
         log('[memgarden] 非 JSON 输出: ' + line.slice(0, 160) + '\n')
       }
@@ -131,7 +139,8 @@ class Client {
     ))
     const id = String(this.next++)
     return new Promise((resolve) => {
-      this.pending.set(id, resolve)
+      const pending = { resolve, timer: null }
+      this.pending.set(id, pending)
       try {
         this.child.stdin.write(JSON.stringify({ id, method, params }) + '\n')
       } catch (e) {
@@ -143,7 +152,7 @@ class Client {
                   error: { code: 'service_unavailable', message: e.message } })
         return
       }
-      setTimeout(() => {
+      pending.timer = setTimeout(() => {
         if (this.pending.delete(id)) {
           resolve({ ok: false, error: { code: 'timeout', message: method } })
         }
@@ -185,7 +194,11 @@ async function driveCapture(ctx, client, scope, locale, text, agent, turn, confi
 async function driveCaptureRaw(ctx, client, scope, locale, text, key, config) {
   let state = await client.request('capture.begin', {
     scope,
-    window: '用户：' + text,
+    // `text` 是 renderTurnWindow() 生成的完整本轮窗口，里面已经有
+    // 「用户：/助手：/工具结果：」。再加一次前缀会让真正交给
+    // Garden 的内容变成「用户：用户：…」，并且把后续的助手/工具
+    // 行都伪装成第一条用户消息的一部分。
+    window: text,
     locale,
     // 稳定幂等键：崩溃后重放同一轮不会写第二遍。**它不依赖会话还在** ——
     // 进程重启会丢掉在途会话，但重放同一轮仍然不会写出第二条记忆。
@@ -199,7 +212,7 @@ async function driveCaptureRaw(ctx, client, scope, locale, text, key, config) {
       await client.request('capture.cancel', { session_id: state.session_id })
       throw new Error('落卡重问超过 4 轮，放弃')
     }
-    const reply = await callModel(ctx, config, state.next_prompt)
+    const reply = await callModel(ctx, config, state.next_prompt, 'capture')
     state = await client.request('capture.feed', {
       session_id: state.session_id,
       reply: reply.text,
@@ -216,12 +229,39 @@ async function driveCaptureRaw(ctx, client, scope, locale, text, key, config) {
   return state.result
 }
 
+/** 用 DSH 的 provider 驱动一次整理，不让 modelless service 自己调模型。 */
+async function driveMaintenance(ctx, client, scope, locale, config) {
+  let state = await client.request('maintenance.begin', {
+    scope,
+    locale,
+    ai_name: config.aiName || '',
+    user_name: config.userName || '',
+  })
+
+  let rounds = 0
+  while (state.status === 'needs_model') {
+    if (++rounds > 4) {
+      await client.request('maintenance.cancel', { session_id: state.session_id })
+      throw new Error('整理重问超过 4 轮，放弃')
+    }
+    const reply = await callModel(ctx, config, state.next_prompt, 'maintenance')
+    state = await client.request('maintenance.feed', {
+      session_id: state.session_id,
+      reply: reply.text,
+      truncated: reply.truncated === true,
+      finish_reason: reply.finishReason || '',
+    })
+  }
+  return state.result
+}
+
 /** 用 DSH 的 llm 服务发一次一次性请求，把流拼成完整文本。 */
-async function callModel(ctx, config, prompt) {
+async function callModel(ctx, config, prompt, purpose = 'capture') {
+  const purposeModel = purpose === 'maintenance' ? config.maintenanceModel : null
   const chunks = []
   const stream = ctx.llm.stream({
     provider: config.provider || 'deepseek-official',
-    model: config.captureModel || config.model || 'deepseek-v4-flash',
+    model: purposeModel || config.captureModel || config.model || 'deepseek-v4-flash',
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     maxTokens: 4096,
     temperature: 0.2,
@@ -289,32 +329,77 @@ function messageCount(agent) {
   } catch { return 0 }
 }
 
-function renderTurnWindow(agent, query, from = 0) {
+// 这是「一次模型上下文插入」的界，不是记忆的总量上限。
+// 不再用 slice(-40) / tool.slice(0, 500) 静默丢数据：先读完整 turn，
+// 只在真正超过明确预算时截取，且把丢掉的字符数写进窗口。
+const DEFAULT_CAPTURE_WINDOW_CHARS = 64000
+const DEFAULT_CAPTURE_MESSAGE_CHARS = 16000
+
+function positiveLimit(value, fallback) {
+  const n = Number(value)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback
+}
+
+function clipWithNotice(text, limit, label) {
+  const chars = Array.from(String(text || ''))
+  if (chars.length <= limit) return chars.join('')
+  // marker 本身也占预算，所以「省略数」要按最终保留的头尾重算，
+  // 不能简单写 chars.length - limit（那会少报 marker 所占的部分）。
+  let omitted = chars.length - limit
+  let notice = []
+  for (let i = 0; i < 3; i += 1) {
+    notice = Array.from(`\n[…${label}，省略 ${omitted} 个字符…]\n`)
+    omitted = chars.length - Math.max(0, limit - notice.length)
+  }
+  notice = Array.from(`\n[…${label}，省略 ${omitted} 个字符…]\n`)
+  // 即使调用方给了非常小的测试预算，也要保留可读的截断标记。
+  if (limit <= notice.length + 2) return notice.slice(0, limit).join('')
+  const room = limit - notice.length
+  const head = Math.floor(room * 0.4)
+  const tail = room - head
+  return chars.slice(0, head).join('') + notice.join('')
+       + chars.slice(chars.length - tail).join('')
+}
+
+function renderTurnWindow(agent, query, from = 0, config = {}) {
   const lines = []
+  const perMessage = positiveLimit(config.captureMessageChars,
+                                   DEFAULT_CAPTURE_MESSAGE_CHARS)
+  const total = positiveLimit(config.captureWindowChars,
+                              DEFAULT_CAPTURE_WINDOW_CHARS)
   try {
     const msgs = agent?.session?.surface?.messages
                  || agent?.session?.messages || []
-    // 只取本轮开始之后的消息。上限仍然留着，防一个超长 turn 撑爆窗口。
-    const slice = msgs.slice(Math.max(0, from)).slice(-40)
-    for (const m of slice) {
+    // 只取本轮开始之后的消息，但不再按「最后 40 条」静默丢掉前半轮。
+    for (const m of msgs.slice(Math.max(0, from))) {
       const role = String(m?.role || '')
-      const text = textOf(m?.content)
+      const raw = textOf(m?.content)
+      const text = clipWithNotice(raw, perMessage, '该条消息超过单条预算')
       if (!text.trim()) continue
       if (role === 'user') lines.push('用户：' + text)
       else if (role === 'assistant') lines.push('助手：' + text)
-      else if (role === 'tool') lines.push('工具结果：' + text.slice(0, 500))
+      else if (role === 'tool') lines.push('工具结果：' + text)
     }
   } catch (e) {
     log('[memgarden] 取本轮消息失败，退回只用用户问句: ' + e.message + '\n')
   }
   if (!lines.length && query) lines.push('用户：' + query)
-  return lines.join('\n')
+  return clipWithNotice(lines.join('\n'), total, '本轮内容超过总预算')
 }
 
 function textOf(content) {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) {
-    return content.map((p) => (p && p.text) || '').join(' ')
+    return content.map((p) => {
+      if (!p) return ''
+      if (typeof p === 'string') return p
+      if (typeof p.text === 'string') return p.text
+      if (typeof p.content === 'string') return p.content
+      try { return JSON.stringify(p) } catch { return String(p) }
+    }).join(' ')
+  }
+  if (content && typeof content === 'object') {
+    try { return JSON.stringify(content) } catch { return String(content) }
   }
   return ''
 }
@@ -345,22 +430,30 @@ class Outbox {
   add(entry) {
     if (!this.path) return
     try {
-      mkdirSync(nodePath.dirname(this.path), { recursive: true })
-      appendFileSync(this.path, JSON.stringify(entry) + '\n')
+      mkdirSync(nodePath.dirname(this.path), { recursive: true, mode: 0o700 })
+      appendFileSync(this.path, JSON.stringify(entry) + '\n',
+                     { encoding: 'utf8', mode: 0o600 })
     } catch (e) {
       // 待办本写不了不该挡住落卡本身 —— 那样是为了防丢反而先丢了。
       log('[memgarden] outbox 写入失败（本轮崩溃将无法恢复）: ' + e.message + '\n')
     }
   }
 
-  /** 落卡成功（或明确失败）之后划掉。 */
+  /** 只有落卡完成（包括明确「无事可记」）才划掉。 */
   done(key) {
     if (!this.path) return
+    const tmp = this.path + '.' + process.pid + '.' + Date.now() + '.tmp'
     try {
       const left = this.readAll().filter((e) => e.key !== key)
-      writeFileSync(this.path, left.map((e) => JSON.stringify(e)).join('\n')
-                               + (left.length ? '\n' : ''))
+      // 不在原文件上 truncate + rewrite。那样进程恰好在两步之间
+      // 崩溃时，待办本会变成空文件。先写同目录临时文件再 rename，
+      // 读者只会看到旧版或新版。
+      writeFileSync(tmp, left.map((e) => JSON.stringify(e)).join('\n')
+                         + (left.length ? '\n' : ''),
+                    { encoding: 'utf8', mode: 0o600 })
+      renameSync(tmp, this.path)
     } catch (e) {
+      try { unlinkSync(tmp) } catch { /* 没有临时文件 */ }
       log('[memgarden] outbox 清理失败: ' + e.message + '\n')
     }
   }
@@ -434,6 +527,13 @@ export function apply(ctx, config) {
     }
     log('[memgarden] 握手成功 v' + m.component_version +
         ' protocol=' + m.protocol_version + '\n')
+    for (const item of (m.storage?.degradations || [])) {
+      log('[memgarden] 存储能力降级 ' + item.capability + ': ' +
+          item.fallback + '（' + item.cost + '）\n')
+    }
+    for (const notice of (m.storage?.user_notices || [])) {
+      log('[memgarden] 存储能力提示: ' + notice + '\n')
+    }
     return m
   }).catch((e) => {
     log('[memgarden] 握手失败: ' + e.message + '\n')
@@ -452,8 +552,13 @@ export function apply(ctx, config) {
       try {
         const r = await driveCaptureRaw(ctx, client, entry.scope, entry.locale,
                                         entry.window, entry.key, config)
-        log('[memgarden] 补落卡 ' + entry.key + ' written=' + r.written + '\n')
-        outbox.done(entry.key)
+        log('[memgarden] 补落卡 ' + entry.key + ' written=' + r.written +
+            ' error=' + (r.error || '-') + '\n')
+        // RPC 成功只说明「服务给了回答」；receipt.error 说明这轮
+        // 并没有落库。以前恢复路径不看这一层，会把失败任务划掉，
+        // 而正常 turn 路径反而会留下，两条路径语义不一致。
+        if (r && !r.error) outbox.done(entry.key)
+        else log('[memgarden] 补落卡未落库，保留待办 ' + entry.key + '\n')
       } catch (e) {
         // 补不上就留着，下次启动再试。**不能划掉** —— 划掉等于放弃那条记忆。
         log('[memgarden] 补落卡失败 ' + entry.key + ': ' + e.message + '\n')
@@ -478,21 +583,14 @@ export function apply(ctx, config) {
       }
       if (!q.trim()) { log('[memgarden] 本轮没取到用户文本\n'); return decision }
       const key = turnKey(payload.agent, payload.turn)
-      // 只在这一轮**第一次** pre-step 时记下用户输入。一个 turn 里会有
-      // 多次 pre-step（工具循环），后面几次的最后一条消息是工具结果，
-      // 拿它当「用户说的话」会把工具输出记成用户的原话。
-      if (!turns.has(key)) {
-        // 记下本轮从第几条消息开始 —— turn-stopping 只渲染这之后的。
-        // 用固定的 slice(-12) 的话，短 turn 会把上一轮的对话再次卷进落卡窗口，
-        // 于是同一件事被重复记，或者旧上下文串进这一轮的卡里。
-        //
-        // ⚠️ 减一：pre-step 触发时，**用户这一轮的话已经在消息里了**
-        // （上面那个 `q` 就是从最后一条取的）。直接用当前条数当起点，
-        // 会把用户的原话切掉，落卡窗口里只剩助手的回复 —— 模型拿到一段
-        // 没有用户输入的对话，返回空，整轮落卡失败。
-        turns.set(key, { query: q, agent: payload.agent,
-                         from: Math.max(0, messageCount(payload.agent) - 1) })
-      }
+      // 一个 turn 里会有多次 pre-step（工具循环）。记忆只在第一次注入；
+      // 后面几次的最后一条通常是工具结果，用它再次检索不仅会重复注入，
+      // 还会把工具输出误当成用户问题。
+      if (turns.has(key)) return decision
+      // 记下本轮从第几条消息开始 —— turn-stopping 只渲染这之后的。
+      // ⚠️ 减一：pre-step 触发时，用户这一轮的话已经在消息里了。
+      turns.set(key, { query: q, agent: payload.agent,
+                       from: Math.max(0, messageCount(payload.agent) - 1) })
       const turnScope = scopeFor(agentIdOf(payload.agent),
                                  sessionIdOf(payload.agent))
       const result = await client.request('context.get',
@@ -570,7 +668,7 @@ export function apply(ctx, config) {
     // 🔴 落卡的窗口是**这一轮的完整内容**，不只是 pre-step 存的那句 query。
     // 只记用户问句的话，「助手答应了什么」「工具查到了什么」全都进不了记忆 ——
     // 而那些往往才是这一轮真正值得记的东西。
-    const window = renderTurnWindow(payload.agent, state.query, state.from)
+    const window = renderTurnWindow(payload.agent, state.query, state.from, config)
     if (!window.trim()) return
 
     const turnScope = scopeFor(agentIdOf(payload.agent),
@@ -605,7 +703,12 @@ export function apply(ctx, config) {
             ' reason=' + (r.reason || '-') +
             ' error=' + (r.error || '-') + '\n')
         // 「没什么可记」也是**做完了**，要划掉；只有真失败才留着重试。
-        if (!r.error) outbox.done(outboxKey)
+        if (r.error) {
+          const e = new Error('落卡未落库: ' + r.error)
+          e.code = r.error
+          throw e
+        }
+        outbox.done(outboxKey)
       })
       // 落卡完成之后才考虑整理 —— 整理要基于最新的花园状态，
       // 和落卡抢同一个 revision 只会白白触发一次 CAS 冲突重算。
@@ -632,14 +735,16 @@ export function apply(ctx, config) {
     tidying = true
     try {
       const check = await client.request('maintenance.check', { scope: turnScope })
+      if (check.error) throw new Error('整理检查失败: ' + check.error)
       if (!check.needed) return
       log('[memgarden] 该整理了: ' + (check.reason || '-') + '\n')
-      const out = await client.request('maintenance.run', {
-        scope: turnScope, locale,
-        ai_name: config.aiName || '', user_name: config.userName || '',
-      })
+      // service 是故意不带 model 起的，所以整理也必须像 capture 一样
+      // begin/feed，模型调用交还 DSH。调 maintenance.run 会稳定得到
+      // model_not_configured，之前的「自动整理」其实从未成功。
+      const out = await driveMaintenance(ctx, client, turnScope, locale, config)
       log('[memgarden] 整理结果 written=' + out.written +
           ' reason=' + (out.reason || '-') + ' error=' + (out.error || '-') + '\n')
+      if (out.error) throw new Error('整理未落库: ' + out.error)
     } catch (e) {
       // 整理失败**绝不能**影响对话。下一轮还会再试，而账本没推进，
       // 所以这批东西不会被漏掉。
