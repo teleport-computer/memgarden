@@ -72,19 +72,29 @@ def _as_float_vector(value: object, *, what: str) -> list[float]:
 
 
 def cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    """Plain cosine similarity; vectors need not be pre-normalized."""
+    """Cosine similarity, scale-stable: vectors need not be pre-normalized and may
+    carry very large or very small magnitudes (each side is divided by its own
+    max-abs component before any product, so 1e200 and 1e-200 both compare as
+    themselves instead of overflowing to NaN or underflowing to a zero norm)."""
     if len(a) != len(b):
         raise VectorContractError(f"dimension mismatch: {len(a)} vs {len(b)}")
+    sa = max((abs(x) for x in a), default=0.0)
+    sb = max((abs(y) for y in b), default=0.0)
+    if sa == 0.0 or sb == 0.0:
+        raise VectorContractError("zero-norm vector")
     dot = 0.0
     na = 0.0
     nb = 0.0
     for x, y in zip(a, b):
-        dot += x * y
-        na += x * x
-        nb += y * y
-    if na <= 0.0 or nb <= 0.0:
-        raise VectorContractError("zero-norm vector")
-    return dot / math.sqrt(na * nb)
+        xs = x / sa
+        ys = y / sb
+        dot += xs * ys
+        na += xs * xs
+        nb += ys * ys
+    value = dot / math.sqrt(na * nb)
+    if not math.isfinite(value):
+        raise VectorContractError("cosine is not finite")
+    return max(-1.0, min(1.0, value))
 
 
 def rrf_fuse(
@@ -94,15 +104,20 @@ def rrf_fuse(
     k: int = DEFAULT_RRF_K,
 ) -> dict[str, float]:
     """Weighted Reciprocal Rank Fusion. ``ranks_by_lane[lane][id]`` is a 1-based
-    rank; ids absent from a lane contribute 0 for that lane."""
-    if k < 0:
-        raise ValueError("k must be >= 0")
+    rank; ids absent from a lane contribute 0 for that lane. A lane with weight
+    0 is allowed and simply contributes nothing (a host can switch a lane off
+    without changing the call shape); NaN/inf/negative weights or ``k`` are
+    rejected so a trace can always be JSON-encoded with ``allow_nan=False``."""
+    if not math.isfinite(k) or k < 0:
+        raise ValueError("k must be finite and >= 0")
     fused: dict[str, float] = {}
     for lane, ranks in ranks_by_lane.items():
         w = float(weights.get(lane, 0.0))
+        if not math.isfinite(w) or w < 0:
+            raise ValueError(f"weight for lane {lane!r} must be finite and >= 0")
         for cid, r in ranks.items():
-            if r < 1:
-                raise ValueError("ranks are 1-based")
+            if not isinstance(r, int) or isinstance(r, bool) or r < 1:
+                raise ValueError("ranks are 1-based integers")
             fused[cid] = fused.get(cid, 0.0) + w / (k + r)
     return fused
 
@@ -111,21 +126,25 @@ def _rank(sorted_ids: Sequence[str]) -> dict[str, int]:
     return {cid: i + 1 for i, cid in enumerate(sorted_ids)}
 
 
-def _is_recent(card: dict, candidates: Iterable[dict], within_days: int) -> bool:
-    """``created_at`` within ``within_days`` of the newest candidate ``created_at``."""
+def _is_recent(card: dict, candidates: Iterable[dict], within_days: int, reference: object) -> bool:
+    """``created_at`` within ``within_days`` before ``reference`` and not after it.
+    ``reference`` is the host's now when given, else the newest candidate."""
     if within_days < 0:
         return False
     own = memory_timestamps.parse_ts(card.get("created_at"))
     if own is None:
         return False
-    newest = None
-    for c in candidates:
-        t = memory_timestamps.parse_ts(c.get("created_at"))
-        if t is not None and (newest is None or t > newest):
-            newest = t
-    if newest is None:
+    ref = memory_timestamps.parse_ts(reference) if reference is not None else None
+    if reference is not None and ref is None:
+        raise ValueError("reference_time is not a parseable timestamp")
+    if ref is None:
+        for c in candidates:
+            t = memory_timestamps.parse_ts(c.get("created_at"))
+            if t is not None and (ref is None or t > ref):
+                ref = t
+    if ref is None or own > ref:
         return False
-    return (newest - own).total_seconds() <= within_days * 86400
+    return (ref - own).total_seconds() <= within_days * 86400
 
 
 def select_hybrid_context_memories_with_trace(
@@ -144,6 +163,7 @@ def select_hybrid_context_memories_with_trace(
     vector_model: str | None = None,
     card_vector_models: Mapping[str, str] | None = None,
     recent_within_days: int = 7,
+    reference_time: str | None = None,
 ) -> tuple[list[dict], dict]:
     """Pick up to ``cap`` cards by fused dense + lexical relevance.
 
@@ -153,23 +173,37 @@ def select_hybrid_context_memories_with_trace(
     (``vector_lane="absent"``).  It never fabricates a vector rank.
 
     "Recent" for the recent bucket means ``created_at`` within
-    ``recent_within_days`` of the newest ``created_at`` among the candidates —
-    deterministic, no wall clock.  Every bucket is walked in fusion order and the
-    returned list is in fusion order too; the bucket only decides *which* seats a
-    card may take, never its position.
+    ``recent_within_days`` before ``reference_time`` and not after it.  Hosts
+    should pass their notion of now as ``reference_time`` (IO's
+    ``recent_cards`` is relative to now and rejects future timestamps — this
+    matches it).  Without ``reference_time`` the newest candidate ``created_at``
+    is used, which is deterministic but makes an all-old garden count as recent
+    and lets a future-dated card move the window; that fallback is for hosts
+    without a clock, not the recommended path.  Every bucket is walked in fusion
+    order and the returned list is in fusion order too; the bucket only decides
+    *which* seats a card may take, never its position.
     """
     if not math.isfinite(min_relevance) or not 0 <= min_relevance <= 1:
         raise ValueError("min_relevance must be finite and between zero and one")
     if not math.isfinite(min_cosine) or not -1 <= min_cosine <= 1:
         raise ValueError("min_cosine must be finite and between -1 and 1")
-    if vector_weight < 0 or lexical_weight < 0:
-        raise ValueError("weights must be >= 0")
+    for name, w in (("vector_weight", vector_weight), ("lexical_weight", lexical_weight)):
+        if not math.isfinite(w) or w < 0:
+            raise ValueError(f"{name} must be finite and >= 0")
+    if not math.isfinite(rrf_k) or rrf_k < 0:
+        raise ValueError("rrf_k must be finite and >= 0")
     cap = max(0, int(cap))
     shortlist = max(cap, int(shortlist))
 
     query = query or ""
     cards = [m for m in moments if m.get("id")]
     by_id = {str(m["id"]): m for m in cards}
+    if not query.strip():
+        # Ambient recall is keyed on what was said this turn. No text means no
+        # turn to recall for — a vector alone must not smuggle cards in.
+        return [], {**_query_trace(""), "mode": MODE_HYBRID, "vector_lane": "skipped",
+                    "reason": "empty_query", "counts": {"candidates": len(by_id), "selected": 0},
+                    "selected": [], "rejected_sample": [], "gate_rejected_sample": []}
 
     # --- lexical lane (unchanged scorer) ---------------------------------
     lexical: dict[str, dict] = {cid: _memory_relevance(query, m) for cid, m in by_id.items()}
@@ -295,7 +329,8 @@ def select_hybrid_context_memories_with_trace(
             added += 1
 
     turning = [cid for cid in short if ROLE_TURNING_POINT in (by_id[cid].get("roles") or [])]
-    recent = [cid for cid in short if _is_recent(by_id[cid], by_id.values(), recent_within_days)]
+    recent = [cid for cid in short
+              if _is_recent(by_id[cid], by_id.values(), recent_within_days, reference_time)]
     choose(turning, TURNING_QUOTA, "turning")
     choose(recent, RECENT_QUOTA, "recent")
     choose(short, cap - len(chosen), "query")
@@ -304,6 +339,11 @@ def select_hybrid_context_memories_with_trace(
     traces.sort(key=lambda t: fused_sorted.index(t["id"]))
 
     rejected = [cid for cid in fused_sorted if cid not in seen]
+    gate_rejected = sorted(
+        (cid for cid in by_id if cid not in fused),
+        key=lambda cid: (vec_score.get(cid, -2.0), lexical[cid]["score"], cid),
+        reverse=True,
+    )
     trace = {
         **_query_trace(query),
         "mode": MODE_HYBRID,
@@ -315,6 +355,7 @@ def select_hybrid_context_memories_with_trace(
         "weights": {"vector": vector_weight, "lexical": lexical_weight},
         "shortlist": shortlist,
         "recent_within_days": recent_within_days,
+        "reference_time": reference_time,
         "counts": {
             "candidates": len(by_id),
             "with_vector": len(vec_score),
@@ -323,8 +364,13 @@ def select_hybrid_context_memories_with_trace(
             "fused": len(fused),
             "shortlisted": len(short),
             "selected": len(chosen),
+            "gate_rejected": len(gate_rejected),
         },
         "selected": traces,
         "rejected_sample": [row(cid, bucket="rejected", selected=False) for cid in rejected[:8]],
+        # Cards that passed neither gate: bounded, with both raw scores so a miss
+        # can be diagnosed ("target was there, vector 0.41 < min_cosine 0.5").
+        "gate_rejected_sample": [row(cid, bucket="gate_rejected", selected=False)
+                                 for cid in gate_rejected[:8]],
     }
     return chosen, trace

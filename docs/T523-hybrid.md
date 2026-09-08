@@ -16,9 +16,13 @@ lanes are fused with weighted Reciprocal Rank Fusion
 `F = w_v/(k+r_v) + w_l/(k+r_l)` (defaults `k=20`, weights 2:1; a missing rank
 contributes 0, never a fabricated tail rank). The top `shortlist` (default 20)
 by `F` is the only pool the soft quotas may draw from: turning points (explicit
-`roles`, ≤3) and recent cards (`created_at` within `recent_within_days` of the
-newest candidate, ≤2, deterministic — no wall clock) reserve seats, everything
-else fills by `F`. Buckets decide **which** seats a card may take; the returned
+`roles`, ≤3) and recent cards (≤2) reserve seats, everything else fills by `F`.
+"Recent" means `created_at` within `recent_within_days` before the host-supplied
+`reference_time` and not after it — pass your notion of now (IO's
+`recent_cards` is relative to now and rejects future timestamps, so this
+matches). Without `reference_time` the newest candidate is the reference, which
+is deterministic but counts an all-old garden as recent; that fallback is for
+clockless hosts, not the recommended path. Buckets decide **which** seats a card may take; the returned
 list and the trace are in fusion order. Unrelated cards never fill a seat, an
 empty query or no eligible card returns an empty selection, and `cap` /
 `shortlist` bound the output.
@@ -36,7 +40,20 @@ back and nothing is persisted. No dependency is added.
 
 Partial input is honest by construction: cards without a vector are ranked in
 the lexical lane only; with no query vector at all the function degrades to the
-lexical lane and says so (`trace["vector_lane"] == "absent"`).
+lexical lane and says so (`trace["vector_lane"] == "absent"`). An empty or
+whitespace query returns nothing even when vectors are supplied — ambient recall
+is keyed on what was said this turn, a vector alone must not smuggle cards in.
+A lane weight of 0 is allowed (switches that lane off without changing the call
+shape); NaN/inf/negative weights, `k`, or thresholds are rejected, so a trace can
+always be JSON-encoded with `allow_nan=False`. Cosine is computed scale-stably
+(each side divided by its max-abs component first), so unnormalized vectors of
+any magnitude compare correctly instead of overflowing to NaN.
+
+The trace carries `selected`, `rejected_sample` (fused but not chosen) and
+`gate_rejected_sample` (passed neither gate, with both raw scores) — bounded
+samples so a miss can be diagnosed ("target was there, cosine 0.41 < 0.5").
+Trace rows contain titles and matched units: hosts that log outside the trust
+boundary must project them through an allow-list (batch 2b's job).
 
 ## Compatibility
 
