@@ -145,10 +145,9 @@ def _salience_score(item: dict) -> float:
 
 
 def _metadata_score(item: dict) -> float:
-    open_bonus = 0.08 if item.get("is_open_thread") is True else 0.0
     score = float(item.get("score") or 0.0)
     score_bonus = min(0.08, max(0.0, score) / 100.0)
-    return round(open_bonus + _salience_score(item) + score_bonus, 4)
+    return round(_salience_score(item) + score_bonus, 4)
 
 
 def _topic_match(query: str, item: dict) -> bool:
@@ -263,7 +262,6 @@ def select_memory_index_items(
     scored.sort(
         key=lambda row: (
             row[0],
-            1 if row[2].get("is_open_thread") is True else 0,
             SALIENCE_WEIGHT.get(str(row[2].get("salience") or "medium").lower(), 2),
             row[1],
         ),
