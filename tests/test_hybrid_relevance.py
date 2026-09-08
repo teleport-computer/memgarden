@@ -137,8 +137,10 @@ def test_empty_query_never_injects_even_with_vectors():
         assert chosen == [] and trace["vector_lane"] == "skipped" and trace["reason"] == "empty_query"
 
 
+import json
+
+
 def test_non_finite_weights_and_k_are_rejected_and_zero_weight_is_allowed():
-    import json
     pool = [_card(0, "花盆")]
     for bad in (float("nan"), float("inf"), -1.0):
         with pytest.raises(ValueError):
@@ -150,8 +152,34 @@ def test_non_finite_weights_and_k_are_rejected_and_zero_weight_is_allowed():
     with pytest.raises(ValueError):
         rrf_fuse({"v": {"a": 1.5}}, {"v": 1.0})
     chosen, trace = select(pool, "花盆", query_vector=POT, card_vectors={"c00": POT}, min_cosine=0.5, vector_weight=0.0)
-    assert [c["id"] for c in chosen] == ["c00"]
+    assert [c["id"] for c in chosen] == ["c00"] and chosen[0]["selection"]["lane"] == "lexical"
     json.dumps(trace, allow_nan=False)  # every number in the trace is finite
+    with pytest.raises(ValueError):      # finite inputs, overflowing sum
+        rrf_fuse({"v": {"a": 1}, "l": {"a": 1}}, {"v": 1e308, "l": 1e308}, k=0)
+
+
+def test_disabled_lane_ids_never_enter_the_pool_or_take_quota_seats():
+    pool = [
+        _card(0, "NP-4286 保修", created_at="2020-01-01"),
+        _card(1, "花盆颜色", created_at="2026-09-08"),
+    ]
+    vecs = {"c00": [0.0, 1.0, 0.0], "c01": POT}
+    # vector lane switched off: the vector-only newer card must not take the "recent" seat
+    chosen, trace = select(pool, "NP-4286 保修", query_vector=POT, card_vectors=vecs, min_cosine=0.5,
+                           vector_weight=0.0, cap=1, reference_time="2026-09-09T00:00:00Z")
+    assert [c["id"] for c in chosen] == ["c00"]
+    assert trace["lanes_enabled"] == {"vector": False, "lexical": True}
+    assert trace["counts"]["lane_disabled"] == 1 and trace["lane_disabled_sample"][0]["id"] == "c01"
+    assert trace["lane_disabled_sample"][0]["lane"] == "disabled"
+    # lexical lane switched off: only vector-eligible cards remain
+    chosen2, trace2 = select(pool, "NP-4286 保修", query_vector=POT, card_vectors=vecs, min_cosine=0.5,
+                             lexical_weight=0.0, reference_time="2026-09-09T00:00:00Z")
+    assert [c["id"] for c in chosen2] == ["c01"] and chosen2[0]["selection"]["lane"] == "vector"
+    # both off: nothing can be selected, and the trace still encodes
+    chosen3, trace3 = select(pool, "NP-4286 保修", query_vector=POT, card_vectors=vecs, min_cosine=0.5,
+                             vector_weight=0.0, lexical_weight=0.0)
+    assert chosen3 == [] and trace3["counts"]["lane_disabled"] == 2
+    json.dumps(trace3, allow_nan=False)
 
 
 def test_cosine_is_scale_stable():

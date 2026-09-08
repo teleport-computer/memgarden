@@ -105,9 +105,12 @@ def rrf_fuse(
 ) -> dict[str, float]:
     """Weighted Reciprocal Rank Fusion. ``ranks_by_lane[lane][id]`` is a 1-based
     rank; ids absent from a lane contribute 0 for that lane. A lane with weight
-    0 is allowed and simply contributes nothing (a host can switch a lane off
-    without changing the call shape); NaN/inf/negative weights or ``k`` are
-    rejected so a trace can always be JSON-encoded with ``allow_nan=False``."""
+    0 is **disabled**: it contributes nothing and its ids do not enter the fused
+    pool at all (an id ranked only by a disabled lane is not a candidate), so a
+    host can switch a lane off without changing the call shape and without that
+    lane's cards taking quota seats with a zero score. NaN/inf/negative weights
+    or ``k`` are rejected, and the fused sums are checked to be finite, so a
+    trace can always be JSON-encoded with ``allow_nan=False``."""
     if not math.isfinite(k) or k < 0:
         raise ValueError("k must be finite and >= 0")
     fused: dict[str, float] = {}
@@ -115,10 +118,15 @@ def rrf_fuse(
         w = float(weights.get(lane, 0.0))
         if not math.isfinite(w) or w < 0:
             raise ValueError(f"weight for lane {lane!r} must be finite and >= 0")
+        if w == 0.0:
+            continue
         for cid, r in ranks.items():
             if not isinstance(r, int) or isinstance(r, bool) or r < 1:
                 raise ValueError("ranks are 1-based integers")
             fused[cid] = fused.get(cid, 0.0) + w / (k + r)
+    for cid, value in fused.items():
+        if not math.isfinite(value):
+            raise ValueError(f"fused score for {cid!r} is not finite")
     return fused
 
 
@@ -203,7 +211,8 @@ def select_hybrid_context_memories_with_trace(
         # turn to recall for — a vector alone must not smuggle cards in.
         return [], {**_query_trace(""), "mode": MODE_HYBRID, "vector_lane": "skipped",
                     "reason": "empty_query", "counts": {"candidates": len(by_id), "selected": 0},
-                    "selected": [], "rejected_sample": [], "gate_rejected_sample": []}
+                    "selected": [], "rejected_sample": [], "gate_rejected_sample": [],
+                    "lane_disabled_sample": []}
 
     # --- lexical lane (unchanged scorer) ---------------------------------
     lexical: dict[str, dict] = {cid: _memory_relevance(query, m) for cid, m in by_id.items()}
@@ -276,10 +285,18 @@ def select_hybrid_context_memories_with_trace(
     traces: list[dict] = []
     seen: set[str] = set()
 
+    lanes_enabled = {"vector": vector_weight > 0, "lexical": lexical_weight > 0}
+
     def lane_of(cid: str) -> str:
-        if cid in vec_rank and cid in lex_rank:
+        in_v = cid in vec_rank and lanes_enabled["vector"]
+        in_l = cid in lex_rank and lanes_enabled["lexical"]
+        if in_v and in_l:
             return "both"
-        return "vector" if cid in vec_rank else "lexical"
+        if in_v:
+            return "vector"
+        if in_l:
+            return "lexical"
+        return "disabled" if (cid in vec_rank or cid in lex_rank) else "none"
 
     def row(cid: str, *, bucket: str, selected: bool) -> dict:
         m = by_id[cid]
@@ -299,7 +316,7 @@ def select_hybrid_context_memories_with_trace(
             "matched_units": list(r.get("matched_units") or [])[:8],
             "matched_phrases": list(r.get("matched_phrases") or [])[:6],
             "reason": str(r.get("reason") or "")[:120],
-            "lane": lane_of(cid) if cid in fused else "none",
+            "lane": lane_of(cid),
             "bucket": bucket,
             "selected": bool(selected),
         }
@@ -339,8 +356,10 @@ def select_hybrid_context_memories_with_trace(
     traces.sort(key=lambda t: fused_sorted.index(t["id"]))
 
     rejected = [cid for cid in fused_sorted if cid not in seen]
+    lane_disabled = [cid for cid in by_id
+                     if cid not in fused and (cid in vec_rank or cid in lex_rank)]
     gate_rejected = sorted(
-        (cid for cid in by_id if cid not in fused),
+        (cid for cid in by_id if cid not in fused and cid not in vec_rank and cid not in lex_rank),
         key=lambda cid: (vec_score.get(cid, -2.0), lexical[cid]["score"], cid),
         reverse=True,
     )
@@ -353,6 +372,7 @@ def select_hybrid_context_memories_with_trace(
         "min_relevance": min_relevance,
         "rrf_k": rrf_k,
         "weights": {"vector": vector_weight, "lexical": lexical_weight},
+        "lanes_enabled": lanes_enabled,
         "shortlist": shortlist,
         "recent_within_days": recent_within_days,
         "reference_time": reference_time,
@@ -365,6 +385,7 @@ def select_hybrid_context_memories_with_trace(
             "shortlisted": len(short),
             "selected": len(chosen),
             "gate_rejected": len(gate_rejected),
+            "lane_disabled": len(lane_disabled),
         },
         "selected": traces,
         "rejected_sample": [row(cid, bucket="rejected", selected=False) for cid in rejected[:8]],
@@ -372,5 +393,8 @@ def select_hybrid_context_memories_with_trace(
         # can be diagnosed ("target was there, vector 0.41 < min_cosine 0.5").
         "gate_rejected_sample": [row(cid, bucket="gate_rejected", selected=False)
                                  for cid in gate_rejected[:8]],
+        # Passed a gate, but only in a lane the host switched off (weight 0).
+        "lane_disabled_sample": [row(cid, bucket="lane_disabled", selected=False)
+                                 for cid in sorted(lane_disabled)[:8]],
     }
     return chosen, trace
