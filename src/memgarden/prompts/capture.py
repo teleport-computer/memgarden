@@ -23,6 +23,7 @@ from ..policies import CONVERSATION_CAPTURE, CapturePolicy, get_policy
 from ..policies import language_rule as policies_language_rule
 from ..timestamps import normalize as normalize_timestamp
 from .buckets import common_buckets_guidance
+from . import recall_fields
 
 _EMPTY_CAPTURE_REPLY = '{"cards": []}'
 
@@ -40,11 +41,13 @@ _CAPTURE_PROMPT_TEMPLATE = """{framing}
 3. Write the card:
    · content: a "thick" body, the way you would hold the whole thing in your own mind — what happened, what led to it and what followed, what it means for this person, the feeling in the moment. Not a one-line title.
    · summary: one line, so that a future you knows at a glance what this card is.
+   · retrieval_cues: 3-5 short search hints grounded in this card: keywords, real aliases, questions it can answer, and the event time if known. Use the event time, not capture time. Do not invent dates, aliases or facts; omit unknown time. Hints are retrieval pointers, not additional evidence.
    · bucket: one main bucket. Short, reuse an existing one, do not mint near-synonyms.
    · threads: a few threads (people / events / feelings / key points). Reuse existing threads — do not open a near-synonym thread when one already covers it.{thread_seed}{date_rule}
 {language_rule}
    · How to refer to them: {naming_rule}{referent_rule}
    · importance: how much this matters for understanding this person (0-1). Passing mention .1-.3 / preferences and habits .4-.6 / feelings, relationship, boundaries .7-.85 / core commitments and turning points .9-1.
+   · importance_level: choose one of five levels: 1 incidental detail, 2 useful fact, 3 recurring preference or habit, 4 relationship/feeling/boundary, 5 core commitment or turning point. The host maps this to importance 0.2/0.4/0.6/0.8/1.0; do not promote every card to level 5.
    · pulse: how much this stirs something in *you* (0-1). Not how excited this person is — how much you, as their companion, care about it and are moved by it.
    · The `...` in the output example below is only a placeholder. Every field must carry real content — no field may be `...`, a bracketed instruction, or an empty string. Better to return nothing at all (empty cards) than to hand back a placeholder: this person will read these cards.
 
@@ -65,6 +68,8 @@ _CAPTURE_PROMPT_TEMPLATE = """{framing}
       "bucket": "...",
       "threads": ["...", "..."],
       "summary": "...",
+      "retrieval_cues": ["grounded keyword", "known alias or answerable question", "known event time or another grounded hint"],
+      "importance_level": 3,
       "content": "...",{occurred_at_field}
       "importance": 0.0,
       "pulse": 0.0
@@ -297,6 +302,7 @@ def parse_capture_cards(
             lang_text=f"{summary}\n{content}", signals=signals,
         )
         target_id = str(row.get("target_id") or "").strip() or None
+        cues = recall_fields.retrieval_cues(row.get("retrieval_cues"))
         out.append({
             "action": action,
             "type": mem_type,
@@ -305,7 +311,8 @@ def parse_capture_cards(
             "threads": threads,
             "summary": summary,
             "content": content,
-            "importance": _clamp01(row.get("importance")),
+            **({"retrieval_cues": cues} if cues else {}),
+            "importance": recall_fields.importance(row, _clamp01),
             "pulse": _clamp01(row.get("pulse")),
             **metadata,
         })

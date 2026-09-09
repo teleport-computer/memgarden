@@ -20,6 +20,7 @@ specific entity "TOHO Project".
 from __future__ import annotations
 
 import re
+import math
 
 
 from .. import timestamps as memory_timestamps
@@ -384,6 +385,8 @@ def select_context_memories_with_trace(
     mode: str = "default",
 ) -> tuple[list[dict], dict]:
     """Pick memory cards and return a privacy-light selection trace."""
+    if str(mode).strip().lower() == "relevant":
+        return select_relevant_context_memories_with_trace(moments, latest_user_text, cap=cap)
     if not moments:
         return [], {**_query_trace(latest_user_text), "selected": [], "rejected_sample": []}
 
@@ -568,6 +571,58 @@ def select_context_memories_with_trace(
         "rejected_sample": [],
     }
     return out[:cap], trace
+
+
+def select_relevant_context_memories_with_trace(
+    moments: list[dict], query: str, cap: int = 8, *, min_relevance: float = 0.35,
+) -> tuple[list[dict], dict]:
+    """Opt-in ambient recall: relevance gates every bucket; quotas are soft.
+
+    Unlike the historical default/explicit Chain configuration, unrelated recent
+    or turning-point cards cannot enter just to fill a quota. Spare seats go to
+    other eligible cards. Hosts must provide semantic ``roles``; titles confer
+    no role. This is lexical relevance, not an estimate of answer correctness.
+    """
+    if not math.isfinite(min_relevance) or not 0 <= min_relevance <= 1:
+        raise ValueError("min_relevance must be finite and between zero and one")
+    cap = max(0, int(cap))
+    scored = [(m, _memory_relevance(query, m)) for m in moments if m.get("id")]
+    eligible = [(m, r) for m, r in scored
+                if r["score"] >= min_relevance and r["confidence"] in {"medium", "strong"}]
+    chosen, seen, traces = [], set(), []
+
+    def choose(pool, quota, bucket):
+        added = 0
+        for m, rel in pool:
+            mid = str(m["id"])
+            if mid in seen:
+                continue
+            if len(chosen) >= cap or added >= quota:
+                break
+            seen.add(mid)
+            chosen.append(_annotate(m, rel, bucket=bucket))
+            traces.append(_selection_for_trace(m, rel, selected=True, bucket=bucket))
+            added += 1
+
+    turning = sorted(
+        [(m, r) for m, r in eligible if ROLE_TURNING_POINT in (m.get("roles") or [])],
+        key=lambda pair: (memory_timestamps.sort_key(pair[0].get("occurred_at")), str(pair[0]["id"])),
+        reverse=True,
+    )
+    recent = sorted(eligible, key=lambda pair: (
+        memory_timestamps.sort_key(pair[0].get("created_at")), str(pair[0]["id"])), reverse=True)
+    ranked = sorted(eligible, key=lambda pair: (
+        pair[1]["score"], memory_timestamps.sort_key(pair[0].get("occurred_at")),
+        str(pair[0]["id"])), reverse=True)
+    choose(turning, 3, "turning")
+    choose(recent, 2, "recent")
+    choose(ranked, cap - len(chosen), "query")
+    rejected = sorted([(m, r) for m, r in scored if str(m["id"]) not in seen],
+                      key=lambda pair: (pair[1]["score"], str(pair[0]["id"])), reverse=True)
+    return chosen, {**_query_trace(query), "mode": "relevant", "min_relevance": min_relevance,
+                    "selected": traces, "rejected_sample": [
+                        _selection_for_trace(m, r, selected=False, bucket="rejected")
+                        for m, r in rejected[:8]]}
 
 
 def select_context_memories(

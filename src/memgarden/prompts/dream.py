@@ -29,6 +29,7 @@ from ..text.card_text import (
     sanitize_card_labels,
 )
 from .buckets import common_buckets_guidance
+from . import recall_fields
 from ..naming import referent_rule as _referent_rule
 from ..policies import language_rule as policies_language_rule
 
@@ -53,6 +54,7 @@ In the raw conversation that has piled up, look only for these high-value things
 1. merge: fold cards about the same event or the same thread at different stages into one more complete card; converge near-synonym buckets and threads.
    The test is not just textual similarity: "wants to see the autumn leaves in Kyoto" and "already booked the Kyoto flights" are the same plan progressing, and should merge; whereas "keeps up the cycling" and "not sleeping well lately" are two separate things even though both are health. Merely sharing a bucket — life, health, work — does not make two things the same thing. Every proposal must carry a rationale spelling out the continuity.
 2. thicken: fold scattered small mentions into the card they belong to, making it more complete.
+   For old cards without retrieval_cues, a thicken proposal may keep the full factual body intact and add 3-5 grounded search hints: keywords, actual aliases, answerable questions, and known event time (never the consolidation date). Do not invent missing dates or facts. State this metadata repair in the rationale; preserve every source fact.
 3. supersede: when things contradict, let the new one replace the old (mark the old card superseded, do NOT delete it).
    When you are unsure, do not decide on your own — write it into questions_to_ask and raise it with this person at a suitable moment.
 
@@ -67,6 +69,7 @@ In the raw conversation that has piled up, look only for these high-value things
   While tidying old cards, rewrite any system label or placeholder that refers to this person according to the rule above. A pronoun already in an old card that reads correctly stays as it is. A placeholder in a card that refers to YOU (the AI) is this person's way of addressing you — leave it alone.
 · Every field of `result` carries the content of the NEW card after merging or thickening — never write bookkeeping notes like "superseded by X", and never put a card id inside a field. Retiring the old card is done by the system; you do not explain it in the content.
 · If there is nothing to tidy, do nothing (empty consolidations). That is normal.
+· Reassess each proposed result with importance_level 1-5: 1 incidental detail, 2 useful fact, 3 recurring preference/habit, 4 relationship/feeling/boundary, 5 core commitment/turning point. The host maps these to 0.2/0.4/0.6/0.8/1.0. Do not inflate all cards. retrieval_cues are only navigation hints, not evidence or new facts.
 · The `...` in the output example below is only a placeholder. Every field you write must carry real content — summary is one true sentence, content is a full body of prose; no field may be `...`, a bracketed instruction, or an empty string. Better to return nothing at all (empty consolidations) than to hand back a placeholder: this person will read these cards.
 
 [Existing cards]{cards}
@@ -83,6 +86,8 @@ In the raw conversation that has piled up, look only for these high-value things
         "bucket": "...",
         "threads": ["...", "..."],
         "summary": "...",
+        "retrieval_cues": ["grounded keyword", "answerable question", "known event time or another grounded hint"],
+        "importance_level": 3,
         "content": "...a thick body of prose...",
         "importance": 0.0,
         "pulse": 0.0
@@ -229,6 +234,7 @@ def parse_dream_consolidations(
             bucket=str(result.get("bucket") or "").strip()[:80], threads=threads, guard=_guard_on,
             lang_text=f"{summary}\n{content}", signals=signals,
         )
+        cues = recall_fields.retrieval_cues(result.get("retrieval_cues"))
         out.append({
             "op": op,
             "card_ids": card_ids,
@@ -238,7 +244,8 @@ def parse_dream_consolidations(
                 "threads": threads,
                 "summary": summary,
                 "content": content,
-                "importance": _clamp01(result.get("importance")),
+                **({"retrieval_cues": cues} if cues else {}),
+                "importance": recall_fields.importance(result, _clamp01),
                 "pulse": _clamp01(result.get("pulse")),
             },
         })
