@@ -1,18 +1,19 @@
-"""Memory Garden 内核 —— 记忆的判断力，与宿主环境无关。
+"""Memory Garden —— 可挂进任意 Runtime 的记忆编辑内核。
 
-这个包只做判断，不做执行：
+这个包提供两层：``GardenComponent`` 只做判断；``MountedGarden`` 把可替换的
+``StoragePort`` 接上，统一执行 load、CAS、幂等、生命周期与整理账本。能力包括：
 
   · 什么值得记（三个策略档位各一把尺子）
   · 怎么归桶起线索、怎么校验模型输出、怎么去重
   · 这轮该想起哪几张（打分排序）
   · 要不要整理了、整理时怎么合并消矛盾
 
-不在这里的（由调用方提供）：
+不在这里的（由宿主提供）：
 
-  加解密 · 身份装配 · 所有权校验 · gates · 审计 ·
-  锁与事务 · 捞聊天记录 · 定时器 · 真正调模型
+  模型/provider 与凭证 · 加解密 · 认证和可信 Scope 装配 · 审计 ·
+  对话读取 · 定时器/队列 · 生产存储选型
 
-硬指标：**本包只依赖标准库和同源的 agent-protocol-core**，不 import 任何宿主模块。
+硬指标：**本包只依赖 Python 标准库**，不 import 任何宿主模块。
 一旦这条破了，「内核可独立发布 / 记忆库可被替换」就都不成立
 （宿主侧应当有一条守卫测试盯着这件事 —— io 用的是 AST 扫描）。
 
@@ -24,7 +25,8 @@
 
     garden = GardenComponent(model=my_model)          # 模型由你提供，key 不给它
     result = garden.capture(CaptureRequest(window=对话, locale="zh-Hans"))
-    my_store.apply(result.mutations)                   # 落库是你的事
+    my_store.apply("tenant", result.mutations, owner="user-42",
+                   idempotency_key="turn-1", expected_revision=None)
 
 ``GardenComponent`` 之下的模块（``prompts`` / ``scoring`` / ``selection`` /
 ``dreaming`` / ``text``）是**内部零件**。它们仍然公开、可以直接用（高级用法、
@@ -66,7 +68,9 @@ from .mounted import (
     MountedGarden,
     OperationReceipt,
     Scope,
+    StorageCapabilityError,
 )
+from .importing import ImportProgress
 from .ports import ClockPort, ModelPort, SystemClock
 from .schema import ERROR_CODES, manifest, schemas
 from .service import Service
@@ -81,6 +85,7 @@ __all__ = [
     "OperationReceipt",
     "MaintenanceCheck",
     "MountPermissionError",
+    "StorageCapabilityError",
     "SqliteStore",
     "Service",
     "manifest",
@@ -96,6 +101,7 @@ __all__ = [
     "CaptureRequest",
     "CaptureResult",
     "ImportRequest",
+    "ImportProgress",
     "CuratedWriteRequest",
     "ExportRequest",
     "ExportResult",

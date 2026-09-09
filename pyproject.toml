@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "memgarden"
 version = "0.19.0"
-description = "记忆的编辑判断：什么值得记、归哪个桶、几张卡、什么时候该整理。不调模型、不碰存储。"
+description = "可插拔的 AI 记忆编辑内核：落卡、召回、整理与可替换存储编排。"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -40,7 +40,11 @@ Issues = "https://github.com/teleport-computer/memgarden/issues"
 
 [project.optional-dependencies]
 sqlite = []          # 只用标准库 sqlite3，列在这里是为了让意图显式
-dev = ["pytest>=8.0"]
+dev = [
+    "pytest>=8.0",
+    "jsonschema>=4.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
 
 [project.scripts]
 # 装完包就能敲命令 —— 这是「别人愿不愿意继续读下去」的最低门槛。
@@ -56,5 +60,5 @@ artifacts = ["src/memgarden/adapters/dsh/*.mjs",
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
-# 两个包都发布之后，删掉这一节即可 —— 上面的 dependencies 不用改。
+# 保留空表，便于本地开发时按需添加 workspace source；发布包不依赖它。
 [tool.uv.sources]

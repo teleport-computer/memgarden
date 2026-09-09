@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import copy
-import itertools
+import re
 import threading
 
 from ..storage import (
@@ -26,22 +26,25 @@ from ..storage import (
     IdempotencyConflict,
     RevisionConflict,
     Snapshot,
-    mutations_digest,
+    apply_digest,
 )
-from ._ops import apply_ops
+from ._ops import apply_ops, new_seed_mounts
+from ..ports import ClockPort, SystemClock
 
 
 class InMemoryStore:
     """线程安全的最小实现。CAS 用一个单调递增的整数当版本号。"""
 
-    def __init__(self) -> None:
+    def __init__(self, *, clock: ClockPort | None = None) -> None:
         self._lock = threading.RLock()
+        self._clock = clock if clock is not None else SystemClock()
         # 🔴 key 是 (tenant, owner) —— 只按 tenant 分桶就是同租户越权的根因。
         self._cards: dict[tuple[str, str], dict[str, dict]] = {}
         self._revision: dict[tuple[str, str], int] = {}
         self._applied: dict[tuple[str, str], dict[str, tuple]] = {}
         self._ledger: dict[tuple[str, str, str], dict] = {}   # +mount
-        self._ids = itertools.count(1)
+        self._seed_generation: dict[tuple[str, str, str], int] = {}
+        self._next_ids: dict[tuple[str, str], int] = {}
 
     # -- 能力声明 -------------------------------------------------------- #
 
@@ -59,7 +62,13 @@ class InMemoryStore:
             if not filters.get("include_superseded"):
                 cards = [c for c in cards if not c.get("superseded_by")]
             return Snapshot(cards=copy.deepcopy(cards),
-                            revision=self._rev(key), owner=key[1])
+                            revision=self._rev(key), owner=key[1],
+                            seed_generations={
+                                mount: value
+                                for (tenant, owner, mount), value
+                                in self._seed_generation.items()
+                                if (tenant, owner) == key
+                            })
 
     def maintenance_state(self, tenant: str, *, owner: str, mount: str) -> dict:
         """上一次整理留下的账本。没有就返回空 dict。"""
@@ -83,7 +92,7 @@ class InMemoryStore:
             # 幂等：同一个 key 重放，原样返回上次的结果，不重复写。
             # 但**必须是同一批内容** —— 同 key 不同内容不是重放，是撞了 key，
             # 静默返回旧结果会让第二批改动凭空消失。
-            digest = mutations_digest(mutations)
+            digest = apply_digest(mutations, maintenance_state)
             cached = self._applied.get(key, {}).get(idempotency_key)
             if cached is not None:
                 prev_digest, prev_result = cached
@@ -97,11 +106,30 @@ class InMemoryStore:
             bucket = self._cards.setdefault(key, {})
             # 原子：先在副本上做完，全部成功才落回去。
             staged = dict(bucket)
-            results = apply_ops(staged, mutations,
-                                new_id=lambda: f"m_{next(self._ids)}")
+            next_id = self._reserved_next_id(key, mutations)
 
+            def allocate() -> str:
+                nonlocal next_id
+                value = next_id
+                next_id += 1
+                return f"m_{value}"
+
+            results = apply_ops(staged, mutations, new_id=allocate,
+                                written_at=self._clock.now_iso())
+
+            seed_mounts = new_seed_mounts(
+                mutations, before=bucket, staged=staged)
             self._cards[key] = staged
-            self._revision[key] = int(self._rev(key)) + 1
+            # ID 水位也只在整批成功后提交；失败批次不能留下半个可见状态。
+            self._next_ids[key] = next_id
+            for mount in seed_mounts:
+                generation_key = (*key, mount)
+                self._seed_generation[generation_key] = (
+                    self._seed_generation.get(generation_key, 0) + 1)
+            changed = (staged != bucket or bool(seed_mounts)
+                       or maintenance_state is not None)
+            if changed:
+                self._revision[key] = int(self._rev(key)) + 1
             # 🔴 账本和卡改动在同一个临界区里落地 —— 任一半单独推进都会
             # 造成「整理丢了没人知道」或「同一批反复整理」。
             if maintenance_state is not None:
@@ -116,6 +144,18 @@ class InMemoryStore:
 
     def _rev(self, key: tuple[str, str]) -> str:
         return str(self._revision.setdefault(key, 0))
+
+    def _reserved_next_id(
+        self, key: tuple[str, str], mutations: list[dict],
+    ) -> int:
+        watermark = self._next_ids.get(key, 1)
+        for mutation in mutations:
+            card = mutation.get("card")
+            supplied = str(card.get("id") or "") if isinstance(card, dict) else ""
+            match = re.fullmatch(r"m_(\d+)", supplied)
+            if match:
+                watermark = max(watermark, int(match.group(1)) + 1)
+        return watermark
 
 
 def _key(tenant: str, owner: str) -> tuple[str, str]:

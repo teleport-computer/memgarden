@@ -168,7 +168,9 @@ def test_a_store_that_cannot_hard_delete_refuses_instead_of_archiving(store):
     store.capabilities = lambda: Capabilities(     # type: ignore[method-assign]
         supports_supersede=True, supports_atomic_batch=True,
         supports_custom_fields=True, supports_metadata_sort=True,
-        supports_hard_delete=False, supports_owner_scoping=True)
+        supports_hard_delete=False, supports_owner_scoping=True,
+        supports_maintenance_state=True,
+        supports_monotonic_seed_generation=True)
 
     out = MountedGarden(model=_Tidy(), store=store).delete_record(
         ME, "m_1", requested_by="user:u1")

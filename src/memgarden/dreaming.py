@@ -220,6 +220,8 @@ def consolidations_to_mutations(
         if not targets or not result:
             continue
         card = dict(result)
+        # 固定为内核可信来源，防止整理产物被再次计入原始卡水位线而自激。
+        card["source"] = DREAM_SOURCE
         if mount:
             card.setdefault("mount", mount)
         payload = Supersede(

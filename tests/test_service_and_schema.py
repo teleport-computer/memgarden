@@ -195,7 +195,7 @@ def test_manifest_capabilities_match_what_the_running_service_can_actually_do(se
     for name, backing in {
         "capture": ("capture.run", "capture.begin"),
         "turn_context": ("context.get",),
-        "maintenance": ("maintenance.run",),
+        "maintenance": ("maintenance.run", "maintenance.begin"),
         "model_tools": ("tool.list", "tool.invoke"),
         "browse": ("records.browse",),
         "export": ("records.export",),

@@ -108,7 +108,7 @@ def main() -> None:
         except IdempotencyConflict:
             print("     同一个 key 换一批内容 → 报冲突（多半是键生成漏了批次标识）")
 
-    print("\n⑤ 接别的记忆库：只换字段映射，不改代码")
+    print("\n⑤ 映射外部记录：只转换字段，不代表接入另一套记忆引擎")
     notion = FieldMap(
         summary_fields=("Name",),           # 可公开的摘要从哪来
         text_fields=("Name", "Notes"),      # 参与搜索的全部字段

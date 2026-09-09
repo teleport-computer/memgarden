@@ -550,7 +550,9 @@ def test_promote_requires_the_host_to_have_authorized_it() -> None:
 
     ok = garden.promote(PromoteRequest(record_id="m_1", to_mount="family-shared",
                                        authorized=True))
-    assert ok.ok and ok.mutations[0]["changes"]["mount"] == "family-shared"
+    assert ok.ok
+    assert ok.mutations[0]["op"] == "promote"
+    assert ok.mutations[0]["to_mount"] == "family-shared"
 
 
 # --------------------------------------------------------------- 展示投影

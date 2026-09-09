@@ -1,84 +1,29 @@
-# dsh-memgarden
+# DeepSeek Harness Adapter
 
-把 Memory Garden 挂到 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 上的薄 Adapter。
+将 Memory Garden 接入 DeepSeek Harness，负责每轮召回、轮末 Capture、Maintenance、模型工具和待落卡恢复。判断与存储语义仍由 `memgarden serve` 执行。
 
-> ## ✅ 已端到端跑通（2026-09-04，39 条验收全绿）
->
-> 不是「照文档写的骨架」—— 用真实的 DSH 和真实的模型跑过：
->
-> ```
-> dsh          0.1.2-alpha.4（commit 4e84901e6471b79ec0338099867ebb4606d12bb5）
-> 模型          deepseek-v4-flash（落卡侧 deepseek-chat）
-> 改 DSH 代码   0 行 —— 只在 profile 的用户层加了一个插件
-> ```
->
-> **验到的场景**（sevenfloor §8.2 的核心几步）：
->
-> ```
-> 会话 A  用户：「我不吃辣，一吃就胃疼」
->         → 轮末自动落卡，桶=饮食
->
-> 会话 B  全新会话，不复制 A 的任何对话
->         用户：「晚饭吃什么？」
->         → pre-step 自动召回
->         → 模型：「小米南瓜粥搭配清蒸鲈鱼和焯水的西兰花，温和养胃又不辣」
-> ```
->
-> **模型全程没有主动调用任何记忆工具** —— 它根本不知道有记忆系统存在。
-> 这正是「只注册 MCP 工具做不到」的那件事：自动召回、自动落卡不依赖模型
-> 记得去查。
+当前完成度统一见 [STATUS](../../docs/STATUS.md)，数据和权限规则见 [接入与数据参考](../../docs/INTEGRATION-AND-DATA.md)。
 
-## Adapter 为什么随 Python 包发布，而不是单独发 npm
+## 安装与升级
 
-它和 `memgarden` 共用**同一套 wire 协议**。拆成两个包、两个版本号之后，
-用户就能装出一个我们从没测过的组合（adapter 0.1.0 + memgarden 0.20.0），
-而症状不是启动失败 —— 是某一类记忆悄悄记不进去。
+Adapter 随 Python wheel 分发，无 npm 依赖。安装器把插件文件拷入 DSH profile，因此升级 Python 包后，需要重新运行 `install-dsh` 更新副本。
 
-放在一起，版本永远同步：`pip install memgarden` 装到哪一版，Adapter 就是哪一版。
-用户本来就要装这个 Python 包（Adapter 靠它跑 `memgarden serve`），所以零成本。
-
-代价是 JS 那边用不上 npm 的依赖解析 —— 但这个 Adapter **零 npm 依赖**，
-本来也没什么可解析的。
-
-## 怎么跑
+从 DSH 项目目录执行以下步骤；审核修复分支时先安装该 checkout 或构建出的确切 wheel，不能用旧 PyPI 包代替本次代码：
 
 ```bash
-# 1. 装 DSH 和 memgarden（Adapter 随 memgarden 一起装上，不是单独的 npm 包）
 npm install @deepseek-ai/dsh@0.1.2-alpha.4
 pip install memgarden
-
-# 2. 初始化 profile
 export DSH_HOME=/absolute/path/to/dsh-home
-npx dsh --profile sdk-minimal --dump-default-config >/dev/null
-
-# 3. 一条命令装好（写 profile 配置 + 拷插件）
-memgarden install-dsh --tenant <你的租户> --owner <这座花园的所有者>
-
-# 4. 照常起 dsh
+npx dsh --profile sdk-minimal --dump-default-config
+memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans
+npx dsh --profile sdk-minimal
 ```
 
-> 第 3 步以前是「照着下面的示例把插件挂进 cordis.patch.yml」，而真正能跑的
-> 步骤（建目录、连 symlink、删掉默认文件里那个 `[]` 占位再拼 YAML）藏在
-> E2E 脚本里。陌生工程师照 README 做不出来 —— 那说明这个 Adapter 还不算
-> 能被别人装。现在装机脚本自己处理这些。
+项目跟踪的兼容基线是 DSH `0.1.2-alpha.4`，commit `4e84901e6471b79ec0338099867ebb4606d12bb5`。真实模型凭据配置在 DSH provider 中。上述命令配置和运行宿主，会创建 profile、数据库及状态目录。
 
-### `--owner` 为什么没有默认值
+重复安装遇到已有 `id: memgarden` 时，**只更新插件副本，不覆盖原来的 YAML 配置**。更换 owner、数据库、stateDir 或 Python 环境后，要检查已有配置，不能假定新命令参数已写回。
 
-```
-tenant    账户 / 组织 / 部署的安全边界
-owner     一座长期花园的稳定所有者          ← 这个
-agent /   此刻在执行的是谁（来源身份，不是归属）
-session
-```
-
-给默认值的话，同一个 tenant 下所有用户共用一座花园，而且不报错 ——
-`agent-private` 这个名字就没有意义了。拿不到 owner 时插件**直接不启用记忆**
-（也不会起子进程、不建库），并在日志里说明原因。
-
-**别拿 session 当 owner**：用户换个设备、重开一轮就会拿到一座空花园，
-而这在测试里看不出来 —— 测试都是新建的。
-
-装出来的 `cordis.patch.yml` 长这样：
+配置示例：
 
 ```yaml
 - insert:
@@ -86,176 +31,150 @@ session
       name: 'dsh-memgarden'
       inject: [tools, llm]
       config:
-        bin: /path/to/memgarden          # pip 装出来的可执行文件
+        bin: /path/to/venv/bin/memgarden
         storage: 'sqlite:////path/to/garden.db'
-        tenant: 'acme'                   # 🔴 来自你的可信上下文
-        memoryOwner: 'user-42'           # 🔴 同上，且必填
+        tenant: 'example'
+        memoryOwner: 'user-42'
         locale: 'zh-Hans'
+        stateDir: '/durable/dsh-state'
 ```
 
-注意**没有 `model`**：模型调用走 DSH 自己的 provider（`inject: [llm]`），
-Garden 不持有 key，也不知道你用的哪个 provider。
+`tenant`、`memoryOwner` 来自可信宿主配置。owner 必须稳定，不可用 session 替代；缺 owner 时插件不启动记忆服务。一个配置绑定一座花园，不能把示例固定 owner 用于所有用户。
 
-## 接线点（都是 DSH 的正式扩展点）
+数据库保存卡片；stateDir 保存含对话窗口的待办。两者都需要跨进程重启保留。当前 outbox 没有跨进程文件锁，不应让多个插件进程并发写同一 stateDir。
 
-| 时机 | DSH 扩展点 | 做什么 |
-|---|---|---|
-| 每次请求模型前 | `agent/pre-step`（waterfall） | 召回相关记忆，注入本轮上下文 |
-| 一轮结束 | `agent/turn-stopping` | 落卡。**会让 turn 的结束等它做完**（几秒），但回复早已生成并发给用户了。不等的话进程可能随即退出，落卡在半路被杀且不报错 |
+## 一轮对话的路径
 
-Adapter **只做翻译和接线**，不复制任何提示词 / 解析 / 挑卡 / 整理逻辑 ——
-判断一律回到 Python 那边（`memgarden serve`）。复制过来最省事也最致命：
-两边会慢慢漂，而漂了不报错，表现是「同样的对话，DSH 上记的东西和别处不一样」。
+| 时机 | 扩展点与行为 |
+|---|---|
+| 每次模型调用前 | `agent/pre-step` waterfall，先保留其他插件处理结果，再查询并注入记忆 |
+| 一轮结束 | `agent/turn-stopping`，记录待办，执行 Capture，再检查是否需要 Maintenance |
+| 模型主动查/写 | 注册 `memgarden_memory_search` / `memgarden_memory_write`，经可信 Scope 调用服务 |
+| 重启 | 从 outbox 重放未完成 Capture，沿用业务幂等键 |
 
-## 真跑才抓到的三件事
+轮末 hook 等待其 Promise 完成，因此记忆处理会增加 turn 收尾时间。自动召回和 Capture 不依赖模型主动调用工具。
 
-写这个 Adapter 的过程本身就说明了「照文档写」和「真跑一遍」的差距。
+模型由 DSH 提供：
 
-**① `content` 必须是分片数组，不能是字符串**
-
-```js
-// ❌ 整轮对话直接失败
-{ role: 'user', content: '[记忆]\n- 不吃辣' }
-
-// ✅
-{ role: 'user', content: [{ type: 'text', text: '[记忆]\n- 不吃辣' }] }
+```text
+capture.begin     → DSH llm.stream → capture.feed
+maintenance.begin → DSH llm.stream → maintenance.feed
 ```
 
-传字符串时 DSH 内部会 `content.some(...)`，报
-`content.some is not a function` —— **这句话和「记忆注入」看不出任何关系**。
-类型检查发现不了，文档也没写死这一点。
+服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。History Import / Migrate 当前没有对应的宿主驱动 lane，因此该默认服务会在 manifest 关闭这两项。它们并非自动 turn hook，不能因核心接口存在就宣称 DSH 已具备管理入口。
 
-**② `agent/pre-step` 是 waterfall，必须先 `await next()` 再追加**
+## 窗口预算与恢复
 
-自己造一份 `messages` 返回，会把别的插件加的东西悄悄丢掉，而且不报错。
+Adapter 从本轮消息构造 Capture 窗口，包含用户、助手和工具结果。单次模型输入仍有预算：
 
-**③ 子进程的 stderr 必须自己落一份**
+| 配置 | 默认值 | 含义 |
+|---|---:|---|
+| `captureMessageChars` | 16,000 | 单条消息插入预算 |
+| `captureWindowChars` | 64,000 | 整轮插入预算 |
 
-Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
-而这两件事的处置完全不同。
+这些字符计数按 JavaScript 字符串长度计量，不等同于模型 token 或用户感知字符数。超预算时保留头尾并标出省略数量。outbox 保存的是这个已构造的窗口，不是完整原始对话备份；原始素材仍由 Runtime 保存。
 
-## 验收
+`stateDir/memgarden-outbox.jsonl` 在模型调用前追加待办。完成且回执无 error 后移除；RPC 成功但业务写入失败时继续保留。清理使用同目录临时文件再 rename，避免直接清空原文件再写回的崩溃窗口。
+
+outbox 写入失败会记日志并继续尝试 Capture，此时不能保证崩溃后恢复；原子 rename 也不等于已经证明断电持久性。失败待办、日志及其清理归部署方运维。库内会话是进程内状态，过期或重启后须重新 begin，持久回执承担写入幂等。
+
+## 验证方式
+
+在仓库根目录运行：
 
 ```bash
-# 真模型的正向场景（会花钱，慢）
+# 不联网：假 DSH 上下文 + 实际 Adapter + 真实服务
+uv run --extra dev pytest -q tests/test_dsh_adapter_offline.py
+
+# 不联网：验收判据本身能否拒绝假阳性
+uv run --extra dev pytest -q tests/test_dsh_acceptance_evidence.py
+
+# 不联网：只检查 MemGarden Service，不经过 Adapter
+uv run python adapters/dsh-memgarden/e2e/failure_paths.py
+```
+
+### pinned alpha.4 的 Python SDK 来源
+
+Python import 名是 `deepseek_harness`，官方 distribution 名是
+`deepseek-harness-sdk`。但 DSH `0.1.2-alpha.4` 的官方 commit 中，
+`python/sdk/pyproject.toml` 仍使用构建时注入的 `0.0.0.dev0`；截至
+2026-09-08，[PyPI 官方 release history](https://pypi.org/project/deepseek-harness-sdk/#history)
+只有 `0.1.2a3` 和之后的 `0.1.2rc1`，没有能和 npm alpha.4
+精确对应的 Python 发行版。不得用 a3 或新版 rc 代替并声称验证了 alpha.4。
+
+顶层 npm 包 `@deepseek-ai/dsh@0.1.2-alpha.4` 的内部 DSH 依赖使用
+`^0.1.2-alpha.4`。在当前 registry 直接执行单个 npm install 会把
+部分内部包解析到之后的 rc；只看 `dsh --version` 仍会显示
+alpha.4，不能证明整个运行时是 alpha.4。如果使用 npm 发行物，
+必须用 lock/overrides 把所有 `@deepseek-ai/dsh` 及 `@deepseek-ai/dsh-*`
+包固定到同版本；验收脚本会在调模型前扫描这个闭包并拒绝混版。
+
+更直接的可复现准备方式是从同一官方 commit 构建 DSH，
+并在它的源码 SDK 环境运行。以下是准备步骤，仍须在目标
+环境实际跑完验收，不代表本仓已经证明了真实 provider 联调：
+
+```bash
+git clone https://github.com/deepseek-ai/deepseek-harness.git /absolute/path/to/deepseek-harness
+git -C /absolute/path/to/deepseek-harness checkout --detach 4e84901e6471b79ec0338099867ebb4606d12bb5
+
+# 构建同一 commit 的 DSH launcher（官方 run-from-source 流程）
+cd /absolute/path/to/deepseek-harness
+corepack pnpm install --frozen-lockfile
+corepack pnpm run build
+
+export UV_PROJECT_ENVIRONMENT=/absolute/path/to/dsh-sdk-venv
+uv sync --project /absolute/path/to/deepseek-harness/python/sdk --group test
+
+# exact source build 的绝对路径；避免其他 dsh 抢占 PATH
+export DSH_BIN=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js
+export MEMGARDEN_BIN=/absolute/path/to/memgarden-venv/bin/memgarden
 export DEEPSEEK_API_KEY=...
-python e2e/dsh_acceptance.py
 
-# 坏情况（不联网、不花钱，秒级，随便跑）
-python e2e/failure_paths.py           # 25/25
+uv run --project /absolute/path/to/deepseek-harness/python/sdk \
+  python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py
+
+# 失败后只复跑某一组，避免重复调用已通过的真实模型场景
+uv run --project /absolute/path/to/deepseek-harness/python/sdk \
+  python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py --group E
 ```
 
-⚠️ **这两组不是一回事，别合并成一个数字报**：`failure_paths.py` 直接对
-`memgarden serve` 发请求，**不穿过 DSH Adapter**。把它算进「DSH 端到端
-证据」会高估覆盖 —— 它证明的是服务在坏情况下的行为，不是 Adapter 的。
+这一 source-mode 步骤来自官方该 commit 的
+[`python/development.md`](https://github.com/deepseek-ai/deepseek-harness/blob/4e84901e6471b79ec0338099867ebb4606d12bb5/python/development.md)
+和 [`python/sdk`](https://github.com/deepseek-ai/deepseek-harness/tree/4e84901e6471b79ec0338099867ebb4606d12bb5/python/sdk)。
+验收脚本会检查 SDK 模块所在 checkout 的 git HEAD，检查
+`dsh --version` 精确等于 `0.1.2-alpha.4`，并验证 DSH 来自
+同一 exact source commit 或可检查且全为 alpha.4 的 npm 闭包。缺模块、
+错 commit、错版本、损坏或混版安装都会在调模型前诊断失败。
 
-    dsh_acceptance.py   DSH 正向 / 部分失败验收（真 DSH + 真模型）
-    failure_paths.py    MemGarden Service 离线失败路径（不经过 DSH）
-
-| 组 | 验的是 |
+| 证据 | 覆盖范围 |
 |---|---|
-| A 自动落卡 + 跨会话召回 | 会话 A 说「不吃辣」→ 全新会话 B 问「晚饭吃什么」→ 模型答「温和养胃又不辣」。**模型全程没主动调任何记忆工具** |
-| B 模型主动调工具 | `memgarden_memory_search` / `memgarden_memory_write` 注册进 DSH 的 Tool Registry，模型调了、真的落库 |
-| C 同租户跨 owner 隔离 | **同一个 tenant、同一个 SQLite 文件**，`user-42` 写的 `user-99` 读不到（召回 0 条）；不配 owner 时记忆不启用、对话照常 |
-| D 失败路径 | 服务起不来 / 中途退出 / 会话过期 / 越权挂载 / 卡住不回 / 快速两轮 / 整理与前台并发 / 幂等重放 |
+| pytest 离线 Adapter | 实际加载插件；模型桥、Capture/Maintenance、outbox、故障注入 |
+| 验收判据离线测试 | 反证“通用回复”、自动 Capture 卡、单行日志不能冒充召回/工具/整理成功 |
+| `failure_paths.py` | 服务错误边界；不能算 DSH 端到端证据 |
+| `dsh_acceptance.py` | 真 DSH 与模型的候选验收；未实际运行前不能宣称通过 |
 
-模型调用**全部走 DSH 的 provider**（`ctx.llm.stream`）——
-服务端启动时不带 `--model`，Garden 全程不碰 key。
+真实脚本 D 组当前只覆盖服务路径不存在、unknown_session、无模型错误和 manifest；
+不应将握手不兼容、模型空回复等离线用例算成该组的真实环境证据。
 
-## 真跑才抓到的这些
+脚本中 A/B/E 不再使用原先可假通过的判断：
 
-写这个 Adapter 的过程本身就说明了「照文档写」和「真跑一遍」的差距。
-下面每一条都是**先跑绿了、才发现是错的**那一类。
+- A 组同时要求 Adapter 日志有非空召回，全新会话回答准确使用“胃疼”这个独特细节，且该轮没有主动调 `memory_search`，以区分自动注入。
+- B 组同时要求 DSH `tool/call` 事件和含唯一标记的 `source=model_tool` 持久卡，自动 Capture 不能冒充。
+- E 组同时要求回执 `written=true, error=-`、持久的 Maintenance 账本、`memory_dream` 新卡和旧卡的 `superseded_by` 链。
 
-**① `content` 必须是分片数组，不能是字符串**
+离线 pytest 只证明这些判据能拒绝已知假阳性；真正的 provider、插件事件和模型输出仍必须由完整验收脚本实测。
 
-```js
-{ role: 'user', content: [{ type: 'text', text: '[记忆]\n- 不吃辣' }] }   // ✅
-{ role: 'user', content: '[记忆]\n- 不吃辣' }                              // ❌ 整轮失败
-```
+真实验收报告需记录 Garden commit、DSH 版本/commit、模型、脚本结果和跳过项。不要保存凭据或真实用户对话。
 
-传字符串时 DSH 内部会 `content.some(...)`，报
-`content.some is not a function` —— **这句话和「记忆注入」看不出任何关系**。
+旧文档记载 2026-09-04 在上述 DSH 基线上跑通过自动落卡、跨会话召回和工具；该历史结果不自动覆盖本次对模型桥及恢复路径的修改。本轮真实 DSH 与模型执行状态见 [STATUS](../../docs/STATUS.md)。
 
-**② `agent/pre-step` 是 waterfall，必须先 `await next()` 再追加**
+目录中 `dsh_e2e.py` 是带历史本机路径的早期实验，`deepseek_cli.py` 是绕过 DSH
+provider 的独立模型桥；两者不作为当前安装入口或 host-driven 验收证据。
 
-自己造一份 `messages` 返回，会把别的插件加的东西悄悄丢掉，而且不报错。
+## 维护要点
 
-**③ `agent/turn-stopping` 必须 `return` 那个 promise**
-
-fire-and-forget（`void promise`）的话，turn 立刻结束、进程随即退出，落卡在
-半路被杀掉：**没有报错，只是那条记忆没了**。宿主驱动比单次调用多两次往返，
-这个竞态每次都稳定命中，花园里 0 张卡。
-
-**④ 流分片的字段是 `text`，不是 `delta`**
-
-写成 `chunk.delta` 时它永远 `undefined`，拼出来是空串 —— 空串让 Garden 解析
-失败、产出 0 张卡，而**链路上每一步都「成功」**。现在空回复会当失败抛出来。
-
-**⑤ `spawn` 的 `error` 事件没人听 → 整个宿主进程崩**
-
-memgarden 没装、路径写错、没执行权限，后果都是「用户的 agent 起不来」，
-报错还和记忆看不出关系。**记忆是增强不是依赖**：挂了只该退化成没有记忆。
-这条是 D 组第一次跑就抓到的。
-
-**⑥ 子进程的 stderr 必须自己落一份**
-
-Python SDK 会吞掉它。吞掉之后「插件没跑」和「跑了但报错」区分不开 ——
-而这两件事的处置完全不同。
-
-**⑦ `truncated` 读的是字符串的属性 → 恒为 `undefined`**
-
-```js
-const reply = await callModel(...)     // 返回的是**字符串**
-capture.feed({ truncated: reply.truncated === true })   // ❌ 永远 false
-```
-
-模型输出被截断时，内核以为拿到的是完整回复，把半个 JSON 当成「没什么可记」，
-而不是重问一次。表现是长对话偶尔莫名其妙什么都没记住 —— 每一步都「成功」。
-现在模型桥返回 `{ text, truncated, finishReason }`。
-
-**⑧ 幂等键里没有 session → 两个会话的第一轮撞键**
-
-`tenant + ':dsh:' + turn` 这个键，在两个会话都从 turn 1 开始时是同一个。
-第二个会话的第一轮被当成第一个会话的重放：什么都不写，还回「成功」。
-现在键是 `tenant + owner + session + turn`。
-
-**⑨ 一个模块级 `turnText` → 两个会话串台**
-
-`let turnText = ''` 是整个插件实例共用的。两个会话并发时，A 的 pre-step 会
-覆盖掉 B 刚存的文本，于是 B 的落卡记的是 A 说的话。不报错，只是记忆里出现
-「用户从没说过的事」。现在按 `(session, turn)` 存。
-
-**⑩ 装机脚本生成了非法 YAML**
-
-dsh 的默认 `cordis.patch.yml` 里有一个空数组字面量 `[]`。直接往后追加
-`- insert:` 得到的是「一个文档里既有 flow 序列又有 block 序列」，
-启动直接失败，而报错完全看不出跟装记忆插件有关：
-
-```
-failed to parse overlay ...: end of the stream or a document separator
-is expected (5:1)
-```
-
-**⑪ 子进程在 owner 检查之前就起了**
-
-没配 owner 的部署本该「什么都不做」，实际却 spawn 了一个 memgarden 进程、
-建出一个空库，然后因为直接 `return` 而**永远没人关掉它** —— 泄漏一个进程，
-还留下一个会让人以为「记忆在工作」的 db 文件。
-
-## 还没做的
-
-- **崩溃恢复只做到「不重复写」**。进程在 turn 中途被杀时，那一轮的落卡会丢。
-  幂等键保证重放不写第二遍，但没有持久 outbox 把它补回来。正确做法是
-  accepted 的落卡先落一条 cursor 再异步执行 —— 下一阶段。
-- **大规模数据**。SQLite 参考实现会把一个 owner 的卡读进内存；它面向
-  「开箱即用」，不面向超大库。
-- **History Import**。Garden 侧声明为 `false`，这边也就没有入口。
-
-## 版本纪律
-
-DSH 处于 pre-release，官方说明允许 breaking changes。
-
-- Adapter 必须 pin 确切 tag + commit，**不能跟随 `master` 浮动**；
-- 升级必须重跑上面两个验收脚本，不能凭「上一版能跑」推断；
-- 「在 alpha.4 验证通过」不自动代表未来 release 兼容。
+- 模型消息使用分片数组；流式桥须传播文本及截断状态。
+- pre-step 保留 waterfall 链；turn-stopping 返回收尾 Promise。
+- Capture 窗口按 session/turn 隔离，幂等身份覆盖 tenant/owner/session/turn。
+- 处理子进程启动、stderr、退出和超时；缺少记忆时向宿主报告降级。
+- 升级 DSH 后同时跑离线回归与真实验收；旧 alpha 的结果不代表新版本兼容。

@@ -33,7 +33,9 @@ from .records import RECORD_SCHEMA_VERSION
 MUTATION_SCHEMA_VERSION = 1
 
 _STR = {"type": "string"}
+_NONEMPTY_STR = {"type": "string", "minLength": 1}
 _OPT_STR = {"type": "string", "default": ""}
+_WIRE_ID = {"type": ["string", "integer", "null"]}
 
 
 def _card() -> dict:
@@ -47,6 +49,14 @@ def _card() -> dict:
             "bucket": _OPT_STR,
             "threads": {"type": "array", "items": _STR, "default": []},
             "mount": _OPT_STR,
+            "importance": {"type": "number", "default": 0.5},
+            "pulse": {"type": "number", "default": 0.0},
+            "occurred_at": _OPT_STR,
+            "role": _OPT_STR,
+            "is_sensitive": {"type": "boolean", "default": False},
+            "source": _OPT_STR,
+            "source_material_kind": _OPT_STR,
+            "source_actor": _actor(),
         },
         # 未知字段放行 —— 新版本加字段时旧调用方不该崩。
         "additionalProperties": True,
@@ -107,6 +117,11 @@ def _mutation() -> dict:
                             "requested_by": _STR, "reason": _OPT_STR},
              "anyOf": [{"required": ["record_id"]},
                        {"required": ["target_id"]}]},
+            {"title": "promote", "type": "object",
+             "required": ["op", "record_id", "to_mount"],
+             "properties": {**base, "op": {"const": "promote"},
+                            "record_id": _STR, "to_mount": _STR,
+                            "reason": _OPT_STR}},
             {"title": "no_op", "type": "object",
              "required": ["op"],
              "properties": {**base, "op": {"const": "no_op"},
@@ -159,6 +174,100 @@ def _receipt() -> dict:
             }}
 
 
+def _context_result() -> dict:
+    return {
+        "type": "object",
+        "required": ["record_ids", "blocks"],
+        "properties": {
+            "record_ids": {"type": "array", "items": _STR},
+            "blocks": {"type": "array", "items": {
+                "type": "object",
+                "required": ["type", "record_ref", "text", "mount", "stage"],
+                "properties": {
+                    "type": {"const": "memory"}, "record_ref": _STR,
+                    "text": _STR, "mount": _STR, "stage": _STR,
+                },
+                "additionalProperties": True,
+            }},
+            "trace": {"type": "object"},
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _browse_item() -> dict:
+    return {
+        "type": "object",
+        "required": ["record_ref", "display_text", "mount"],
+        "properties": {
+            "record_ref": _STR, "display_text": _STR, "mount": _STR,
+            "occurred_at": _OPT_STR, "updated_at": _OPT_STR,
+            "provider": _OPT_STR, "group_label": _OPT_STR,
+            "tags": {"type": "array", "items": _STR},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _record() -> dict:
+    return {
+        "type": "object",
+        "required": ["record_id", "card", "mount", "lifecycle"],
+        "properties": {
+            "record_id": _STR, "card": {"$ref": "#/schemas/Card"},
+            "mount": _STR,
+            "lifecycle": {"type": "string", "enum": [
+                "active", "archived", "superseded", "deleted"]},
+            "revision": _OPT_STR, "created_at": _OPT_STR,
+            "updated_at": _OPT_STR, "superseded_by": _OPT_STR,
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _export_result() -> dict:
+    return {
+        "type": "object",
+        "required": ["records", "counts"],
+        "properties": {
+            "records": {"type": "array",
+                        "items": {"$ref": "#/schemas/Card"}},
+            "counts": {"type": "object"},
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _page_result(items: dict) -> dict:
+    return {
+        "type": "object",
+        "required": ["items", "next_cursor", "total"],
+        "properties": {
+            "items": items, "next_cursor": _STR,
+            "total": {"type": "integer"},
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _tool_result() -> dict:
+    return {
+        "type": "object", "required": ["ok"],
+        "properties": {
+            "ok": {"type": "boolean"}, "content": _OPT_STR,
+            "mutations": {"type": "array",
+                          "items": {"$ref": "#/schemas/Mutation"}},
+            "error": {"type": ["string", "null"]},
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
 #: 结构化错误码。**调用方按 code 分支，不要去解析后面那句人话。**
 ERROR_CODES = (
     "invalid_mutation",             # 结构不合法，进 Store 之前就被拦下
@@ -172,7 +281,11 @@ ERROR_CODES = (
     # -- 服务层（长驻 serve 的分发边界） ------------------------------- #
     "unknown_method",               # 没有这个方法
     "invalid_request",              # 参数不合法
+    "invalid_json",                 # stdio 收到的不是合法 JSON
+    "scope_required",               # 缺可信 tenant scope
+    "memory_owner_required",        # 缺稳定的记忆 owner
     "unknown_session",              # capture 会话不存在/已取消/服务重启过
+    "session_capacity",             # 在途 host-driven 会话达到服务容量上限
     "model_not_configured",         # 服务没配模型，但这个方法需要模型
     # 一批改动写了一半 —— 既不是成功也不是失败。调用方要看回执里的
     # applied / failed_at，只重放剩下的那部分。
@@ -205,7 +318,7 @@ def _error_envelope() -> dict:
         "type": "object",
         "required": ["ok", "error"],
         "properties": {
-            "id": _OPT_STR,
+            "id": _WIRE_ID,
             "ok": {"type": "boolean", "enum": [False]},
             "error": {
                 "type": "object",
@@ -222,14 +335,15 @@ def _error_envelope() -> dict:
 
 
 def _ok_envelope(result: dict) -> dict:
-    return {
+    success = {
         "type": "object",
         "required": ["ok", "result"],
-        "properties": {"id": _OPT_STR,
+        "properties": {"id": _WIRE_ID,
                        "ok": {"type": "boolean", "enum": [True]},
                        "result": result},
         "additionalProperties": True,
     }
+    return {"oneOf": [success, {"$ref": "#/schemas/ErrorEnvelope"}]}
 
 
 def _page() -> dict:
@@ -249,6 +363,8 @@ def _import_progress() -> dict:
         "properties": {
             "cursor": {"type": "integer", "default": 0},
             "total": {"type": "integer", "default": 0},
+            "source_digest": _OPT_STR,
+            "import_fingerprint": _OPT_STR,
             "batches_done": {"type": "integer", "default": 0},
             "cards_written": {"type": "integer", "default": 0},
             "skipped": {"type": "array", "items": {"type": "object"}},
@@ -284,6 +400,28 @@ def _maintenance_state() -> dict:
 def method_schemas() -> dict[str, Any]:
     """每个 Service 方法的 request / response。"""
     receipt = {"$ref": "#/schemas/OperationReceipt"}
+    session_state = {"oneOf": [
+        {
+            "type": "object",
+            "required": ["session_id", "status", "next_prompt"],
+            "properties": {
+                "session_id": _STR, "status": {"const": "needs_model"},
+                "next_prompt": _STR, "retrying_after": _OPT_STR,
+            },
+            "additionalProperties": True,
+        },
+        {
+            "type": "object", "required": ["status", "result"],
+            "properties": {"status": {"const": "completed"},
+                           "result": receipt},
+            "additionalProperties": True,
+        },
+    ]}
+    cancelled = {
+        "type": "object", "required": ["cancelled"],
+        "properties": {"cancelled": {"type": "boolean"}},
+        "additionalProperties": True,
+    }
     capture_req = {
         "type": "object",
         "required": ["scope", "window", "locale"],
@@ -308,14 +446,7 @@ def method_schemas() -> dict[str, Any]:
                         "response": _ok_envelope(receipt)},
         "capture.begin": {
             "request": capture_req,
-            "response": _ok_envelope({
-                "type": "object",
-                "properties": {"session_id": _OPT_STR,
-                               "status": {"type": "string",
-                                          "enum": ["needs_model", "completed"]},
-                               "next_prompt": _OPT_STR,
-                               "result": receipt},
-                "additionalProperties": True}),
+            "response": _ok_envelope(session_state),
         },
         "capture.feed": {
             "request": {"type": "object",
@@ -325,13 +456,13 @@ def method_schemas() -> dict[str, Any]:
                                                      "default": False},
                                        "finish_reason": _OPT_STR},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope(session_state),
         },
         "capture.cancel": {
             "request": {"type": "object", "required": ["session_id"],
                         "properties": {"session_id": _STR},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope(cancelled),
         },
         "context.get": {
             "request": {"type": "object", "required": ["scope", "query"],
@@ -340,22 +471,60 @@ def method_schemas() -> dict[str, Any]:
                                                  "default": 8},
                                        "mount": _OPT_STR},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope(
+                {"$ref": "#/schemas/ContextResult"}),
         },
         "maintenance.check": {
             "request": {"type": "object", "required": ["scope"],
-                        "properties": {"scope": _scope_ref()},
+                        "properties": {"scope": _scope_ref(),
+                                       "mount": _OPT_STR},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope({
+                "type": "object", "required": ["needed"],
+                "properties": {"needed": {"type": "boolean"},
+                               "reason": _OPT_STR,
+                               "error": {"type": ["string", "null"]},
+                               "trace": {"type": "object"},
+                               "schema_version": {"type": "integer"}},
+                "additionalProperties": True}),
         },
         "maintenance.run": {
             "request": {"type": "object", "required": ["scope", "locale"],
                         "properties": {"scope": _scope_ref(), "locale": _STR,
                                        "mount": _OPT_STR,
                                        "ai_name": _OPT_STR,
-                                       "user_name": _OPT_STR},
+                                       "user_name": _OPT_STR,
+                                       "recent_conversations": _OPT_STR,
+                                       "idempotency_key": _OPT_STR},
                         "additionalProperties": True},
             "response": _ok_envelope(receipt),
+        },
+        "maintenance.begin": {
+            "request": {"type": "object", "required": ["scope", "locale"],
+                        "properties": {"scope": _scope_ref(), "locale": _STR,
+                                       "mount": _OPT_STR,
+                                       "ai_name": _OPT_STR,
+                                       "user_name": _OPT_STR,
+                                       "recent_conversations": _OPT_STR,
+                                       "idempotency_key": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(session_state),
+        },
+        "maintenance.feed": {
+            "request": {"type": "object",
+                        "required": ["session_id", "reply"],
+                        "properties": {"session_id": _STR, "reply": _STR,
+                                       "truncated": {"type": "boolean",
+                                                     "default": False},
+                                       "finish_reason": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(session_state),
+        },
+        "maintenance.cancel": {
+            "request": {"type": "object", "required": ["session_id"],
+                        "properties": {"session_id": _STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(cancelled),
         },
         "records.browse": {
             "request": {"type": "object", "required": ["scope"],
@@ -364,7 +533,7 @@ def method_schemas() -> dict[str, Any]:
                                                             "default": False},
                                        **_page()},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope({"$ref": "#/schemas/BrowsePage"}),
         },
         "records.export": {
             "request": {"type": "object", "required": ["scope"],
@@ -373,7 +542,7 @@ def method_schemas() -> dict[str, Any]:
                                                             "default": True},
                                        **_page()},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope({"$ref": "#/schemas/ExportPage"}),
         },
         "records.write": {
             "request": {"type": "object", "required": ["scope", "text"],
@@ -397,13 +566,17 @@ def method_schemas() -> dict[str, Any]:
             "response": _ok_envelope(receipt),
         },
         "records.migrate": {
-            "request": {"type": "object", "required": ["scope", "old_cards"],
+            "request": {"type": "object",
+                        "required": ["scope", "old_cards", "allowed_ids", "locale"],
                         "properties": {"scope": _scope_ref(), "old_cards": _STR,
                                        "allowed_ids": {"type": "array",
-                                                       "items": _STR},
+                                                       "items": _STR,
+                                                       "minItems": 1},
                                        "vocab": _OPT_STR, "mount": _OPT_STR,
-                                       "locale": _OPT_STR, "ai_name": _OPT_STR,
-                                       "user_name": _OPT_STR},
+                                       "locale": _NONEMPTY_STR,
+                                       "ai_name": _OPT_STR,
+                                       "user_name": _OPT_STR,
+                                       "idempotency_key": _OPT_STR},
                         "additionalProperties": True},
             "response": _ok_envelope(receipt),
         },
@@ -413,6 +586,9 @@ def method_schemas() -> dict[str, Any]:
                         "properties": {"scope": _scope_ref(), "material": _STR,
                                        "locale": _STR,
                                        "material_kind": _OPT_STR,
+                                       "max_cards": {"type": "integer",
+                                                     "minimum": 1,
+                                                     "default": 50},
                                        "policy": _OPT_STR, "mount": _OPT_STR,
                                        "ai_name": _OPT_STR,
                                        "user_name": _OPT_STR,
@@ -442,7 +618,7 @@ def method_schemas() -> dict[str, Any]:
                         "properties": {"scope": _scope_ref(), "name": _STR,
                                        "arguments": {"type": "object"}},
                         "additionalProperties": True},
-            "response": _ok_envelope({"type": "object"}),
+            "response": _ok_envelope({"$ref": "#/schemas/ToolResult"}),
         },
     }
 
@@ -452,9 +628,17 @@ def schemas() -> dict[str, Any]:
     return {
         "Mutation": _mutation(),
         "Card": _card(),
+        "Record": _record(),
         "Actor": _actor(),
         "Scope": _scope(),
         "OperationReceipt": _receipt(),
+        "ContextResult": _context_result(),
+        "BrowseItem": _browse_item(),
+        "ExportResult": _export_result(),
+        "BrowsePage": _page_result({
+            "type": "array", "items": {"$ref": "#/schemas/BrowseItem"}}),
+        "ExportPage": _page_result({"$ref": "#/schemas/ExportResult"}),
+        "ToolResult": _tool_result(),
         "ErrorCode": {"type": "string", "enum": list(ERROR_CODES)},
         "ErrorEnvelope": _error_envelope(),
         "MaintenanceState": _maintenance_state(),
@@ -470,31 +654,36 @@ WIRE_OPERATIONS: tuple[str, ...] = (
     "manifest.get", "schema.get", "health.get",
     "capture.run", "capture.begin", "capture.feed", "capture.cancel",
     "context.get",
-    "maintenance.check", "maintenance.run",
+    "maintenance.check", "maintenance.run", "maintenance.begin",
+    "maintenance.feed", "maintenance.cancel",
     "records.browse", "records.export", "records.delete",
     "records.write", "records.promote", "records.migrate",
     "history.import",
     "tool.list", "tool.invoke",
 )
 
-#: 一个能力要能算「Wire 上支持」，必须有方法撑着它。左边是能力名，
-#: 右边是实现它的方法 —— 没有方法就是 ``False``，不管 Python 层做不做得到。
-_CAPABILITY_BACKING: dict[str, tuple[str, ...]] = {
-    "capture": ("capture.run", "capture.begin"),
-    "turn_context": ("context.get",),
-    "maintenance": ("maintenance.run",),
-    "model_tools": ("tool.list", "tool.invoke"),
-    "tools": ("tool.list", "tool.invoke"),
-    "browse": ("records.browse",),
-    "export": ("records.export",),
-    "delete": ("records.delete",),
+#: 一个能力由一组可选的完整 lane 支撑：外层 tuple 是 OR，内层 tuple 是 AND。
+#: 例如 Capture 可以有 ``run``，也可以有完整的 ``begin+feed+cancel``；只有
+#: ``begin`` 不能算支持，否则宿主开始会话后永远无法完成或取消。
+_CAPABILITY_BACKING: dict[str, tuple[tuple[str, ...], ...]] = {
+    "capture": (("capture.run",),
+                ("capture.begin", "capture.feed", "capture.cancel")),
+    "turn_context": (("context.get",),),
+    "maintenance": (("maintenance.run",),
+                    ("maintenance.begin", "maintenance.feed",
+                     "maintenance.cancel")),
+    "model_tools": (("tool.list", "tool.invoke"),),
+    "tools": (("tool.list", "tool.invoke"),),
+    "browse": (("records.browse",),),
+    "export": (("records.export",),),
+    "delete": (("records.delete",),),
     # 🔴 下面这三项 wire 上**没有**入口。内核的 Python API 做得到，
     # 但陌生 Runtime 调不到 —— 对它而言就是做不到。声明成 True 的后果是
     # 对方照着 manifest 写代码，然后发现没有这个方法。
-    "curated_write": ("records.write",),
-    "promote": ("records.promote",),
-    "migrate": ("records.migrate",),
-    "history_import": ("history.import",),
+    "curated_write": (("records.write",),),
+    "promote": (("records.promote",),),
+    "migrate": (("records.migrate",),),
+    "history_import": (("history.import",),),
 }
 
 #: 不由方法撑着的纯策略开关。**现在是空的** —— 曾经 history_import 在这里，
@@ -504,7 +693,10 @@ _CAPABILITY_BACKING: dict[str, tuple[str, ...]] = {
 _POLICY_FLAGS: frozenset[str] = frozenset()
 
 
-def manifest(operations: tuple[str, ...] | None = None) -> dict[str, Any]:
+def manifest(
+    operations: tuple[str, ...] | None = None, *,
+    disabled_capabilities: frozenset[str] | set[str] = frozenset(),
+) -> dict[str, Any]:
     """这个**已装配的服务**是什么、能做什么、说哪个版本的协议。
 
     接入方**启动时**就该核对这个 —— 版本不兼容要立刻拒绝启动，而不是跑到
@@ -548,7 +740,8 @@ def manifest(operations: tuple[str, ...] | None = None) -> dict[str, Any]:
         # 不去 and 内核的那个开关 —— 那个说的是 Python API 的能力，
         # 和「陌生 Runtime 调不调得到」是两件事（turn_context 就是这么
         # 被错报成 False 的：内核标 False，而服务其实一直提供 context.get）。
-        wire_caps[name] = bool(backing) and any(b in available for b in backing)
+        wire_caps[name] = name not in disabled_capabilities and bool(backing) and any(
+            all(method in available for method in lane) for lane in backing)
 
     return {
         "component_id": "memgarden",

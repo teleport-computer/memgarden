@@ -29,7 +29,12 @@ def parse_ts(raw: Any) -> datetime | None:
         return None
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    try:
+        return parsed.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        # 边界年份加时区偏移可能溢出 datetime 的表示范围。外部元数据应
+        # 按无效日期处理，不能让解析或排序抛出未分类异常。
+        return None
 
 
 def sort_key(raw: Any) -> tuple[bool, datetime]:

@@ -12,6 +12,7 @@ import pytest
 
 from memgarden.contracts import CaptureRequest, MaintenanceRequest
 from memgarden.mounted import MountedGarden, Scope
+from memgarden.service import Service
 from memgarden.stores.memory import InMemoryStore
 
 CARD = {"action": "add", "bucket": "偏好与边界", "threads": ["饮食"],
@@ -177,6 +178,7 @@ def test_host_driven_capture_also_recomputes_on_conflict():
     # 🔴 关键：不是「完成但冲突了」，而是「再问一次」
     assert fed["status"] == "needs_model", fed
     assert fed.get("retrying_after") == "conflict"
+    assert "别人写的" in fed["next_prompt"]
 
     # 第二轮就能成
     done = svc.handle({"id": "3", "method": "capture.feed",
@@ -185,3 +187,37 @@ def test_host_driven_capture_also_recomputes_on_conflict():
                                                        ensure_ascii=False)}})["result"]
     assert done["status"] == "completed"
     assert done["result"]["written"] is True, done
+
+
+def test_host_driven_maintenance_recomputes_from_the_new_snapshot():
+    """Maintenance 冲突后也要把并发新增卡放进第二轮 prompt。"""
+    store = InMemoryStore()
+    for i in range(1, 4):
+        store.apply("t1", [{"op": "add", "card": {
+            "id": f"m_{i}", "summary": f"旧卡 {i}", "content": "正文"}}],
+            owner="owner-1", idempotency_key=f"seed-{i}")
+    svc = Service(MountedGarden(
+        model=None, store=store, min_new_cards_for_maintenance=1))
+    scope = {"tenant_id": "t1", "memory_owner_id": "owner-1"}
+    begun = svc.handle({"id": "1", "method": "maintenance.begin", "params": {
+        "scope": scope, "locale": "zh-Hans",
+    }})["result"]
+    store.apply("t1", [{"op": "add", "card": {
+        "summary": "并发新增", "content": "新的正文"}}],
+        owner="owner-1", idempotency_key="concurrent")
+    reply = json.dumps({"consolidations": [{
+        "op": "merge", "card_ids": ["m_1", "m_2"], "rationale": "相同",
+        "result": {"summary": "合并", "content": "合并后的完整正文。"},
+    }]}, ensure_ascii=False)
+    retried = svc.handle({"id": "2", "method": "maintenance.feed", "params": {
+        "session_id": begun["session_id"], "reply": reply,
+    }})["result"]
+    assert retried["status"] == "needs_model"
+    assert retried["retrying_after"] == "conflict"
+    assert "并发新增" in retried["next_prompt"]
+
+    finished = svc.handle({"id": "3", "method": "maintenance.feed", "params": {
+        "session_id": begun["session_id"], "reply": reply,
+    }})["result"]
+    assert finished["status"] == "completed"
+    assert finished["result"]["written"] is True

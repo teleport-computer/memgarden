@@ -1,67 +1,58 @@
-# 发版
+# 发版指南
 
-打 tag 就发。CI 会先跑**发布闸**（全量测试 + 版本一致性），过了才构建、
-生成构建出处凭证、发 PyPI 和 GitHub Release。
+发布行为由 [release.yml](../.github/workflows/release.yml) 定义。本页说明当前流程，发布结果以对应 workflow run、Release 和 PyPI 为准。当前修复分支是否完成真实环境验收，见 [STATUS](STATUS.md)。
+
+## 发布前
+
+1. 在 PR 中完成代码/文档审核，检查待发布 commit 的 CI。
+2. 在 `pyproject.toml` 设置计划发布的新版本，运行 `uv lock`，检查 `uv.lock` 同步。已发布版本不可用新内容覆盖发布。
+3. 运行下列验证；修改 Adapter 时还应完成 pinned DSH 的真实验收并保存结果。
+4. 合并后，确认版本提交和验证证据对应，再创建匹配的 `v<版本>` tag 并推送该 tag。
 
 ```bash
-sed -i '' 's/^version = ".*"/version = "0.17.0"/' pyproject.toml
-uv lock                      # 锁文件也要跟上，闸会检查
-git commit -am "v0.17.0: ..." && git tag v0.17.0 && git push origin HEAD --tags
+uv run --extra dev pytest -q
+uv run --python 3.12 --extra dev python scripts/check_version_consistency.py
+uv run --extra dev python evals/run.py --baseline evals/baseline.json
+uv run python examples/quickstart.py
+uv run python examples/mount_in_ten_minutes.py
+uv build
 ```
 
-## 🔴 发布必须过测试闸
+干净 venv 中安装这次构建的**确切 wheel 文件**，再运行 `memgarden manifest` 和顶层 SDK import。不要同时安装 dist 中多个旧 wheel。模型质量评测按 [Evals](../evals/README.md) 执行；无凭据跳过不等于验证通过。
 
-`release.yml` 的 `build` job `needs: gate`，gate 跑全量 pytest 和
-`scripts/check_version_consistency.py`（tag / pyproject / uv.lock 三者一致）。
+## 当前 workflow 实际执行什么
 
-**这条是 2026-09-06 补的，因为出过反例**：`tests` workflow 因为还在
-`cd` 一个已经删掉的目录而长期失败，而 release 不依赖它，照样把包发上了
-PyPI。那不只是流程瑕疵 —— 红灯一旦变成常态，它就不再是信号，
-后面真正该拦下的那次也拦不住。
+| 阶段 | 检查或产物 |
+|---|---|
+| `gate` | 全量 pytest、tag / pyproject / uv.lock 版本一致性 |
+| `build` | 版本复核、pytest、quickstart、构建 wheel/sdist |
+| 构建后 | 生成 provenance attestation、产物摘要，上传 GitHub Release |
+| `publish-memgarden` | 下载构建产物，以 Trusted Publishing 发布 PyPI |
 
-## PyPI：一次性配置（还没做）
+主 PR tests workflow 另有 Python 兼容矩阵、确定性 eval、wheel 安装等检查；release gate 当前不自动重跑其中每一项，也不运行真实 DSH 验收。发版前需要核对同一代码的这些证据，不能只凭 release gate 绿色代替全部验收。
 
-用的是 **Trusted Publishing（OIDC）**，仓库里**不存任何 token**。
+GitHub Release 上传发生在 PyPI 发布之前，因此 PyPI 失败时可能已经存在 Release。检查完整 workflow 的发布结果，不能仅看到 Release 就宣布 PyPI 发布成功。不要给发布步骤加 `continue-on-error`。
 
-> 为什么不用 API token：token 是一份长期有效的发布凭据，躺在 GitHub secrets 里。
-> 泄露一次，任何人都能往这两个包名下推任意代码 —— 而下游是靠包名信任的，
-> 装的时候不会去核对是谁发的。OIDC 每次签发短期凭证，作用域限定到
-> 「这个仓库的这个 workflow」。
+手工 `workflow_dispatch` 重跑时指定已有 tag；不要把分支名当发布版本。对已发布 tag 的修改/重传会破坏版本可追溯性，修复应使用新版本。
 
-在 <https://pypi.org/manage/account/publishing/> 加一次：
+## PyPI 配置与产物来源
+
+当前 workflow 使用 OIDC Trusted Publishing，不使用长期 PyPI token。维护者应核对 PyPI 上的 Trusted Publisher 与下列配置一致；仓库里的配置无法单独证明外部账户设置仍然有效。
 
 | 字段 | 值 |
 |---|---|
-| PyPI Project Name | `memgarden` |
-| Owner | `teleport-computer` |
-| Repository name | `memgarden` |
-| Workflow name | `release.yml` |
-| **Environment name** | **`pypi-memgarden`** |
+| Project | `memgarden` |
+| GitHub owner / repository | `teleport-computer` / `memgarden` |
+| Workflow | `release.yml` |
+| Environment | `pypi-memgarden` |
 
-> 历史：这里曾经要配**两个**包（`memgarden` + `agent-protocol-core`）。
-> 后者在 0.16.0 被移回宿主 io —— 它做的是宿主协议解析（剥模型的思维链），
-> 不是记忆判断，不该让每个接 Garden 的人都吃下 io 的协议假设。
-> 现在这个包**零第三方依赖**。
+运行包只有 memgarden，DSH Adapter 随其 wheel 发布；没有第二个 npm 包或独立 agent-protocol-core 发布步骤。
 
-> 包已经发在 PyPI 上，README 里的 `pip install memgarden` 是有效的。
-> （这段以前写着「在那之前 README 不许写 pip install」—— 那是首发之前的
-> 状态，现在不成立了。）
+下载和验证某次发布的 wheel：
 
-## 🔴 不要给 publish 步骤加 `continue-on-error`
+```bash
+gh release download <tag> --repo teleport-computer/memgarden --pattern '*.whl'
+gh attestation verify <downloaded-wheel.whl> --repo teleport-computer/memgarden
+```
 
-`continue-on-error: true` 会让 job 在步骤失败时仍判定为 success，
-下游 `needs` 照样放行 —— **闸被直接架空**。
-
-v0.12.2 就是这么翻车的：当时还有两个包，core 因为 PyPI 侧没注册而发布失败，
-job 却是绿的，memgarden 照发不误，结果 PyPI 上躺了一个装不上的版本。
-
-那个具体形状（双包依赖）已经不存在了，但**教训对现在的 gate 一样成立**：
-让它红是安全的，GitHub Release 在 `build` job 里已经发完，publish 失败不影响它。
-
-## 发版前自查
-
-- `pytest -q` 全绿
-- `python scripts/check_version_consistency.py` 通过
-- 全新环境只装 wheel 能跑：`pip install --no-index --find-links dist memgarden`
-  之后 `memgarden manifest` 和 `from memgarden import GardenComponent` 都要成
-- 动过 Adapter 的话，`adapters/dsh-memgarden` 在 pinned DSH 上跑一遍真机验收
+attestation 绑定仓库、构建流程、commit 与产物摘要，证明产物来源；它不替代代码审核或功能验收。

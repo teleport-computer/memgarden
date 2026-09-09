@@ -280,26 +280,29 @@ def format_error(reasons: list[str], *, after_retry: bool = False) -> str:
 def is_card_format_error(err: str | None) -> bool:
     """这个 reason 是不是「值得原样打回去重来一次」的格式问题。
 
-    只认内容闸**第一问**发的码 —— provider 挂了、JSON 根本没出来(``no_json_object``)
-    这类问题重问一遍也没用,不在此列;它们各有自己的重试/退避路径。
+    只认内容闸**第一问**发的码；不包含 provider 故障或 JSON 解析失败。
+    空正文等解析失败是否值得重问，由 ``is_retryable_parse_error`` 单独判断。
     ``invalid_card_content_after_retry`` 也刻意不在此列:那已经是第二问的终局,
     再打回就成了死循环。
     """
     return bool(err) and str(err).split(":", 1)[0] == _FORMAT_ERROR_PREFIX
 
 
-def is_retryable_parse_error(err: str | None) -> bool:
+def is_retryable_parse_error(err: str | None, *, raw: str | None = None) -> bool:
     """Whether a memory parser failure deserves one corrective model call.
 
     Keep :func:`is_card_format_error` narrow because other callers use it to
-    identify content-gate failures specifically. Capture and Dream retry one
-    additional parse shape: a balanced object that failed JSON decoding. This
+    identify content-gate failures specifically. Capture and Dream also retry
+    a balanced object that failed JSON decoding. This
     commonly means a thinking model put a pseudo-JSON draft before its valid
-    answer. ``no_json_object`` remains non-retryable because truncation and pure
-    prose have their own provider failure paths.
+    answer. An empty successful reply also deserves a corrective call, using
+    the same session retry budget (not a new provider retry loop). Nonempty
+    prose keeps the existing terminal policy; explicit truncation is handled
+    by the session before parsing, and provider errors stay with the host.
     """
     prefix = str(err or "").split(":", 1)[0]
-    return is_card_format_error(err) or prefix == "json_decode_error"
+    return (is_card_format_error(err) or prefix == "json_decode_error"
+            or (prefix == "no_json_object" and raw is not None and not raw.strip()))
 
 
 _REASON_TEXT = {

@@ -4,8 +4,8 @@
 实现上都过。将来接第三个实现（Postgres / Notion / 别人的库）时，
 把它加进 `STORES` 就能立刻知道缺什么。
 
-覆盖的是 `storage.py` 里定的四件事：
-  能力声明 / CAS 版本号 / 幂等键 / supersede 的原子性
+覆盖 `storage.py` 的核心行为，包括能力声明、owner/tenant 隔离、CAS、幂等、
+mutation 原子性，以及 Maintenance 账本。具体边界测试也分布在专项测试文件中。
 """
 from __future__ import annotations
 
@@ -145,6 +145,19 @@ def test_a_failed_mutation_rolls_back_the_whole_batch(store):
             owner="owner-1", idempotency_key="k2",
         )
     assert len(store.load(T, owner="owner-1").cards) == 1, "批次里前半截被写进去了 —— 不是原子的"
+
+
+def test_a_failed_batch_does_not_advance_the_generated_id_watermark(store):
+    with pytest.raises(MutationRejected):
+        store.apply(
+            T,
+            [{"op": "add", "card": {"summary": "不应留下"}},
+             {"op": "update", "record_id": "missing", "changes": {"summary": "x"}}],
+            owner="owner-id-watermark", idempotency_key="failed",
+        )
+    written = store.apply(
+        T, [_add("成功")], owner="owner-id-watermark", idempotency_key="success")
+    assert written.results[0]["id"] == "m_1"
 
 
 def test_unknown_op_is_rejected(store):
