@@ -1,5 +1,7 @@
 # T523 batch 2a: opt-in hybrid (dense + lexical) context selection
 
+Implementation/design note retained for provenance; hybrid shipped in v0.20.0. See [Retrieval](RETRIEVAL.md) for the current integration contract and [Status](STATUS.md) for evidence. Host rollout is separate from package publication.
+
 `scoring.hybrid.select_hybrid_context_memories_with_trace(cards, query, *,
 query_vector, card_vectors, min_cosine, ...)` fuses two rankings of the same
 authorized candidate snapshot:
@@ -71,5 +73,4 @@ independence, RRF arithmetic and weights, the vector contract (dimension, NaN,
 zero norm, model mismatch, bad thresholds), cap/threshold edges, no vector echo
 in the trace, and legacy-mode invariance.
 
-This is a stacked change on top of the T514 PR (#2): it adds one module, one
-test file and this note, and does not modify anything that PR touches.
+This originated as a stacked change on T514 PR (#2); both are now merged. The current contract requires paired vector model metadata, when used, to label every participating card vector; missing labels are not evidence of compatibility.

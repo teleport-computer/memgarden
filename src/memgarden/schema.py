@@ -48,6 +48,8 @@ def _card() -> dict:
             "content": _STR,
             "bucket": _OPT_STR,
             "threads": {"type": "array", "items": _STR, "default": []},
+            "retrieval_cues": {
+                "type": "array", "items": _STR, "default": []},
             "mount": _OPT_STR,
             "importance": {"type": "number", "default": 0.5},
             "pulse": {"type": "number", "default": 0.0},

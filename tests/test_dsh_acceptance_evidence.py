@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -14,6 +17,20 @@ SPEC = importlib.util.spec_from_file_location("dsh_acceptance_evidence", SCRIPT)
 assert SPEC and SPEC.loader
 acceptance = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(acceptance)
+
+
+def test_acceptance_model_override_is_explicit_and_reaches_harness(monkeypatch, tmp_path):
+    monkeypatch.delenv("MEMGARDEN_ACCEPTANCE_MODEL", raising=False)
+    assert acceptance._acceptance_model() == "deepseek-v4-flash"
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_MODEL", "synthetic-model")
+    monkeypatch.setenv("MEMGARDEN_DEBUG_LOG", "")
+    monkeypatch.setattr(acceptance, "_HARNESS_CLASS", lambda **kwargs: kwargs)
+    env = SimpleNamespace(log=tmp_path / "log", workspace=tmp_path,
+                          home=tmp_path, dsh_bin=tmp_path / "dsh")
+    assert acceptance.Env.harness(env)["model"] == "synthetic-model"
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_MODEL", "  ")
+    with pytest.raises(ValueError, match="must not be blank"):
+        acceptance._acceptance_model()
 
 
 def test_generic_dinner_advice_does_not_prove_recall():
@@ -57,6 +74,21 @@ def test_maintenance_log_alone_does_not_prove_durable_success():
     assert not acceptance._maintenance_is_proven(success, cards, {})
     assert not acceptance._maintenance_is_proven(success, [{"id": "old"}], ledger)
     assert acceptance._maintenance_is_proven(success, cards, ledger)
+
+
+def test_tool_write_diagnostic_distinguishes_call_from_persistence_without_bodies():
+    events = [{"type": "tool/call", "data": {
+        "name": "memgarden_memory_write", "arguments": "PRIVATE BODY",
+    }}] * 30
+    cards = [{"source": "conversation_capture", "summary": "MARKER PRIVATE BODY",
+              "content": "PRIVATE BODY"}] * 30
+    detail = acceptance._tool_write_diagnostic(events, cards, "MARKER")
+    assert "PRIVATE BODY" not in detail and "MARKER" not in detail
+    assert '"card_count":30' in detail
+    assert '"summary_has_marker":true' in detail
+    assert '"content_has_marker":false' in detail
+    assert "conversation_capture" in detail and "memgarden_memory_write" in detail
+    assert len(detail) < 4000
 
 
 def test_maintenance_failure_diagnostic_is_bounded_without_card_bodies():

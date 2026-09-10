@@ -55,6 +55,7 @@ class FieldMap:
     #: 元数据字段，原样带给内核（它只读不写）。
     passthrough_fields: tuple[str, ...] = (
         "id", "occurred_at", "created_at", "is_sensitive", "source", "roles",
+        "retrieval_cues",
     )
 
 

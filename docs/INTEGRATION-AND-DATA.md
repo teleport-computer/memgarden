@@ -1,6 +1,6 @@
 # 接入与数据参考
 
-本文描述当前源码的接入和存储行为，配合 [README](../README.md) 使用。完成度与验证基线只在 [STATUS](STATUS.md) 维护；本文不重复阶段性审查记录。
+本文描述当前源码的接入和存储行为。初次接入请先读 [Getting started](GETTING-STARTED.md)，选卡与向量接线见 [Retrieval](RETRIEVAL.md)。完成度与验证基线只在 [STATUS](STATUS.md) 维护；本文不重复阶段性审查记录。
 
 ## 1. Runtime 需要接的路径
 
@@ -65,8 +65,9 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 | `content` | 正文，字符串 | 完整记忆内容；不会因当前上下文预算而裁短已存正文 |
 | `bucket` | 分类，字符串 | Garden 分类与整理；由 locale 和素材决定 |
 | `threads` | 线索，字符串数组 | 关联记忆与检索 |
+| `retrieval_cues` | 可选搜索线索，字符串数组 | Capture/Dream 可生成；正式 Card、schema、typed mutation、Store/导出与 FieldMap 保留。宿主显式纳入 search_text 或 embedding 投影才用于检索 |
 | `type` | Capture 类型字符串 | 当前解析器产出 `event` / `fact` / `quote` / `moment`；平铺卡可包含，`Card` 类型未单独声明 |
-| `importance` / `pulse` | 重要度 / 情绪激活度，数值 | 供判断或策略使用；不是额外原始材料 |
+| `importance` / `pulse` | 重要度 / 情绪激活度，数值 | 供判断或策略使用；importance_level 1–5在解析时映射为既有importance 0.2–1.0，存储仍为0–1 |
 | `occurred_at` | 事情发生时间，字符串 | 历史导入/人工档案按 `keep_dates=True` 保留；对话档 `keep_dates=False` 不传递；空值不推定日期 |
 | `role` / `is_sensitive` | 记忆角色 / 敏感标识 | 供策略与宿主展示判断；敏感标识不替代访问权限 |
 | `source` | 来源，开放字符串 | 内置工作流写入 `conversation_capture`、`history_import`、`curated`、`model_tool` |
@@ -75,6 +76,8 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 | `source_actor` | 操作者对象 | MountedGarden 新增/取代时用可信 Scope 覆盖；普通 update 不得更改来源三个字段 |
 
 字段定义见 [Card](../src/memgarden/records.py)。空的可选字段可省略。Capture 解析器保留模型提供的合法 `role` 字符串和 `is_sensitive` 布尔值；不保证模型每次都产出这些可选字段，也不把它们当作授权证据。日期按策略保留，日期字符串只有日期时不补时间，带时区时间转换为 UTC；未带时区的日期时间沿用现有解析约定按 UTC 解释，调用方应提供明确时区以免产生歧义。非法日期或元数据类型触发现有格式重试；字符串 `"false"` 不会被当作布尔值使用。字段映射工具 [FieldMap](../src/memgarden/adapt.py) 可以把外部字段转成候选卡；它不是完整的外部记忆系统适配器。
+
+生成的 cues 当前最多5条、每条120个Python字符，是辅助线索的生成规则，不是正文或全部存量字段的硬存储上限。模型可能省略 cues，不据此判定记忆无效。这个可选字段不新增表、不提升数据库 schema 版本。持久 `role` 与选卡输入 `roles` 仍是两个接口形状；宿主如何显式映射见[召回指南](RETRIEVAL.md)。
 
 `summary` 和 `search_text` 用途不同：后者可以包含用于匹配的更多文本，不能因此直接作为公开摘要。挑卡过程的内容无关指标由 [observability.py](../src/memgarden/observability.py) 生成；查询指纹仍可用于关联、也可能被猜测，不应宣称绝对无法还原或等同匿名化。
 

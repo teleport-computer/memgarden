@@ -236,6 +236,10 @@ def select_hybrid_context_memories_with_trace(
     vec_score: dict[str, float] = {}
     vec_rank: dict[str, int] = {}
     if query_vector is not None and card_vectors:
+        if (vector_model is None) != (card_vector_models is None):
+            raise VectorContractError(
+                "vector_model and card_vector_models must be provided together"
+            )
         qv = _as_float_vector(query_vector, what="query_vector")
         vector_lane = "active"
         for cid in by_id:
@@ -244,7 +248,7 @@ def select_hybrid_context_memories_with_trace(
                 continue
             if vector_model is not None and card_vector_models is not None:
                 cm = card_vector_models.get(cid)
-                if cm is not None and cm != vector_model:
+                if cm != vector_model:
                     raise VectorContractError(
                         f"card {cid}: vector model {cm!r} != query model {vector_model!r}"
                     )

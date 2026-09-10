@@ -111,6 +111,54 @@ def test_vector_contract_is_enforced():
     assert math.isclose(cosine([1, 0], [1, 0]), 1.0)
 
 
+def test_vector_model_metadata_is_a_complete_matching_pair_when_lane_is_active():
+    pool = garden()
+    version = "e5-small@1"
+    chosen, trace = select(
+        pool, "容器颜色", query_vector=POT, card_vectors={"c00": POT},
+        min_cosine=0.5, vector_model=version,
+        card_vector_models={"c00": version},
+    )
+    assert [card["id"] for card in chosen] == ["c00"]
+    assert trace["vector_model"] == version
+
+    with pytest.raises(VectorContractError, match="card c00: vector model None"):
+        select(
+            pool, "容器颜色", query_vector=POT, card_vectors={"c00": POT},
+            min_cosine=0.5, vector_model=version, card_vector_models={},
+        )
+    with pytest.raises(VectorContractError, match="bge-m3@1"):
+        select(
+            pool, "容器颜色", query_vector=POT, card_vectors={"c00": POT},
+            min_cosine=0.5, vector_model=version,
+            card_vector_models={"c00": "bge-m3@1"},
+        )
+    for only_one_side in (
+        {"vector_model": version},
+        {"card_vector_models": {"c00": version}},
+    ):
+        with pytest.raises(VectorContractError, match="provided together"):
+            select(
+                pool, "容器颜色", query_vector=POT,
+                card_vectors={"c00": POT}, min_cosine=0.5, **only_one_side,
+            )
+
+
+def test_vector_model_metadata_is_irrelevant_when_no_vector_is_computed():
+    pool = garden()
+    for query_vector, card_vectors, version_args in (
+        (None, {"c00": POT}, {"vector_model": "e5-small@1"}),
+        (POT, None, {"card_vector_models": {"c00": "e5-small@1"}}),
+        (POT, {}, {"vector_model": "e5-small@1", "card_vector_models": {}}),
+    ):
+        chosen, trace = select(
+            pool, "露营灯保修", query_vector=query_vector,
+            card_vectors=card_vectors, min_cosine=0.5, **version_args,
+        )
+        assert [card["id"] for card in chosen] == ["c02"]
+        assert trace["vector_lane"] == "absent"
+
+
 def test_thresholds_cap_and_no_vectors_echoed_in_trace():
     pool = garden()
     vecs = {"c00": POT, "c01": COAT, "c02": LAMP}
