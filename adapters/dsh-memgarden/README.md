@@ -8,18 +8,22 @@
 
 Adapter 随 Python wheel 分发，无 npm 依赖。安装器把插件文件拷入 DSH profile，因此升级 Python 包后，需要重新运行 `install-dsh` 更新副本。
 
-从 DSH 项目目录执行以下步骤；审核修复分支时先安装该 checkout 或构建出的确切 wheel，不能用旧 PyPI 包代替本次代码：
+先按下方“pinned alpha.4 的 Python SDK 来源”准备同源 DSH，或使用已通过依赖闭包校验的 alpha.4 安装。**不要只执行顶层 `npm install @deepseek-ai/dsh@0.1.2-alpha.4` 就当作环境固定**：它的内部依赖可能解析到其他版本。
+
+准备好兼容 DSH 后执行；审核修复分支时先安装该 checkout 或确切 wheel，不能用旧 PyPI 包代替本次代码：
 
 ```bash
-npm install @deepseek-ai/dsh@0.1.2-alpha.4
-pip install memgarden
+python -m pip install memgarden
+export DSH_BIN=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js
 export DSH_HOME=/absolute/path/to/dsh-home
-npx dsh --profile sdk-minimal --dump-default-config
+"$DSH_BIN" --profile sdk-minimal --dump-default-config
 memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans
-npx dsh --profile sdk-minimal
+"$DSH_BIN" --profile sdk-minimal
 ```
 
 项目跟踪的兼容基线是 DSH `0.1.2-alpha.4`，commit `4e84901e6471b79ec0338099867ebb4606d12bb5`。真实模型凭据配置在 DSH provider 中。上述命令配置和运行宿主，会创建 profile、数据库及状态目录。
+
+首次运行前在该 profile 的 DSH provider 配置中选择可用模型并提供凭据，先确认普通 DSH 对话能运行。MemGarden 不代替 DSH 配置 provider。此 Adapter 不自动启用新 relevant/hybrid 排序；自定义召回和向量接线见[召回指南](../../docs/RETRIEVAL.md)。
 
 重复安装遇到已有 `id: memgarden` 时，**只更新插件副本，不覆盖原来的 YAML 配置**。更换 owner、数据库、stateDir 或 Python 环境后，要检查已有配置，不能假定新命令参数已写回。
 
@@ -111,7 +115,7 @@ alpha.4，不能证明整个运行时是 alpha.4。如果使用 npm 发行物，
 
 更直接的可复现准备方式是从同一官方 commit 构建 DSH，
 并在它的源码 SDK 环境运行。以下是准备步骤，仍须在目标
-环境实际跑完验收，不代表本仓已经证明了真实 provider 联调：
+环境实际跑完验收；已运行的版本、结果及未验证项见 [Status](../../docs/STATUS.md)：
 
 ```bash
 git clone https://github.com/deepseek-ai/deepseek-harness.git /absolute/path/to/deepseek-harness
@@ -129,6 +133,9 @@ uv sync --project /absolute/path/to/deepseek-harness/python/sdk --group test
 export DSH_BIN=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js
 export MEMGARDEN_BIN=/absolute/path/to/memgarden-venv/bin/memgarden
 export DEEPSEEK_API_KEY=...
+# 显式指定账号当前可用的模型；不设置时保留历史 deepseek-v4-flash 基线。
+# 替换成可用模型 ID，并把所用模型记录在验收结果中，不能算旧模型复测。
+export MEMGARDEN_ACCEPTANCE_MODEL=your-available-model-id
 
 uv run --project /absolute/path/to/deepseek-harness/python/sdk \
   python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py
@@ -168,8 +175,7 @@ uv run --project /absolute/path/to/deepseek-harness/python/sdk \
 
 旧文档记载 2026-09-04 在上述 DSH 基线上跑通过自动落卡、跨会话召回和工具；该历史结果不自动覆盖本次对模型桥及恢复路径的修改。本轮真实 DSH 与模型执行状态见 [STATUS](../../docs/STATUS.md)。
 
-目录中 `dsh_e2e.py` 是带历史本机路径的早期实验，`deepseek_cli.py` 是绕过 DSH
-provider 的独立模型桥；两者不作为当前安装入口或 host-driven 验收证据。
+早期本机实验 `dsh_e2e.py` 与绕过 DSH provider 的 `deepseek_cli.py` 已从当前源码移除，仍可在 Git 历史追溯。只使用上面的 `dsh_acceptance.py` 作为当前 host-driven 实联入口。
 
 ## 维护要点
 

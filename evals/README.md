@@ -33,8 +33,14 @@ python evals/run.py                 # 前四层
 python evals/run.py --with-model    # 全部；缺少模型凭据时退出失败
 ```
 
+模型名称可能随 provider 改变，运行前确认账号可用的模型并显式传入，例如
+`python evals/run.py --with-model --provider deepseek --model <available-model-id>`。
+默认值保留历史兼容，不表示该名称始终可用。不要在模型不可用时把 SKIP 当作通过。
+
 当前 PR CI 在配置 `EVAL_DEEPSEEK_API_KEY` 时会运行真实 Capture 评测；没有 key
-时该步骤明确 SKIP。release workflow 本身没有运行真实模型评测，发布者需要
+时该步骤明确 SKIP。CI 使用仓库变量 `EVAL_DEEPSEEK_MODEL` 指定模型，未配置时
+为本轮实际验证的 `deepseek-flash`；这是 CI 配置，不改变本地 CLI 的历史默认值。
+模型不可用时有凭据的评测应失败，不能静默换模型。release workflow 本身没有运行真实模型评测，发布者需要
 另行核对对应 commit 的执行证据。当前结果统一见 [STATUS](../docs/STATUS.md)，
 不能从 CI job 绿色推定模型步骤实际执行过。
 

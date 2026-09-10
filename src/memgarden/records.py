@@ -66,6 +66,9 @@ class Card:
     source_material_kind: str = ""
     #: 可信宿主注入的操作身份。MountedGarden 会覆盖模型给出的同名字段。
     source_actor: dict = field(default_factory=dict)
+    #: 用于召回的短提示；它们只帮助定位这张卡，不构成额外事实。
+    #: 追加在末尾，保持已有 Card 位置参数的顺序。
+    retrieval_cues: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {k: v for k, v in asdict(self).items()

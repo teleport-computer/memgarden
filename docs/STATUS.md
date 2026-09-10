@@ -1,69 +1,87 @@
 # 当前验收状态
 
-更新：2026-09-08。当前行为验证基线：[78b0baf](https://github.com/teleport-computer/memgarden/commit/78b0baf86fcf07847c323d2c993fa793c5b9a9ee)。本轮补齐两个 Store 的卡片创建／修改时间，修复空模型回复的有限重试，并把 SDK 整理收敛到宿主驱动入口使用的同一状态机。此前的历史导出、Capture 元数据和严格评测修复仍在本基线内。
+更新：2026-09-10。当前代码与本地验证基线：[1e50d98](https://github.com/teleport-computer/memgarden/commit/1e50d98)。本页之后的文档收口提交不改变生产代码。
 
-交付入口：[PR #1](https://github.com/teleport-computer/memgarden/pull/1)。本文记录该修复分支的验收状态，不代表其已合并、已发布；合并/发布状态以 PR 和对应 Release 为准。
+结论：可以进入维护者 PR 审核；不应宣称所有模型和生产场景已稳定验收。确定性测试、接入示例、构建安装均通过；本轮真实 DSH 完整验收 **14/15**，失败的工具写入单项复测 **2/2**。完整运行的失败不能被单项重跑抹掉。
 
-## 已验证范围
+## 1. 合并、发布与本轮改动
 
-| 范围 | 证据 |
+- 基线 `main` 为 [2bf2744](https://github.com/teleport-computer/memgarden/commit/2bf2744d50306a7a33b3c11a9d5a759132eb724a)。PR #1–#4 已合并，v0.20.0 的发布 workflow 已成功；此前状态页中“PR #1 尚未合并”的描述已过期。
+- 本轮分支 `codex/open-source-readiness` 是 v0.20.0 之后的修复与公开接入文档，**尚未因此发布新版本**。合并状态看对应 PR，发布状态看 Release/PyPI，不能从文档推定。
+- 新 relevant/hybrid 算法已在 v0.20.0 提供，本轮没有再造一套算法，也没有自动切换 SDK/DSH 默认召回。
+
+| 本轮内容 | 变化及兼容边界 |
 |---|---|
-| Capture、召回、整理、明确写入、导入、迁移与生命周期 | 当前基线本地 Python 3.10 / 3.13 全量 pytest 各 408 项通过 |
-| 存储、隔离与恢复 | 两个 Store 共用契约测试；另覆盖 CAS、同租户跨 owner、跨 mount、幂等、真实 SQLite 事务回滚和旧库迁移 |
-| 服务与协议 | JSON Schema 验证、错误响应、真实能力降级、会话过期和容量边界测试 |
-| DSH Adapter 离线接线 | 实际加载 plugin.mjs，假 DSH 上下文接真实 `memgarden serve`；故障场景另用假 wire service |
-| DSH 验收判据和依赖准备 | 离线反证测试拒绝已知假阳性；从官方固定 commit 的源码 SDK 环境安装、导入成功，并核对官方事件形状 |
-| 真实 DSH + 模型 | 固定 DSH `0.1.2-alpha.4` + `deepseek-v4-flash`，A–E 五组 15/15 检查通过；下文记录范围 |
-| 包与示例 | sdist/wheel 构建、干净 venv 安装与 CLI/SDK 冒烟、两个独立示例通过 |
-| 判断质量的确定性部分 | recall、gate、garden language 与语料完整性评测通过 |
-| 真实模型落卡质量 | `capture.py --provider deepseek --model deepseek-v4-flash --require-key`，5/5 场景通过，不是 SKIP |
+| 检索线索字段闭环 | `retrieval_cues` 补入正式 Card、schema、typed mutation 和默认 FieldMap；覆盖 Capture/Dream、两个 Store、SQLite 重开和导出。字段追加在旧 Card 全部位置参数之后，不改变旧顺序 |
+| Hybrid 元数据校验 | 使用向量版本校验时，两侧 metadata 必须成对提供，实际参与计算的卡向量不能缺标签或标签不匹配；以前误接受的输入现在报 `VectorContractError`。完全不使用标签的兼容方式保留，无向量时仍词法降级 |
+| 公开接入 | 重写中英文 README，新增 SDK/JSON Lines 主循环指南与检索指南、两个可运行示例和文档回归；同步字段、DSH、发版文档 |
+| 验收维护 | DSH 脚本允许显式指定模型并记录；工具写入诊断区分调用与落库证据，不输出卡正文、不放宽判据。CI 模型通过仓库变量配置 |
+| 开源卫生 | 新增 CONTRIBUTING/SECURITY、忽略本机与私密运行文件；移除两个含本机路径或绕过当前 provider 路径的旧实验脚本，Git 历史仍可恢复 |
 
-当前提交的远程 CI 以 PR checks 为准，矩阵覆盖 Python 3.10–3.13。真实模型步骤可能因无 key 而 SKIP，整个 job 绿色不能替代该步骤的执行证据。本轮重跑确定性 eval、两个独立示例、sdist/wheel 构建、干净 venv 安装及 CLI/元数据 SDK 冒烟；前轮还核对了 README 代码、wire 请求以及真实 SQLite 表和卡片形状。两位 Agent 交叉复核；测试通过不等于已穷尽所有故障。
+没有新增存储表、加解密、通用 Memory 产品协议、默认向量存储或外部运行依赖。
 
-主要回归入口：[Store 契约](../tests/test_store_contract.py)、[本轮业务修复](../tests/test_final_closure.py)、[交叉审核回归](../tests/test_closure_review.py)、[历史分页导出](../tests/test_history_export.py)、[DSH 离线回归](../tests/test_dsh_adapter_offline.py)。新增的两种 Store 导出测试对原读取逻辑均复现失败，修复后通过。
+## 2. 确定性证据
 
-`evals/run.py --with-model` 现在缺 key 会明确失败；普通 CI 单独调用 `capture.py` 仍可显式 SKIP。行为由 [评测 CLI 回归](../tests/test_eval_cli.py) 验证。
+| 检查 | 本轮实际结果 |
+|---|---|
+| Python 3.10 / 3.13 全量 pytest | 各 **454 passed**，包含真实 SQLite/事务、owner 隔离、协议、时间戳、恢复、DSH 离线接线和新指南回归 |
+| 对旧版的反证 | 在 `2bf2744` 上运行三项新回归，typed cues、FieldMap cues、缺向量标签均失败；当前全通过 |
+| README 可执行性 | 中英文 Python 代码完全一致；运行两次、核对输出及 SQLite 仅一张卡 |
+| 接入示例 | quickstart、mount_in_ten_minutes、wire_capture、retrieval_runtime 均通过；后两者包括真实子进程协议和 Scope/检索投影 |
+| 确定性 eval | recall 10 查询、gate 16 场景、language 15 场景及语料自查通过既有基线 |
+| 打包与安装 | wheel/sdist 构建；干净 venv 安装确切 wheel，CLI manifest、顶层 SDK、typed cues 和三个接入示例通过，运行依赖仍为零 |
+| 版本、链接与 diff | 版本一致性通过（0.20.0）；指南本地文件链接、机器路径、`git diff --check` 通过。链接检查不等于逐个验证网页锚点 |
+| 独立交叉审核 | 第二位 Agent 只读审查 API/边界/兼容性；定向 48 项和新示例通过，未发现高、中严重度问题 |
 
-[Capture 元数据回归](../tests/test_capture_metadata.py) 覆盖策略差异、日期精度、时区转换、非法字段重试、导入失败不推进游标、两种 Store 与 SDK/宿主驱动/导入到导出的链路。极端时区日期溢出在修复前实际复现崩溃，修复后按无效日期处理。`conversation_capture.keep_dates=False` 的既有策略没有改变；历史导入和人工档案保留合法日期，`role`/`is_sensitive` 仅在模型提供合法值时保存。
+本地结果不等于远程 CI。PR checks 才是对应提交的远程证据；矩阵覆盖 Python 3.10–3.13。无 key 的模型步骤明确 SKIP，不能凭 job 绿色宣布实联通过。本仓未配置额外的完整类型检查或格式化 gate，本页不把 pytest/diff 检查称作这些检查。
 
-[DSH 验收反证](../tests/test_dsh_acceptance_evidence.py) 要求自动召回有非空召回日志、独特事实且没有主动搜索；工具写入有真实事件和 `source=model_tool` 卡；重复卡整理夹具有成功回执、持久账本和取代链。普通整理的合法 no-op 不因此被禁止。依赖来源和可复现步骤见 [Adapter 文档](../adapters/dsh-memgarden/README.md)。
+回归入口：[检索线索](../tests/test_retrieval_cues.py)、[混合检索](../tests/test_hybrid_relevance.py)、[公开指南](../tests/test_public_guides.py)、[DSH 判据](../tests/test_dsh_acceptance_evidence.py)、[实际离线 Adapter](../tests/test_dsh_adapter_offline.py)、[Store 契约](../tests/test_store_contract.py)。此前卡片时间、空回复重试和入口一致性修复仍由全量套件覆盖。
 
-[28 项卡片时间回归](../tests/test_store_timestamps.py) 覆盖两个 Store、幂等重放、无变化写入、CAS、真实 SQLite 回滚、可信恢复、旧数据不补造创建时间，以及 SDK 写入后按创建时间召回。无需新表或 schema 迁移；外部 Store 应实现同样的写入语义。
+## 3. 真实 DSH 与模型：本轮不能报全绿
 
-[21 项空回复与入口一致性回归](../tests/test_empty_model_reply.py) 覆盖同步／异步 Capture、宿主驱动 Capture／Maintenance、同步 SDK Maintenance、回复信封以及共享重试预算。实际 Adapter 离线测试还验证：连续空回复不清理待落卡 outbox、不推进整理账本，provider 明确失败不伪装成空回复。
+环境：官方 DSH Python SDK 源码 commit `4e84901e6471b79ec0338099867ebb4606d12bb5`；CLI 及内部 DSH npm 依赖统一 `0.1.2-alpha.4`。使用合成材料，凭据只经运行进程传递，未提交原始日志或用户数据。
 
-## 本轮真实模型验收
+本次账号的模型列表不再包含历史 `deepseek-v4-flash`；不可用的原基线前置检查退出 2，未当成成功。随后**显式选择 `deepseek-flash`**，其结果独立记录，不能当作旧模型复测。
 
-环境：官方 DSH 源码 commit `4e84901e6471b79ec0338099867ebb4606d12bb5` 的 Python SDK；npm CLI 及其 DSH 内部依赖统一固定为 `0.1.2-alpha.4`；模型 `deepseek-v4-flash`。验收使用合成材料，凭据仅经进程环境传入，不写入仓库或文档。完整 A–E 运行和真实质量 eval 均退出 0。
-
-| 组 | 本次实际检查 | 结果 |
+| 运行 | 检查 | 结果 |
 |---|---|---|
-| A | 轮末自动记忆、模型由 DSH 提供、全新会话自动召回独特事实 | 3/3 |
-| B | 工具注册、真实 `memory_write` 调用事件及 `model_tool` 来源卡持久化 | 2/2 |
-| C | 同库同租户跨 owner 隔离，另一个 owner 无卡可召回 | 3/3 |
-| D | 服务启动失败仍可对话、不伪造记忆、无效会话、未配置模型及非模型方法 | 5/5 |
-| E | 达到整理条件后调用模型，成功回执、持久整理账本与旧卡到新卡取代链一致 | 2/2 |
-| 质量 eval | 中文卡、英文卡、闲聊不记、明确偏好记一张、多个侧面合成厚卡 | 5/5 |
+| 完整 A | 轮末自动记忆、DSH 提供模型、新会话自动召回独特事实 | 3/3 |
+| 完整 B | 工具注册；真实 memory_write 事件且以 model_tool 来源落库 | **1/2**；注册通过，调用＋落库组合判据失败 |
+| 完整 C | 同库、同租户跨 owner 隔离 | 3/3 |
+| 完整 D | 服务启动/模型配置/会话/协议错误，不伪造记忆成功 | 5/5 |
+| 完整 E | 整理成功回执、持久账本、旧卡到新卡取代链 | 2/2 |
+| 完整 A–E 总计 | 同一次完整运行 | **14/15，退出 1** |
+| 单项 B 诊断复测 | 未改生产代码或判据；新增有界诊断后再运行 | **2/2，退出 0**；确有 memory_write 调用和一张 model_tool 卡，summary/content 均含验收标记 |
+| 单独 Capture 质量 eval | 中文、英文、闲聊不记、明确偏好记一张、多侧面厚卡 | **5/5，退出 0**，不是 SKIP |
 
-修复前实联曾为 14/15，E 组因空正文失败。排查发现 Adapter 提前抛错、内核未将空白正文纳入有限重试；进一步回归发现同步 SDK 整理绕过了公共状态机。修复后单独 E 组与完整 A–E 均通过。测试没有把空回复替换成成功 JSON，也没有放宽整理验收条件。空回复最初来自模型还是 DSH 内部处理，本轮没有定位到底层，不能据此宣称供应商问题已修复。
+完整运行与单项复测使用同一组本轮生产代码和模型；复测只补验收诊断，没有修补生产 Adapter，也没有以自动 Capture 卡冒充主动工具卡。初次失败时未保存足够诊断，**尚不能定位是模型选择、provider/DSH 行为还是其他瞬态因素**。后续 B 通过只证明链路可工作，不证明已找到并修复首次失败根因。
 
-这些证据只证明上述固定版本、模型和场景，不代表其他模型质量、未来 DSH 版本或长期生产稳定性已经验证。普通 PR 的无凭据 CI 不依赖付费模型，其可选模型步骤仍可能 SKIP；本地实联证据与远程 CI 分开记录。
+工具调用稳定性仍待维护者复核。自动 Capture 不依赖模型选择该工具，本轮 A 组已通过；但不能拿 A 的成功代替 B 的工具验收。
 
-## 工程师接手后的验收
+历史证据：2026-09-08 在 [78b0baf](https://github.com/teleport-computer/memgarden/commit/78b0baf86fcf07847c323d2c993fa793c5b9a9ee) + `deepseek-v4-flash` 曾完整 15/15、Capture 5/5。仅作历史记录，不外推到今天的模型、新功能或其他宿主版本。
 
-| 事项 | 当前结论 | 需要的下一步 |
-|---|---|---|
-| 固定环境的真实 DSH + 模型 | 本次已通过上述 15 项检查 | 工程师在目标部署环境复跑；升级 DSH 时重新验证版本、依赖闭包和实际事件行为 |
-| 当前提示词的真实模型质量 | `deepseek-v4-flash` 的 5 个场景已通过 | 换模型或改提示词后重跑；不把五个场景外推为全面质量保证 |
-| History Import / Migrate 的 DSH 入口 | 核心已有；默认无模型服务关闭这两项 | 当前接入不要调用；未来要在该宿主开放时补模型路径和管理入口 |
-| 大规模读取与一致导出 | owner 全量读取；分页不是跨请求快照 | 按宿主规模压测；若要一致导出，明确快照或写入协调方案 |
-| 完整“忘记” | 指定卡已真删；无跨素材、备份、派生卡自动级联 | 宿主需要全域删除时，补自己的协调流程和重放防复活测试 |
-| 多进程 outbox / 服务部署 | 本轮未证明多个进程共享同一个 outbox 文件安全 | 每个实例独立 stateDir，或另行实现并验收共享队列；明确失败待办的运营处理 |
+复现见 [DSH 指南](../adapters/dsh-memgarden/README.md) 和 [Evals](../evals/README.md)。DSH 用 `MEMGARDEN_ACCEPTANCE_MODEL` 显式选择，Capture 用 `--model`；CI 使用 `EVAL_DEEPSEEK_MODEL` 仓库变量（默认 `deepseek-flash`）。无凭据、无兼容运行时、模型不可用应分别报告，不能变成假通过。
 
-上表区分现有实现、宿主责任和待验证范围，不把每一项都当作本库必须新增的 P0 功能。卡片时间已明确为已有字段缺少自动写入的 bug，并补齐实现与回归，不再列为待产品确认。
+## 4. 维护者审核与发布判断
 
-2026-09-04 的旧 DSH 实测只作为历史证据，本次结论以上述当前基线重跑为准。现在可以交由工程师复核 PR，并在目标部署环境确认；尚未合并或发布，也不作“所有边界和生产场景均已验证”的结论。
+| 事项 | 当前结论 / 下一步 |
+|---|---|
+| 检索修复与兼容性 | 审核 Card/schema/FieldMap 闭环、旧位置参数和严格向量标签的报错变化；使用新版本发布，不能覆盖 v0.20.0 |
+| 文档是否准确表达产品 | 重点看厚卡、三种写入意图、Capture/工具分工、Dream、默认摘要上下文与宿主职责；对照真实主循环运行一次 |
+| DSH 工具稳定性 | 在目标模型/profile 复跑完整 A–E，保留新诊断；单项通过不足以宣布稳定。若仍失败，收集有界脱敏证据后定位，不放宽验收 |
+| Relevant/hybrid 效果 | 本轮验证协议、数学、投影和模拟向量；尚未完成真实 embedding/目标语料质量校准。默认阈值/权重不是已证明的最佳值 |
+| 私密漏洞报告 | 检查时 GitHub 私密漏洞报告未开启。维护者应开启或提供可用私密渠道；本次仅写安全文档，未改仓库设置 |
+| 公开与发布 | 检查时仓库已 public；本轮未修改可见性、合并或发布。通用凭据模式扫描在当时 94 个可达提交的 diff 未命中，不等于完整隐私/秘密审计；公开资料仍需维护者终审 |
 
-## 维护方式
+仍存在但不能混称“本轮漏修”的接入边界：
 
-后续 PR 改变行为时更新这一份状态页的验证基线、证据和未完成项；概览在 [README](../README.md)，数据/接入细节在 [参考文档](INTEGRATION-AND-DATA.md)。阶段性讨论留在 PR 和 Git 历史，不再新增相互重叠的当前审查报告。
+- **History Import/Migrate**：核心已有；默认 DSH 无模型服务没有对应宿主管理通道，按运行时 manifest 降级。
+- **规模与导出**：SQLite 按 owner 集合读取，响应分页不提供跨请求快照；目标规模压测与一致导出协调仍是部署判断。
+- **完整忘记**：指定卡真删，不自动级联删除宿主素材、备份、向量或其他派生卡；宿主需协调并防止旧素材重放复活。
+- **outbox 部署**：没有证明多进程共享一个文件安全；实例独立 stateDir，或另外实现并验证共享队列。
+
+这些边界不意味着要把 Garden 扩成宿主、向量服务或其他记忆系统的通用门面。接入者应按自己的规模、安全边界和模型验收。
+
+## 5. 维护方式
+
+只维护本页作为“当前状态”。概览在 [README](../README.md)，接入在 [Getting started](GETTING-STARTED.md)，字段/表在 [数据参考](INTEGRATION-AND-DATA.md)，检索在 [Retrieval](RETRIEVAL.md)。后续 PR 同步更新受影响指南、验证基线与未完成项；讨论留在 PR/Git 历史，不新增另一份相互矛盾的当前审核报告。

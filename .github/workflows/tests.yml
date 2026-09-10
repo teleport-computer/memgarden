@@ -43,7 +43,9 @@ jobs:
         # 单测把 agent stub 掉了，什么都验不到。
         env:
           DEEPSEEK_API_KEY: ${{ secrets.EVAL_DEEPSEEK_API_KEY }}
-        run: uv run --extra dev python evals/capture.py --provider deepseek --model deepseek-chat
+          # Explicitly configurable: provider model IDs are not permanent.
+          EVAL_DEEPSEEK_MODEL: ${{ vars.EVAL_DEEPSEEK_MODEL || 'deepseek-flash' }}
+        run: uv run --extra dev python evals/capture.py --provider deepseek --model "$EVAL_DEEPSEEK_MODEL"
       - name: 装完之后 CLI 真的能敲
         # [project.scripts] 写错、入口 import 不到，只有真装一次才发现 ——
         # 而「装完能不能用」正是别人愿不愿意继续读下去的门槛。
