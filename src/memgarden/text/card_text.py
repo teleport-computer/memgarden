@@ -116,6 +116,78 @@ def extract_json_block(raw: str) -> str:
     return _first_balanced_json_object(text)
 
 
+def repair_unescaped_quotes(block: str) -> str:
+    """把模型写在字符串值里、却没转义的双引号补上转义。
+
+    ## 为什么需要它（2026-09-12 prod 事故）
+
+    模型引用用户原话时会这么写：
+
+        "summary": "他一句"没抓住重点"就否了，我加了两个通宵"
+
+    那两个内层引号没转义 → ``json.loads`` 报 ``Expecting ',' delimiter`` →
+    **整批卡被丢掉**。再问一次也一样（同样的输入必然同样的输出）。
+
+    prod 实测：152 个有落卡活动的用户里 58 个因此连续两天 0 成功 ——
+    因为失败不推进游标，同一条消息被反复重放。
+
+    ## 判据
+
+    扫一遍字符，跟踪"现在在不在字符串里"。在字符串里遇到未转义的 ``"`` 时：
+
+        它是这个字符串的结尾吗？ → 看它后面（跳过空白）是不是
+                                   ``,`` ``}`` ``]`` ``:`` 或字符串结束
+        是   → 正常收尾，不动
+        不是 → 它是内容的一部分，转义成 \\"
+
+    ## 为什么不用提示词让模型"记得转义"
+
+    那是软约束：大多数时候有效、偶尔无声失败。而这里有确定的结构办法。
+    模型本来就不擅长在长文本里维持转义状态。
+
+    ## 边界
+
+    - 只动**字符串内部**的引号，键名和结构分隔符一概不碰
+    - 修不动就原样返回，让调用方照旧报解析失败 —— 不猜、不吞
+    - 不处理其它非法形态（缺逗号、多逗号、单引号）：那些没有同样确定的判据，
+      乱修会把"解析失败"变成"解析成了别的意思"，后者更糟
+    """
+    text = str(block or "")
+    if not text:
+        return text
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if escaped:
+            out.append(ch)
+            escaped = False
+            continue
+        if ch == "\\":
+            out.append(ch)
+            escaped = True
+            continue
+        if ch == '"':
+            if not in_string:
+                in_string = True
+                out.append(ch)
+                continue
+            # 在字符串里遇到引号：是收尾还是内容？
+            j = i + 1
+            while j < len(text) and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < len(text) else ""
+            if nxt in (",", "}", "]", ":", ""):
+                in_string = False
+                out.append(ch)
+            else:
+                # 内容里的引号 —— 模型忘了转义，替它补上
+                out.append('\\"')
+            continue
+        out.append(ch)
+    return "".join(out)
+
+
 def _is_substantive_char(ch: str) -> bool:
     """字母或数字(任何语种)。标点、省略号、空白、emoji、组合符号都不算。
 

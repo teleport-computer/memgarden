@@ -15,6 +15,7 @@ from ..text.card_text import (
     card_text_rejection,
     extract_json_block,
     format_error,
+    repair_unescaped_quotes,
     sanitize_card_labels,
 )
 from ..text import card_guard
@@ -259,8 +260,18 @@ def parse_capture_cards(
         return [], "no_json_object"
     try:
         doc = json.loads(block)
-    except (ValueError, TypeError) as e:
-        return [], f"json_decode_error:{type(e).__name__}"
+    except (ValueError, TypeError) as first:
+        # 🔴 先按原样试，失败了才修 —— 修复只跑在出错路径上，
+        # 正常回复一个字节都不会被碰到。
+        #
+        # 唯一要修的形态：模型引用用户原话时，把双引号写进字符串却没转义
+        # （见 repair_unescaped_quotes）。2026-09-12 prod 上这一种坏法
+        # 让 58 个用户连续两天一条记忆都没记进去 —— 因为落卡失败不推进游标，
+        # 同一条消息被反复重放，而重放同样的输入必然同样失败。
+        try:
+            doc = json.loads(repair_unescaped_quotes(block))
+        except (ValueError, TypeError):
+            return [], f"json_decode_error:{type(first).__name__}"
     if not isinstance(doc, dict):
         return [], "not_an_object"
     rows = doc.get("cards")

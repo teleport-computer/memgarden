@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "memgarden"
-version = "0.20.0"
+version = "0.20.1"
 description = "可插拔的 AI 记忆编辑内核：落卡、召回、整理与可替换存储编排。"
 readme = "README.md"
 requires-python = ">=3.10"
