@@ -1,5 +1,7 @@
 # T510/T512: opt-in relevant context selection
 
+Implementation/design note retained for provenance. These features shipped in v0.20.0. For current integration, use [Retrieval](RETRIEVAL.md); current evidence is in [Status](STATUS.md). References to IO below describe the original integration plan, not a claim about its current deployment.
+
 `scoring.relevance.select_relevant_context_memories_with_trace(cards, query)`
 provides ambient recall with a default relevance floor of 0.35 and medium/strong
 lexical evidence required in every bucket. Turning points reserve up to three
@@ -67,6 +69,5 @@ selection importance contract remains 0–1; old model output remains accepted.
 
 `tests/test_retrieval_cues.py` covers capture/dream output, legacy compatibility,
 all five levels, invalid values, bounded hints and grounded prompt instructions.
-This is the combined external PR1+PR2 change, not a published release.
-IO T513 continues to use published memgarden 0.19.0; its optional
-cue read/write plumbing does not imply that this future producer is deployed.
+This was the combined external PR1+PR2 change, subsequently released in v0.20.0.
+The host's dependency upgrade and cue/index plumbing require separate deployment evidence.

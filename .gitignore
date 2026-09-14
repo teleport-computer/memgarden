@@ -4,3 +4,10 @@ __pycache__/
 .pytest_cache/
 *.db
 dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.db-wal
+*.db-shm
+memgarden-outbox.jsonl

@@ -43,6 +43,14 @@ TOOL_PROBE = "MG_TOOL_PROBE_20260908"
 _HARNESS_CLASS: type | None = None
 
 
+def _acceptance_model() -> str:
+    # Historical default is retained; overrides must be explicit in evidence.
+    model = os.environ.get("MEMGARDEN_ACCEPTANCE_MODEL", "deepseek-v4-flash").strip()
+    if not model:
+        raise ValueError("MEMGARDEN_ACCEPTANCE_MODEL must not be blank")
+    return model
+
+
 def check(ok: bool, name: str, detail: str = "") -> bool:
     RESULTS.append((ok, name, detail))
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
@@ -103,7 +111,7 @@ class Env:
         if _HARNESS_CLASS is None:
             raise RuntimeError("deepseek_harness SDK 尚未通过环境校验")
         return _HARNESS_CLASS(
-            provider="deepseek-official", model="deepseek-v4-flash",
+            provider="deepseek-official", model=_acceptance_model(),
             max_tokens=4096, cwd=str(self.workspace),
             dsh_home=str(self.home), dsh_bin=str(self.dsh_bin),
             profile="sdk-minimal",
@@ -334,6 +342,23 @@ def _tool_call_is_proven(events: list[dict], cards: list[dict], marker: str) -> 
     return called and persisted
 
 
+def _tool_write_diagnostic(events: list[dict], cards: list[dict], marker: str) -> str:
+    """Show which half of the evidence is missing without dumping model text."""
+    return json.dumps({
+        "event_count": len(events),
+        "tool_calls": [str(event.get("data", {}).get("name", ""))[:120]
+                       for event in events if isinstance(event, dict)
+                       and event.get("type") == "tool/call"
+                       and isinstance(event.get("data"), dict)][:10],
+        "card_count": len(cards),
+        "marker_cards": [{"source": str(card.get("source", ""))[:80],
+                          "summary_has_marker": marker in card.get("summary", ""),
+                          "content_has_marker": marker in card.get("content", "")}
+                         for card in cards if marker in
+                         f"{card.get('summary', '')}\n{card.get('content', '')}"][:10],
+    }, ensure_ascii=False, separators=(",", ":"))
+
+
 def _maintenance_is_proven(logs: str, cards: list[dict], ledger: dict) -> bool:
     result_lines = [line for line in logs.splitlines() if "整理结果" in line]
     successful_receipt = bool(
@@ -420,8 +445,10 @@ def group_b() -> None:
                            "content；工具成功后只回答“完成”。", session_id="W")
         check("注册了" in env.logs(), "工具注册进了 DSH 的 Tool Registry",
               next((l for l in env.logs().splitlines() if "注册了" in l), ""))
-        check(_tool_call_is_proven(result.events, env.cards(), TOOL_PROBE),
-              "memory_write 有 tool/call 事件且以 model_tool 来源落库")
+        cards = env.cards()
+        check(_tool_call_is_proven(result.events, cards, TOOL_PROBE),
+              "memory_write 有 tool/call 事件且以 model_tool 来源落库",
+              _tool_write_diagnostic(result.events, cards, TOOL_PROBE))
     finally:
         env.cleanup()
 
@@ -562,6 +589,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
+        _acceptance_model()
+    except ValueError as exc:
+        print(f"验收环境不满足：{exc}")
+        return 2
+
+    try:
         _HARNESS_CLASS = _load_harness_class()
     except RuntimeError as exc:
         print(f"验收环境不满足：{exc}")
@@ -581,7 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print("=" * 66)
-    print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden")
+    print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden; model=" + _acceptance_model())
     print("=" * 66)
 
     for group in groups:

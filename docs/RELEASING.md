@@ -1,6 +1,6 @@
 # 发版指南
 
-发布行为由 [release.yml](../.github/workflows/release.yml) 定义。本页说明当前流程，发布结果以对应 workflow run、Release 和 PyPI 为准。当前修复分支是否完成真实环境验收，见 [STATUS](STATUS.md)。
+发布行为由 [release.yml](../.github/workflows/release.yml) 定义。本页说明当前流程，发布结果以对应 workflow run、Release 和 PyPI 为准。当前代码的真实环境验收及未发布修复，见 [STATUS](STATUS.md)。
 
 ## 发布前
 
@@ -15,10 +15,14 @@ uv run --python 3.12 --extra dev python scripts/check_version_consistency.py
 uv run --extra dev python evals/run.py --baseline evals/baseline.json
 uv run python examples/quickstart.py
 uv run python examples/mount_in_ten_minutes.py
+uv run python examples/wire_capture.py
+uv run python examples/retrieval_runtime.py
 uv build
 ```
 
 干净 venv 中安装这次构建的**确切 wheel 文件**，再运行 `memgarden manifest` 和顶层 SDK import。不要同时安装 dist 中多个旧 wheel。模型质量评测按 [Evals](../evals/README.md) 执行；无凭据跳过不等于验证通过。
+
+公开发布前还应检查 README 的接入示例、已知限制和 [Security](../SECURITY.md) 的报告渠道。维护者应启用 GitHub 私密漏洞报告或提供确实可用的私密渠道；提交 `SECURITY.md` 本身不会开启仓库设置。不要把公开仓库可访问、代码已合并、版本已发布和功能验收通过当作同一件事。
 
 ## 当前 workflow 实际执行什么
 
