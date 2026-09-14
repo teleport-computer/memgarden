@@ -111,3 +111,120 @@ def test_empty_and_degenerate_input():
     for value in ("", None, "{}"):
         out = repair_unescaped_quotes(value)
         assert out == (value or "")
+
+
+# ── 歧义形态：宁可解析失败，也不静默改掉意思 ─────────────────────────────
+
+MISSING_COMMA = ('{"cards":[{"action":"add","type":"event","bucket":"工作",'
+                 '"threads": ["alpha" "beta"],"summary":"一张正常的卡",'
+                 '"content":"正文足够长，能过内容闸的那种，讲清了这件事的前后经过。",'
+                 '"importance":0.7,"pulse":0.5}]}')
+
+
+def test_missing_comma_between_array_strings_is_not_repaired():
+    """🔴 数组里两个字符串之间漏了逗号：``["alpha" "beta"]``。
+
+    旧判据看到 alpha 后面那个引号的下一个非空白字符是 ``"``（不是 ``, } ] :``），
+    就当成内容引号转义掉 —— 结果拼成一个 ``alpha" "beta`` 的字符串，**解析成功、
+    静默落库**，两个线索变成了一个错的。这种形态和「内容里的引号」无法区分，
+    所以不修：原样返回，让解析照旧失败、宿主去重问。
+    """
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(MISSING_COMMA)
+    assert repair_unescaped_quotes(MISSING_COMMA) == MISSING_COMMA
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(repair_unescaped_quotes(MISSING_COMMA))
+
+
+@pytest.mark.parametrize("strict", [True, False])
+def test_missing_comma_reaches_the_host_as_a_parse_failure(strict):
+    """端到端：漏逗号的回复必须报解析失败，而不是产出一张线索被拼坏的卡。"""
+    cards, err = parse_capture_cards(MISSING_COMMA, strict=strict)
+    assert cards == []
+    assert err and err.startswith("json_decode_error"), err
+
+
+@pytest.mark.parametrize("between", ["", " ", "\n    ", "\t"])
+def test_quote_then_another_string_is_ambiguous_with_any_spacing(between):
+    """漏逗号时两个字符串之间有没有空白、是什么空白，都一样判歧义。"""
+    broken = MISSING_COMMA.replace('"alpha" "beta"', f'"alpha"{between}"beta"')
+    cards, err = parse_capture_cards(broken, strict=False)
+    assert cards == [] and err, (between, cards)
+
+
+def test_missing_comma_between_members_is_not_repaired():
+    """对象成员之间漏逗号（``"s" "content":...``）同样不修。"""
+    broken = MISSING_COMMA.replace('"summary":"一张正常的卡",', '"summary":"一张正常的卡" ')
+    assert repair_unescaped_quotes(broken) == broken
+    cards, err = parse_capture_cards(broken, strict=False)
+    assert cards == [] and err
+
+
+def test_one_ambiguous_quote_aborts_the_whole_repair():
+    """同一份回复里既有可修的引号、又有歧义的漏逗号 —— 整份不修。
+
+    出现歧义说明「在不在字符串里」这个状态已经不可信，只修一半同样可能改掉意思。
+    """
+    broken = MISSING_COMMA.replace('"一张正常的卡"', '"他说"不行"就走了"')
+    assert repair_unescaped_quotes(broken) == broken
+    cards, err = parse_capture_cards(broken, strict=False)
+    assert cards == [] and err
+
+
+def test_a_quoted_phrase_without_a_comma_after_it_still_repairs():
+    """歧义规则要窄：C1 修完，引号后面跟普通文字的正常形态照修不误。"""
+    broken = ('{"cards":[{"title":"t","content":"她说"好的"然后走了"}]}')
+    assert json.loads(repair_unescaped_quotes(broken))["cards"][0]["content"] \
+        == '她说"好的"然后走了'
+
+
+def test_a_quoted_phrase_ending_the_value_is_not_treated_as_ambiguous():
+    """``"他只说了"算了""`` —— 引号紧贴着收尾引号、后面接字段结束，不算歧义。"""
+    broken = CARD.replace("{SUMMARY}", '"他只说了"算了""')
+    fixed = json.loads(repair_unescaped_quotes(broken))
+    assert fixed["cards"][0]["summary"] == '他只说了"算了"'
+
+
+def test_adjacent_quotes_followed_by_more_text_are_ambiguous():
+    """``["alpha""beta"]``：紧贴的第二个引号后面还跟着内容 → 是漏逗号的形状，不修。"""
+    broken = MISSING_COMMA.replace('"alpha" "beta"', '"alpha""beta"')
+    assert repair_unescaped_quotes(broken) == broken
+
+
+def test_a_doubled_quote_after_a_key_is_not_repaired():
+    """``"threads"": [...]`` —— 键名后多敲了一个引号。
+
+    若按「紧贴引号 + 收尾符」放行，会得到键名 ``threads"``：解析成功、线索静默丢失。
+    """
+    broken = MISSING_COMMA.replace('"threads": ["alpha" "beta"]', '"threads"": ["alpha", "beta"]')
+    assert repair_unescaped_quotes(broken) == broken
+    cards, err = parse_capture_cards(broken, strict=False)
+    assert cards == [] and err
+
+
+# ── 修不了的形态：钉住它失败，而不是解析成别的意思 ─────────────────────────
+
+def test_unescaped_quote_before_a_comma_is_out_of_scope_and_fails():
+    """``她说"好的", 然后`` —— 引号后面紧跟逗号，和「字段在这里结束」长得一模一样。
+
+    按设计修不了（见 repair_unescaped_quotes 的「支持范围」）。这里钉住的是：
+    它必须**报解析失败**，不能被修成一张内容被截断的卡。
+    """
+    broken = ('{"cards":[{"action":"add","type":"event","bucket":"工作",'
+              '"summary":"一张正常的卡",'
+              '"content":"她说"好的", 然后走了，正文足够长，讲清了这件事的前后经过。",'
+              '"importance":0.7,"pulse":0.5}]}')
+    for strict in (True, False):
+        cards, err = parse_capture_cards(broken, strict=strict)
+        assert cards == []
+        assert err and err.startswith("json_decode_error"), err
+
+
+def test_unescaped_quote_before_a_colon_is_out_of_scope_and_fails():
+    broken = ('{"cards":[{"action":"add","type":"event","bucket":"工作",'
+              '"summary":"一张正常的卡",'
+              '"content":"标题是"备忘": 周末重做，正文足够长，讲清了这件事的前后经过。",'
+              '"importance":0.7,"pulse":0.5}]}')
+    cards, err = parse_capture_cards(broken, strict=False)
+    assert cards == []
+    assert err and err.startswith("json_decode_error"), err

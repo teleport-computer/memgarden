@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 
@@ -69,8 +70,7 @@ _FORMAT_ERROR_PREFIX = "invalid_card_content"
 _AFTER_RETRY_ERROR_PREFIX = "invalid_card_content_after_retry"
 
 
-def _first_balanced_json_object(raw: str) -> str:
-    """Return the first balanced ``{...}`` block, preserving legacy leniency."""
+def _strip_leading_fence(raw: str) -> str:
     text = str(raw or "").strip()
     if text.startswith("```"):
         # Agents sometimes wrap JSON in a leading ```json fence despite the
@@ -78,9 +78,11 @@ def _first_balanced_json_object(raw: str) -> str:
         text = text.split("```", 2)[1] if text.count("```") >= 2 else text.strip("`")
         if text.lstrip().lower().startswith("json"):
             text = text.lstrip()[4:]
-    start = text.find("{")
-    if start < 0:
-        return ""
+    return text
+
+
+def _brace_count_block(text: str, start: int) -> str:
+    """Legacy scan: count every brace, whether or not it sits inside a string."""
     depth = 0
     for index in range(start, len(text)):
         if text[index] == "{":
@@ -90,6 +92,68 @@ def _first_balanced_json_object(raw: str) -> str:
             if depth == 0:
                 return text[start:index + 1]
     return ""
+
+
+def _string_aware_block(text: str, start: int) -> str:
+    """JSON-lexing scan: braces inside ``"..."`` (with ``\\`` escapes) don't count."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        ch = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
+    return ""
+
+
+def _first_balanced_json_object(raw: str) -> str:
+    """Return the first balanced ``{...}`` block, preserving legacy leniency.
+
+    Two scans from the first ``{``:
+
+    - **string-aware** — ignores braces inside JSON strings, so valid output
+      like ``{"content": "他说 { 这个符号"}`` is not cut short or discarded;
+    - **brace-count** (legacy) — counts every brace.
+
+    Model output is often *invalid* JSON (typically unescaped quotes), and then
+    "inside a string" can't be trusted: an odd quote flips the lexer and hides
+    real braces. So the string-aware block wins only when it is valid JSON by
+    itself. A block that parses can only differ from the legacy one when the
+    legacy scan was fooled by a brace inside a string (its block was cut inside
+    a string, or ran past the object) — i.e. the legacy result was broken.
+    Every other input gets exactly the legacy block, so the downstream repair
+    path (``repair_unescaped_quotes``) sees the same text as before.
+    """
+    text = _strip_leading_fence(raw)
+    start = text.find("{")
+    if start < 0:
+        return ""
+    legacy = _brace_count_block(text, start)
+    aware = _string_aware_block(text, start)
+    if aware == legacy:
+        return legacy
+    if aware:
+        try:
+            json.loads(aware)
+        except (ValueError, TypeError):
+            pass
+        else:
+            return aware
+    return legacy or aware
 
 
 def extract_json_block(raw: str) -> str:
@@ -119,6 +183,9 @@ def extract_json_block(raw: str) -> str:
 def repair_unescaped_quotes(block: str) -> str:
     """把模型写在字符串值里、却没转义的双引号补上转义。
 
+    只应在 ``json.loads`` 已经失败之后调用 —— 合法 JSON 原样返回，但调用方
+    不该依赖这一点去对正常回复跑修复。
+
     ## 为什么需要它（2026-09-12 prod 事故）
 
     模型引用用户原话时会这么写：
@@ -133,12 +200,34 @@ def repair_unescaped_quotes(block: str) -> str:
 
     ## 判据
 
-    扫一遍字符，跟踪"现在在不在字符串里"。在字符串里遇到未转义的 ``"`` 时：
+    扫一遍字符，跟踪"现在在不在字符串里"。在字符串里遇到未转义的 ``"`` 时，
+    看它后面（跳过空白）的下一个字符：
 
-        它是这个字符串的结尾吗？ → 看它后面（跳过空白）是不是
-                                   ``,`` ``}`` ``]`` ``:`` 或字符串结束
-        是   → 正常收尾，不动
-        不是 → 它是内容的一部分，转义成 \\"
+        ``,`` ``}`` ``]`` ``:`` 或文本结束   → 字符串收尾，不动
+        另一个 ``"``                        → 见下面「歧义」
+        其它任何字符                        → 内容里的引号，转义成 \\"
+
+    **歧义：引号后面（可隔空白）紧跟另一个引号。** 这正是漏逗号的形状：
+    ``["alpha" "beta"]`` 若当成内容引号转义，会拼成一个 ``alpha" "beta``，
+    **解析成功、静默落库**，意思被改掉。唯一放行的是
+    「两个引号紧贴、且第二个引号后面就是 ``,`` ``}`` ``]`` 或文本结束」——
+    ``"他只说了"算了""`` 这种引语恰好在值末尾的写法；漏逗号不可能长成这样
+    （后面还跟着内容）。紧贴后接 ``:`` 不放行：键名不会以引语结尾，
+    ``"threads"": [...]`` 是多敲了一个引号，放行会把键名静默改掉。
+    其余一律视为歧义：**整份不修，原样返回**，让调用方照旧报解析失败、去重问。
+    出现歧义说明"在不在字符串里"这个状态已经不可信，只修一半同样可能改掉意思。
+
+    ## 支持范围（诚实地说）
+
+    能修：内容里的引号后面跟着**普通文字**，例如 ``她说"好的"然后走了``、
+    ``他一句"没抓住重点"就否了``，以及引语在值末尾的 ``他只说了"算了"``。
+
+    修不了（按设计）：内容里的引号后面紧跟 ``,`` ``}`` ``]`` ``:``，例如
+    ``她说"好的", 然后走了``、``标题是"备忘": 周末重做``。这和"字段在这里结束"
+    在字符上无法区分 —— 修复会把它当成收尾，结果仍是非法 JSON，调用方照旧报
+    解析失败。极端情况下，如果收尾之后的残文恰好又拼成合法 JSON
+    （例如 ``"她说"好的","content":"..."``），它与模型真的这么写无法区分，
+    会按字面解析 —— 这不是修复引入的，原文本身就是合法 JSON 的读法。
 
     ## 为什么不用提示词让模型"记得转义"
 
@@ -148,13 +237,21 @@ def repair_unescaped_quotes(block: str) -> str:
     ## 边界
 
     - 只动**字符串内部**的引号，键名和结构分隔符一概不碰
-    - 修不动就原样返回，让调用方照旧报解析失败 —— 不猜、不吞
+    - 修不动（或有歧义）就原样返回，让调用方照旧报解析失败 —— 不猜、不吞
     - 不处理其它非法形态（缺逗号、多逗号、单引号）：那些没有同样确定的判据，
       乱修会把"解析失败"变成"解析成了别的意思"，后者更糟
     """
     text = str(block or "")
     if not text:
         return text
+    closers = (",", "}", "]", ":", "")
+    n = len(text)
+
+    def next_non_space(pos: int) -> int:
+        while pos < n and text[pos] in " \t\r\n":
+            pos += 1
+        return pos
+
     out: list[str] = []
     in_string = False
     escaped = False
@@ -173,13 +270,22 @@ def repair_unescaped_quotes(block: str) -> str:
                 out.append(ch)
                 continue
             # 在字符串里遇到引号：是收尾还是内容？
-            j = i + 1
-            while j < len(text) and text[j] in " \t\r\n":
-                j += 1
-            nxt = text[j] if j < len(text) else ""
-            if nxt in (",", "}", "]", ":", ""):
+            j = next_non_space(i + 1)
+            nxt = text[j] if j < n else ""
+            if nxt in closers:
                 in_string = False
                 out.append(ch)
+            elif nxt == '"':
+                # 引号后面紧跟另一个引号：只放行「紧贴 + 第二个引号后就是值的收尾」。
+                # 不含 ``:`` —— 键名不会以内容引号结尾，``"threads"": [`` 是多敲了
+                # 一个引号，放行会把键名静默改成 ``threads"``。
+                k = next_non_space(j + 1)
+                after = text[k] if k < n else ""
+                if j == i + 1 and after in (",", "}", "]", ""):
+                    out.append('\\"')
+                else:
+                    # 漏逗号的形状（["alpha" "beta"]）—— 歧义，整份不修
+                    return text
             else:
                 # 内容里的引号 —— 模型忘了转义，替它补上
                 out.append('\\"')
