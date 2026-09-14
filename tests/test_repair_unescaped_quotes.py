@@ -228,3 +228,82 @@ def test_unescaped_quote_before_a_colon_is_out_of_scope_and_fails():
     cards, err = parse_capture_cards(broken, strict=False)
     assert cards == []
     assert err and err.startswith("json_decode_error"), err
+
+
+# ── 漏冒号：引号后面跟着一个完整的 JSON 值 ─────────────────────────────────
+
+def _card_with(fragment: str) -> str:
+    return ('{"cards":[{"action":"add","type":"event","bucket":"工作",'
+            '"summary":"一张正常的卡",' + fragment + ','
+            '"content":"正文足够长，能过内容闸的那种，讲清了这件事的前后经过。"}]}')
+
+
+@pytest.mark.parametrize("fragment", [
+    '"importance" 0.7,"pulse":0.5',       # 数字
+    '"importance"0.7,"pulse":0.5',        # 紧贴
+    '"pulse":0.5,"importance" -1',        # 负数，后面接 ,
+    '"importance" 7e-1 ,"pulse":0.5',     # 指数 + 空白后再逗号
+    '"is_sensitive" true,"pulse":0.5',
+    '"is_sensitive" false,"pulse":0.5',
+    '"role" null,"pulse":0.5',
+    '"meta" {"a":1},"pulse":0.5',
+    '"threads" ["领导"],"pulse":0.5',
+])
+def test_missing_colon_before_a_value_is_not_repaired(fragment):
+    """🔴 键后面漏了冒号：``"importance" 0.7,"pulse":0.5``。
+
+    旧判据看到引号后面是 ``0``（不是收尾符）就当内容引号转义，拼出一个
+    ``importance" 0.7,"pulse`` 的键名：**解析成功**，importance 和 pulse 静默丢失。
+    """
+    broken = _card_with(fragment)
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(broken)
+    assert repair_unescaped_quotes(broken) == broken
+    for strict in (True, False):
+        cards, err = parse_capture_cards(broken, strict=strict)
+        assert cards == []
+        assert err and err.startswith("json_decode_error"), err
+
+
+def test_the_reported_missing_colon_example_fails():
+    broken = '{"cards":[{"summary":"s","importance" 0.7,"pulse":0.5}]}'
+    assert repair_unescaped_quotes(broken) == broken
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(repair_unescaped_quotes(broken))
+
+
+def _content(value: str) -> str:
+    return ('{"cards":[{"action":"add","type":"event","bucket":"工作",'
+            '"summary":"一张正常的卡","content":"' + value + '"}]}')
+
+
+@pytest.mark.parametrize("value, expected", [
+    ('He said "ok" and left', 'He said "ok" and left'),
+    ('He said "yes" nothing more', 'He said "yes" nothing more'),
+    ('a "lie" falsehood again', 'a "lie" falsehood again'),
+    ('the "show" trueman style', 'the "show" trueman style'),
+    ('a "void" nullable thing', 'a "void" nullable thing'),
+    ('她说"好的"然后走了', '她说"好的"然后走了'),
+    # 数字/字面量后面接的不是 , } ] —— 不是一个完整的 JSON 值，照修
+    ('他报价"1000"块', '他报价"1000"块'),
+    ('约在"3点"见', '约在"3点"见'),
+    ('比分"2" 比 1', '比分"2" 比 1'),
+    ('She said "no" null and left', 'She said "no" null and left'),
+])
+def test_prose_quotes_that_are_not_ambiguous_still_repair(value, expected):
+    fixed = json.loads(repair_unescaped_quotes(_content(value)))
+    assert fixed["cards"][0]["content"] == expected
+
+
+@pytest.mark.parametrize("value", [
+    'He said "ok" 5, then left',          # 数字后面接逗号 = 漏冒号的形状
+    'She said "no" null, fine',
+    'He said "ok" true}',
+    'He wrote "x" [1], then left',
+    'He wrote "x" {y}',
+])
+def test_prose_quotes_that_look_like_a_missing_colon_fail(value):
+    broken = _content(value)
+    assert repair_unescaped_quotes(broken) == broken
+    cards, err = parse_capture_cards(broken, strict=False)
+    assert cards == [] and err
