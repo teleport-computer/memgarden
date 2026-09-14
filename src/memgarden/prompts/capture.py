@@ -15,6 +15,7 @@ from ..text.card_text import (
     card_text_rejection,
     extract_json_block,
     format_error,
+    quote_repair_candidates,
     repair_unescaped_quotes,
     sanitize_card_labels,
 )
@@ -228,6 +229,9 @@ def _capture_metadata(row: dict, policy: CapturePolicy) -> tuple[dict, str | Non
     return metadata, None
 
 
+_UNPARSED = object()
+
+
 def parse_capture_cards(
     raw: str,
     *,
@@ -264,14 +268,22 @@ def parse_capture_cards(
         # 🔴 先按原样试，失败了才修 —— 修复只跑在出错路径上，
         # 正常回复一个字节都不会被碰到。
         #
-        # 唯一要修的形态：模型引用用户原话时，把双引号写进字符串却没转义
-        # （见 repair_unescaped_quotes；有歧义的形态如漏逗号 ["a" "b"] 它会
-        # 原样返回，这里照旧报 json_decode_error）。2026-09-12 prod 上这一种坏法
+        # 唯一要修的形态：模型引用用户原话时，把双引号写进对象成员的值里却没转义
+        # （见 repair_unescaped_quotes；有歧义的形态如漏冒号、数组里漏逗号/错分隔符
+        # 它会原样返回，这里照旧报 json_decode_error）。2026-09-12 prod 上这一种坏法
         # 让 58 个用户连续两天一条记忆都没记进去 —— 因为落卡失败不推进游标，
         # 同一条消息被反复重放，而重放同样的输入必然同样失败。
-        try:
-            doc = json.loads(repair_unescaped_quotes(block))
-        except (ValueError, TypeError):
+        #
+        # 候选块：值里既有裸引号又有 ``}`` 时，旧切法会在那个 ``}`` 处把块切断；
+        # 认字符串的切法给出的完整块排在前面（见 quote_repair_candidates）。
+        doc = _UNPARSED
+        for candidate in quote_repair_candidates(raw):
+            try:
+                doc = json.loads(repair_unescaped_quotes(candidate))
+                break
+            except (ValueError, TypeError):
+                continue
+        if doc is _UNPARSED:
             return [], f"json_decode_error:{type(first).__name__}"
     if not isinstance(doc, dict):
         return [], "not_an_object"

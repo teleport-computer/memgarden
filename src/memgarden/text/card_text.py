@@ -120,6 +120,32 @@ def _string_aware_block(text: str, start: int) -> str:
     return ""
 
 
+def _balanced_candidates(raw: str) -> tuple[str, str]:
+    """Both scans from the first ``{``: ``(legacy brace-count, string-aware)``.
+
+    Both start at the same index and end at some ``}``, so when they differ
+    the shorter one is a prefix of the longer one.
+    """
+    text = _strip_leading_fence(raw)
+    start = text.find("{")
+    if start < 0:
+        return "", ""
+    return _brace_count_block(text, start), _string_aware_block(text, start)
+
+
+def _choose_block(legacy: str, aware: str) -> str:
+    if aware == legacy:
+        return legacy
+    if aware:
+        try:
+            json.loads(aware)
+        except (ValueError, TypeError):
+            pass
+        else:
+            return aware
+    return legacy or aware
+
+
 def _first_balanced_json_object(raw: str) -> str:
     """Return the first balanced ``{...}`` block, preserving legacy leniency.
 
@@ -135,25 +161,22 @@ def _first_balanced_json_object(raw: str) -> str:
     itself. A block that parses can only differ from the legacy one when the
     legacy scan was fooled by a brace inside a string (its block was cut inside
     a string, or ran past the object) — i.e. the legacy result was broken.
-    Every other input gets exactly the legacy block, so the downstream repair
-    path (``repair_unescaped_quotes``) sees the same text as before.
+    Every other input gets exactly the legacy block.
+
+    Invalid JSON that has a brace inside a string *and* needs the quote repair
+    (``"她说"好"然后看 } 这个"``) still gets the legacy block here (cut at that
+    ``}``). Capture recovers it through :func:`quote_repair_candidates`; Dream
+    and Migrate don't repair, so for them it stays ``json_decode_error``.
     """
-    text = _strip_leading_fence(raw)
-    start = text.find("{")
-    if start < 0:
-        return ""
-    legacy = _brace_count_block(text, start)
-    aware = _string_aware_block(text, start)
-    if aware == legacy:
-        return legacy
-    if aware:
-        try:
-            json.loads(aware)
-        except (ValueError, TypeError):
-            pass
-        else:
-            return aware
-    return legacy or aware
+    return _choose_block(*_balanced_candidates(raw))
+
+
+def _extraction_source(raw: str) -> str:
+    text = str(raw or "")
+    ok, reply = reasoning.strip_reasoning(text)
+    if ok and _first_balanced_json_object(reply):
+        return reply
+    return text
 
 
 def extract_json_block(raw: str) -> str:
@@ -171,23 +194,43 @@ def extract_json_block(raw: str) -> str:
     permissive than the user-visible reply path and must not reject any shape
     the legacy extractor could parse.
     """
-    text = str(raw or "")
-    ok, reply = reasoning.strip_reasoning(text)
-    if ok:
-        extracted = _first_balanced_json_object(reply)
-        if extracted:
-            return extracted
-    return _first_balanced_json_object(text)
+    return _first_balanced_json_object(_extraction_source(raw))
 
 
-# 一个完整的 JSON 标量 token（数字 / true / false / null）。只在它后面紧跟
-# ``,`` ``}`` ``]`` 时才算「漏冒号」—— 于是 ``trueman``、``1000块``、``null and``
-# 都不会被当成字面量。
-_JSON_SCALAR_RE = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?|true|false|null")
+def quote_repair_candidates(raw: str) -> list[str]:
+    """Blocks Capture may run :func:`repair_unescaped_quotes` on, in preference order.
+
+    Only for the error path (the :func:`extract_json_block` block already failed
+    ``json.loads``). The list always ends with that block. When the
+    string-aware scan found a **longer** block — the legacy scan stopped at a
+    ``}`` that the string-aware scan reads as string content, e.g.
+    ``"content":"她说"好"然后看 } 这个符号"`` — the longer block comes first:
+    if it repairs, it is the complete object, while the legacy block was cut in
+    the middle of a string.
+
+    A *shorter* string-aware block is never offered: that means an unescaped
+    quote flipped the lexer and it closed early, so repairing it could parse a
+    truncated object.
+    """
+    legacy, aware = _balanced_candidates(_extraction_source(raw))
+    chosen = _choose_block(legacy, aware)
+    out: list[str] = []
+    if aware and len(aware) > len(chosen):
+        out.append(aware)
+    if chosen:
+        out.append(chosen)
+    return out
+
+
+_WS = " \t\r\n"
+# 字符串外的标量（数字 / true / false / null）由「不是空白、不是这些结构符」的字符
+# 组成。修复不判断标量本身合不合法（``True``、``.7`` 留给 ``json.loads`` 去拒），
+# 只用它来推进「下一个该出现什么」。
+_STRUCTURAL = '{}[]:,"'
 
 
 def repair_unescaped_quotes(block: str) -> str:
-    """把模型写在字符串值里、却没转义的双引号补上转义。
+    """把模型写在**对象成员的值**里、却没转义的双引号补上转义。
 
     只应在 ``json.loads`` 已经失败之后调用 —— 合法 JSON 原样返回，但调用方
     不该依赖这一点去对正常回复跑修复。
@@ -204,128 +247,167 @@ def repair_unescaped_quotes(block: str) -> str:
     prod 实测：152 个有落卡活动的用户里 58 个因此连续两天 0 成功 ——
     因为失败不推进游标，同一条消息被反复重放。
 
-    ## 判据
+    ## 原则：有歧义就不修
 
-    扫一遍字符，跟踪"现在在不在字符串里"。在字符串里遇到未转义的 ``"`` 时，
-    看它后面（跳过空白）的下一个字符：
+    修复失败，宿主会重问模型；修复"成功"却改掉了意思（数组元素被拼成一个、
+    键名吞掉后面的字段）会静默落库，后者更糟。所以任何一处看不准，
+    **整份原样返回**，让调用方照旧报解析失败。
 
-        ``,`` ``}`` ``]`` ``:`` 或文本结束        → 字符串收尾，不动
-        另一个 ``"``                             → 见下面「歧义」
-        ``{`` 或 ``[``                           → 歧义（漏冒号/漏逗号后跟对象或数组）
-        完整的数字/``true``/``false``/``null``，
-        且它后面（跳过空白）是 ``,`` ``}`` ``]``  → 歧义（漏冒号，``"importance" 0.7,``）
-        其它任何字符                             → 内容里的引号，转义成 \\"
+    ## 判据：按 JSON 结构走一遍，而不是只看引号后面的那个字符
 
-    **歧义：引号后面（可隔空白）紧跟另一个引号。** 这正是漏逗号的形状：
-    ``["alpha" "beta"]`` 若当成内容引号转义，会拼成一个 ``alpha" "beta``，
-    **解析成功、静默落库**，意思被改掉。唯一放行的是
-    「两个引号紧贴、且第二个引号后面就是 ``,`` ``}`` ``]`` 或文本结束」——
-    ``"他只说了"算了""`` 这种引语恰好在值末尾的写法；漏逗号不可能长成这样
-    （后面还跟着内容）。紧贴后接 ``:`` 不放行：键名不会以引语结尾，
-    ``"threads"": [...]`` 是多敲了一个引号，放行会把键名静默改掉。
-    其余一律视为歧义：**整份不修，原样返回**，让调用方照旧报解析失败、去重问。
+    扫描时跟踪对象/数组的嵌套，以及"下一个该出现的是键 / 冒号 / 值 / 逗号或收尾"。
+    每个字符串按所在位置分成三种角色。字符串里遇到未转义的 ``"`` 时，看它后面
+    （跳过空白）的下一个字符 ``c``：
 
-    **歧义：引号后面是一个 JSON 值的开头。** ``"importance" 0.7,"pulse":0.5``
-    漏了冒号；若把 importance 后面的引号当内容转义，会拼出键名
-    ``importance" 0.7,"pulse``：解析成功，两个字段静默丢失。所以引号后面
-    （可隔空白）是 ``{`` ``[``，或者是一个**完整的**数字/``true``/``false``/``null``
-    且紧跟 ``,`` ``}`` ``]`` 时，同样整份不修。数字/字面量要求「完整 + 紧跟收尾」
-    是为了不误伤正文：``他报价"1000"块``、``约在"3点"见``、
-    ``He said "yes" nothing more``、``the "show" trueman`` 都照修。
-    出现歧义说明"在不在字符串里"这个状态已经不可信，只修一半同样可能改掉意思。
+        角色          c 是 , } ] : 或文本结束          c 是其它字符
+        对象的键      只有 : 算收尾，其余整份放弃        整份放弃
+        数组元素      收尾                             整份放弃
+        对象成员的值  收尾                             内容里的引号，转义成 \\"
+
+    收尾之后照 JSON 语法继续检查：键后面必须是 ``:``，值后面必须是 ``,`` 或 ``}``，
+    元素后面必须是 ``,`` 或 ``]``；``{`` ``[``、字符串、标量只能出现在该出现值的
+    位置。**任何一处不符合，整份放弃。** 走到结尾时对象/数组没闭合、字符串没收尾，
+    同样放弃。
+
+    为什么这样够用（也是为什么不再维护"引号后面跟什么 token 算歧义"的白名单）：
+
+    - **漏冒号** ``"is_sensitive" True,"pulse":0.5``：``is_sensitive`` 在键的位置，
+      它的收尾引号后面不是 ``:`` → 放弃。后面跟的是 ``True``、``.7``、``NaN``、
+      ``'x'`` 还是别的都一样。
+    - **数组元素之间分隔符写错** ``["alpha"， "beta"]``、``["alpha” "beta"]``、
+      ``["alpha" "beta"]``、``[["a"、"b"]]``：数组元素里出现后面不是 ``,`` ``]``
+      的引号 → 放弃。元素没有键，"吞掉了下一个元素"在结构上暴露不出来，所以
+      元素里一概不修。
+    - **值把后面的成员吞进来** ``"summary":"s"， "content":"c"``：把 ``s"`` 当内容，
+      一路走到 ``content`` 的收尾引号 —— 它后面是 ``:``，字符串在这里收尾，
+      而值后面出现 ``:`` 不合语法 → 放弃。吞掉后续成员必然要经过下一个
+      ``"键":``，所以都会在这里暴露；对象之间写错分隔符（``}，{``）则在字符串外
+      直接不合语法。
 
     ## 支持范围（诚实地说）
 
-    能修：内容里的引号后面跟着**普通文字**，例如 ``她说"好的"然后走了``、
-    ``他一句"没抓住重点"就否了``，以及引语在值末尾的 ``他只说了"算了"``。
+    能修：**对象成员的值**里的引号，后面跟着普通文字、数字、别的标点，例如
+    ``她说"好的"然后走了``、``他报价"1000"块``、``约在"3点"见``、
+    ``He said "ok" and left``、``He said "ok" 5, then left``、
+    ``他说"好"、"行"``，以及引语在值末尾的 ``"他只说了"算了""``。
 
-    修不了（按设计）：内容里的引号后面紧跟 ``,`` ``}`` ``]`` ``:``，例如
-    ``她说"好的", 然后走了``、``标题是"备忘": 周末重做``。这和"字段在这里结束"
-    在字符上无法区分 —— 修复会把它当成收尾，结果仍是非法 JSON，调用方照旧报
-    解析失败。极端情况下，如果收尾之后的残文恰好又拼成合法 JSON
-    （例如 ``"她说"好的","content":"..."``），它与模型真的这么写无法区分，
-    会按字面解析 —— 这不是修复引入的，原文本身就是合法 JSON 的读法。
+    修不了（按设计，报解析失败）：
 
-    因歧义而放弃（会报解析失败，但正文其实没问题）：引号后面隔着空白或紧贴着
-    ``{`` ``[``，或紧跟「完整数字/字面量 + ``,`` ``}`` ``]``」，例如
-    ``她说"[笑]"就走了``、``He said "ok" 5, then left``。
+    - 值里的引号后面紧跟 ``,`` ``}`` ``]`` ``:``，例如 ``她说"好的", 然后走了``、
+      ``标题是"备忘": 周末重做``：这和"字段在这里结束"在字符上无法区分。
+    - **数组元素**和**键名**里的裸引号，例如 ``"threads":["他说"算了"那次"]``
+      —— 代价是这类线索要重问；换来的是漏逗号/错分隔符的数组不会被静默拼成
+      一个元素。
+    - 结构本身还有别的错（缺逗号、多逗号、单引号、截断……）。
 
-    已知局限（修了但可能不是原意）：值末尾多敲了一个引号，如
-    ``["好的"","她说"]``，会被读成 ``好的"`` —— 它与「引语恰好在值末尾」
-    的 ``"他只说了"算了""`` 在字符上无法区分，所以不处理。
+    已知局限（会按字面解析，而不是报错）：
+
+    - 值里的引号后面恰好是 ``,``，残文又拼成合法 JSON：``"她说"好的","content":"..."``
+      与模型真的这么写无法区分。这不是修复引入的，原文本身就是合法 JSON 的读法。
+    - 值末尾多敲了一个引号：``"好的""`` 会被读成 ``好的"``，与"引语恰好在值末尾"
+      无法区分。
+    - 值里的引号后面紧跟 ``}``，而对象恰好能在这里闭合：``{"content":"a "b" }"}``
+      读成 ``a "b``，后面的 ``"}`` 被当成块外的残文（取块时旧切法就在这个 ``}``
+      处收尾；见 :func:`quote_repair_candidates`）。
 
     ## 为什么不用提示词让模型"记得转义"
 
     那是软约束：大多数时候有效、偶尔无声失败。而这里有确定的结构办法。
     模型本来就不擅长在长文本里维持转义状态。
-
-    ## 边界
-
-    - 只动**字符串内部**的引号，键名和结构分隔符一概不碰
-    - 修不动（或有歧义）就原样返回，让调用方照旧报解析失败 —— 不猜、不吞
-    - 不处理其它非法形态（缺逗号、多逗号、单引号）：那些没有同样确定的判据，
-      乱修会把"解析失败"变成"解析成了别的意思"，后者更糟
     """
     text = str(block or "")
     if not text:
         return text
-    closers = (",", "}", "]", ":", "")
     n = len(text)
 
     def next_non_space(pos: int) -> int:
-        while pos < n and text[pos] in " \t\r\n":
+        while pos < n and text[pos] in _WS:
             pos += 1
         return pos
 
     out: list[str] = []
-    in_string = False
-    escaped = False
-    for i, ch in enumerate(text):
-        if escaped:
+    stack: list[str] = []          # 未闭合的 "{" / "["
+    # 期待：value / key / key_or_end（刚进对象）/ value_or_end（刚进数组）
+    #      / colon / comma（值之后：逗号或收尾）/ done（根已闭合，之后任何非空白字符
+    #      都过不了下面的位置检查）
+    expect = "value"
+    changed = False
+    i = 0
+    while i < n:
+        ch = text[i]
+        if ch in _WS:
             out.append(ch)
-            escaped = False
-            continue
-        if ch == "\\":
-            out.append(ch)
-            escaped = True
+            i += 1
             continue
         if ch == '"':
-            if not in_string:
-                in_string = True
-                out.append(ch)
-                continue
-            # 在字符串里遇到引号：是收尾还是内容？
-            j = next_non_space(i + 1)
-            nxt = text[j] if j < n else ""
-            if nxt in closers:
-                in_string = False
-                out.append(ch)
-            elif nxt in ("{", "["):
-                # 漏冒号/漏逗号后跟对象或数组（"meta" {...}）—— 歧义，整份不修
-                return text
-            elif (token := _JSON_SCALAR_RE.match(text, j)) is not None and (
-                text[next_non_space(token.end()):next_non_space(token.end()) + 1]
-                in (",", "}", "]", "")
-            ):
-                # 引号后面是一个完整的数字/true/false/null，且紧接着值的收尾
-                # （"importance" 0.7,）—— 漏冒号的形状，整份不修
-                return text
-            elif nxt == '"':
-                # 引号后面紧跟另一个引号：只放行「紧贴 + 第二个引号后就是值的收尾」。
-                # 不含 ``:`` —— 键名不会以内容引号结尾，``"threads"": [`` 是多敲了
-                # 一个引号，放行会把键名静默改成 ``threads"``。
-                k = next_non_space(j + 1)
-                after = text[k] if k < n else ""
-                if j == i + 1 and after in (",", "}", "]", ""):
-                    out.append('\\"')
-                else:
-                    # 漏逗号的形状（["alpha" "beta"]）—— 歧义，整份不修
-                    return text
+            if expect in ("key", "key_or_end"):
+                role = "key"
+            elif expect in ("value", "value_or_end"):
+                role = "value" if stack and stack[-1] == "{" else "element"
             else:
-                # 内容里的引号 —— 模型忘了转义，替它补上
-                out.append('\\"')
+                return text                         # 该出现冒号/逗号的地方来了字符串
+            out.append(ch)
+            i += 1
+            while True:
+                if i >= n:
+                    return text                     # 字符串没收尾
+                c = text[i]
+                if c == "\\":
+                    out.append(text[i:i + 2])
+                    i += 2
+                    continue
+                if c != '"':
+                    out.append(c)
+                    i += 1
+                    continue
+                j = next_non_space(i + 1)
+                nxt = text[j] if j < n else ""
+                if role == "key":
+                    if nxt != ":":
+                        return text                 # 漏冒号 / 键名里有引号
+                elif nxt not in (",", "}", "]", ":", ""):
+                    if role == "element":
+                        return text                 # 数组元素里的引号：可能是错分隔符
+                    out.append('\\"')               # 值里的内容引号：补转义
+                    changed = True
+                    i += 1
+                    continue
+                out.append(c)                       # 字符串收尾
+                i += 1
+                break
+            expect = "colon" if role == "key" else ("comma" if stack else "done")
+            continue
+        if ch in "{[":
+            if expect not in ("value", "value_or_end"):
+                return text
+            stack.append(ch)
+            expect = "key_or_end" if ch == "{" else "value_or_end"
+        elif ch in "}]":
+            opener, empty_ok = ("{", "key_or_end") if ch == "}" else ("[", "value_or_end")
+            if not stack or stack[-1] != opener or expect not in ("comma", empty_ok):
+                return text
+            stack.pop()
+            expect = "comma" if stack else "done"
+        elif ch == ":":
+            if expect != "colon":
+                return text
+            expect = "value"
+        elif ch == ",":
+            if expect != "comma":
+                return text
+            expect = "key" if stack[-1] == "{" else "value"
+        else:
+            if expect not in ("value", "value_or_end"):
+                return text                         # 例如值后面的 ，、；
+            while i < n and text[i] not in _WS and text[i] not in _STRUCTURAL:
+                out.append(text[i])
+                i += 1
+            expect = "comma" if stack else "done"
             continue
         out.append(ch)
+        i += 1
+    if not changed or stack or expect != "done":
+        return text
     return "".join(out)
 
 
