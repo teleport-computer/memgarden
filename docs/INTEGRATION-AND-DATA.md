@@ -43,6 +43,26 @@ JSON Lines 每行一个请求与响应，stdout 承载协议。示例请求：
 
 请求 ID 可为字符串、整数或 null。先检查响应顶层 `error`，再检查业务结果中的 `error` / 工具的 `ok`；`completed` 只代表会话已结束，不能替代存储成功判断。
 
+### 稳定公开模块
+
+顶层 `memgarden.__all__` 之外，宿主常用的工具函数放在少数子模块里。`memgarden.STABLE_MODULES` 列出**承诺稳定**的那些，每个模块的 `__all__` 就是可以依赖的名字；删名字要先经过一个 deprecated 版本，并写进 [CHANGELOG](../CHANGELOG.md)。
+
+| 模块 | 用途 |
+|---|---|
+| `memgarden.contracts` | 请求/结果数据类 |
+| `memgarden.selection` | 挑卡插口：`Chain`、各 `Stage`、`SelectionPolicy` |
+| `memgarden.timestamps` | 历史时间戳解析、排序键、规范化 |
+| `memgarden.text.card_guard` / `card_text` / `leak_signals` | 卡片文本闸、JSON 取块、宿主泄漏识别器组合 |
+| `memgarden.guards.dream_gates` | 整理结果的 id 泄漏与爆炸半径闸 |
+| `memgarden.prompts.recall_fields` | `retrieval_cues` 规范化 |
+| `memgarden.prompts.buckets` | 常用桶、写卡指引、桶名语言归一 |
+| `memgarden.dreaming` | 整理门槛、快照与幂等键 |
+| `memgarden.observability` | 内容无关的注入记录 |
+| `memgarden.garden_language` | 花园语言判定 |
+| `memgarden.policies` | 落卡档位与提示词常量 |
+
+不在清单里的模块（`prompts.capture`、`prompts.dream`、`scoring.*`、`rendering` 等）是内部零件：可以读、可以在测试里用，但不承诺兼容。宿主应在自己仓库加一条「只 import 公开 API」的守卫，以 `STABLE_MODULES` 和各模块 `__all__` 为准；`tests/test_public_api_surface.py` 在本仓库对这两样做快照。
+
 ## 2. 归属与权限
 
 | 字段 | 含义 | 当前约束 |

@@ -673,3 +673,8 @@ def build_truncation_retry_prompt(prompt: str) -> str:
         "【上一次输出因长度上限被截断，请完整重做】\n"
         "请保持原有 JSON 结构，只保留必要信息并更简洁地表达，确保 JSON 完整闭合。\n"
     )
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["extract_json_block", "card_text_rejection", "placeholder_reason", "sanitize_card_labels", "count_user_token_residuals", "is_retryable_parse_error", "build_truncation_retry_prompt"]

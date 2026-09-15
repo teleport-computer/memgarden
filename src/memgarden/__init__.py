@@ -28,8 +28,9 @@
     my_store.apply("tenant", result.mutations, owner="user-42",
                    idempotency_key="turn-1", expected_revision=None)
 
-``GardenComponent`` 之下的模块（``prompts`` / ``scoring`` / ``selection`` /
-``dreaming`` / ``text``）是**内部零件**。它们仍然公开、可以直接用（高级用法、
+``STABLE_MODULES`` 列出的子模块（时间戳、文本闸、桶名、整理门槛、召回线索等
+宿主工具函数）是**稳定公开合同**，按各自 ``__all__`` 使用。其余模块（``prompts.capture``
+/ ``prompts.dream`` / ``scoring`` / ``rendering`` …）是**内部零件**。它们仍然公开、可以直接用（高级用法、
 单元测试、想自己重新编排），但**普通接入不需要认识它们** —— 认识了就等于
 把编排知识抄进了你的代码，Garden 内部一改你就得跟着改。
 """
@@ -78,7 +79,28 @@ from .service import Service
 # 逼他们去 `memgarden.stores.sqlite` 挖，等于告诉他们「内部模块可以随便进」。
 from .stores.sqlite import SqliteStore
 
+#: 顶层之外、**承诺稳定**的子模块。宿主可以 import 这些模块里 ``__all__`` 列出的名字；
+#: 列表之外的子模块（``prompts.capture``、``scoring.*``、``rendering`` …）仍是内部零件，
+#: 随时可能改名或删除。宿主侧的「只 import 公开 API」守卫以这份清单为准，
+#: ``tests/test_public_api_surface.py`` 对清单和每个模块的 ``__all__`` 做快照。
+STABLE_MODULES: tuple[str, ...] = (
+    "memgarden.contracts",
+    "memgarden.selection",
+    "memgarden.timestamps",
+    "memgarden.text.card_guard",
+    "memgarden.text.card_text",
+    "memgarden.text.leak_signals",
+    "memgarden.guards.dream_gates",
+    "memgarden.prompts.recall_fields",
+    "memgarden.prompts.buckets",
+    "memgarden.dreaming",
+    "memgarden.observability",
+    "memgarden.garden_language",
+    "memgarden.policies",
+)
+
 __all__ = [
+    "STABLE_MODULES",
     "GardenComponent",
     "MountedGarden",
     "Scope",

@@ -289,3 +289,8 @@ def get_policy(name: str | None) -> CapturePolicy:
         raise UnknownPolicyError(
             f"未知的落卡档位 {key!r}；可用的是：{', '.join(sorted(POLICIES))}"
         ) from None
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["CapturePolicy", "CONVERSATION_CAPTURE", "HISTORY_IMPORT", "CURATED_ARCHIVE", "POLICIES", "DEFAULT_POLICY", "UnknownPolicyError", "get_policy", "language_rule", "RESTRAINT_RULE_QUOTE", "HISTORY_IMPORT_OPENING_RUBRIC", "HISTORY_IMPORT_FILTER_RUBRIC", "KEEP_ALL_MAP_SUFFIX", "KEEP_ALL_WRITE_SUFFIX"]

@@ -238,3 +238,8 @@ class RelevanceStage:
                  reason=str(rel.get("reason") or ""), confidence=str(rel.get("confidence") or ""))
             for s, _, __, c, rel in scored[:take]
         ]
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["Pick", "SelectionResult", "SelectionPolicy", "Stage", "Chain", "RoleStage", "RecentStage", "RelevanceStage"]

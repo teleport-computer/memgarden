@@ -161,3 +161,8 @@ def assert_content_free(record: dict) -> None:
             for item in node:
                 walk(item, path)
     walk(record)
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["query_fingerprint", "injection_record", "injection_summary", "assert_content_free"]
