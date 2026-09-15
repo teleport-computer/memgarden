@@ -8,7 +8,7 @@
  *
  * 判断全部回到 Python 那边（memgarden serve），这里只翻译和接线。
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync,
   writeFileSync,
@@ -105,7 +105,10 @@ class Client {
 
   close() {
     this.closed = true
-    try { this.child?.kill() } catch { /* 已经没了就算了 */ }
+    // 🔴 没有 pid 就不 kill。spawn 失败（路径不存在）而 error 事件还没派发时，
+    // Node 的 handle 仍在、pid 是 0，kill() 落到 kill(0, SIGTERM) ——
+    // 杀掉的是**宿主自己所在的整个进程组**。
+    try { if (this.child?.pid) this.child.kill() } catch { /* 已经没了就算了 */ }
     this.failAll('service_closed', 'plugin disposed')
   }
 
@@ -300,6 +303,38 @@ const DRAIN_TIMEOUT_MS = 15000
 
 //: 子进程反复退出时最多重启几次。见 Client.maybeRestart。
 const MAX_RESTARTS = 5
+
+//: apply() 里同步取工具定义最多阻塞多久。见「注册模型工具」。
+const TOOL_SCHEMA_SYNC_TIMEOUT_MS = 5000
+
+/**
+ * 用服务可执行文件的 `memgarden tools` 同步取工具定义。
+ * 失败（找不到文件、超时、非零退出、输出不是定义数组）一律抛错，由调用方降级。
+ */
+function readToolsSync(bin) {
+  const proc = spawnSync(bin, ['tools'], {
+    encoding: 'utf8', timeout: TOOL_SCHEMA_SYNC_TIMEOUT_MS,
+    stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024,
+  })
+  if (proc.error) throw proc.error
+  if (proc.status !== 0) {
+    throw new Error('memgarden tools 退出 ' + proc.status + ': ' +
+                    String(proc.stderr || '').slice(0, 200))
+  }
+  const tools = JSON.parse(proc.stdout)
+  if (!Array.isArray(tools) || !tools.every((t) => t && typeof t.name === 'string'
+      && t.name && typeof t.parameters === 'object')) {
+    throw new Error('memgarden tools 输出不是工具定义数组')
+  }
+  return tools
+}
+
+/** 键排序后的 JSON，用来比较两份工具定义是否同一份（不受字段顺序影响）。 */
+function canonicalJson(value) {
+  return JSON.stringify(value, (_key, v) => (v && typeof v === 'object' && !Array.isArray(v)
+    ? Object.fromEntries(Object.keys(v).sort().map((k) => [k, v[k]]))
+    : v))
+}
 
 /** 在飞的落卡。dispose 时要等它们收尾。 */
 const inflight = new Set()
@@ -627,12 +662,32 @@ export function apply(ctx, config) {
   // 自动召回不依赖这些工具（pre-step 每轮都注入），但「模型主动想查一下」
   // 这条路要靠它们。
   //
-  // schema 从 Garden 的 tool.list 取，**不在这边手写第二份** —— 手写的那份
+  // schema 从 Garden 取，**不在这边手写第二份** —— 手写的那份
   // 会漂，而漂的表现是模型按旧 schema 传参、被拒，看起来像模型出错。
-  void ready.then(async () => {
-    const tools = await client.request('tool.list', {})
+  //
+  // 🔴 必须在 apply() 返回前**同步**注册完。
+  //
+  // DSH 在 `agent/pre-step` **之前**就把工具列表快照进本步请求（agent-loop
+  // preStep：先 systemPrompt.assemble 收集工具，再跑 pre-step waterfall），
+  // 而 SDK 的 initialize 不等插件 apply 返回的 Promise。以前这里等服务握手
+  // + tool.list 两次往返后才注册：DSH 0.1.2-alpha.4 上首个请求里没有
+  // memgarden_* 工具（2026-09-15 实测 19/19）。模型要么回「当前环境未提供
+  // 该工具」直接结束（验收 B 组失败），要么先用 bash 到处找、拖到后续 step
+  // 工具注册上了才调用（通过）
+  // —— 这就是「工具调用波动」。日志里的「注册了 N 个工具」照样会出现，只是晚到。
+  //
+  // 同步取定义用同一个服务可执行文件的 `memgarden tools`（和 tool.list 同出
+  // garden.tools()），阻塞一次子进程启动、有超时。拿不到时退回握手后异步注册，
+  // 首轮可能没有工具，日志写清楚。握手后仍用 tool.list 对账：不一致以运行中的
+  // 服务为准重新注册。
+  const toolDisposers = []
+  let registeredSignature = ''
+  function registerTools(tools, origin) {
+    for (const dispose of toolDisposers.splice(0)) {
+      try { dispose() } catch { /* 已经注销就算了 */ }
+    }
     for (const t of tools) {
-      ctx.tools.register({
+      const dispose = ctx.tools.register({
         // 加命名空间，免得和 DSH 自带的或别的插件撞名
         name: 'memgarden_' + t.name,
         description: t.description,
@@ -651,9 +706,28 @@ export function apply(ctx, config) {
           return out.content || ''
         },
       })
+      if (typeof dispose === 'function') toolDisposers.push(dispose)
     }
-    log('[memgarden] 注册了 ' + tools.length + ' 个工具: ' +
+    registeredSignature = canonicalJson(tools)
+    log('[memgarden] 注册了 ' + tools.length + ' 个工具（' + origin + '）: ' +
         tools.map((x) => 'memgarden_' + x.name).join(', ') + '\n')
+  }
+
+  try {
+    const sync = readToolsSync(config.bin)
+    registerTools(sync, 'apply 内同步')
+  } catch (e) {
+    log('[memgarden] 同步取工具定义失败，退回握手后注册（首个模型请求可能没有 ' +
+        'memgarden 工具）: ' + e.message + '\n')
+  }
+
+  void ready.then(async () => {
+    const tools = await client.request('tool.list', {})
+    if (canonicalJson(tools) === registeredSignature) return
+    if (registeredSignature) {
+      log('[memgarden] 服务的 tool.list 与启动时取的定义不一致，以服务为准重新注册\n')
+    }
+    registerTools(tools, '握手后')
   }).catch((e) => log('[memgarden] 注册工具失败: ' + e.message + '\n'))
 
   // ---- 轮末自动落卡 ---------------------------------------------------- //
