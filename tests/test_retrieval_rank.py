@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import functools
 import math
 import pathlib
 import random
@@ -26,6 +27,10 @@ from memgarden.retrieval import (  # noqa: E402
     default_search_text,
     rank,
 )
+
+#: 纯 BM25（io 旧语义）：不去停用词、不设覆盖率闸。数学类测试都走这个，
+#: 免得默认门槛的调整把「公式对不对」的测试一起带红。
+bm25 = functools.partial(rank, stopwords=frozenset(), min_coverage=0.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -102,7 +107,7 @@ def test_matches_reference_bm25_exactly_on_random_corpora():
         } for i in range(rng.randint(0, 40))]
         query = " ".join(rng.choices(vocab, k=rng.randint(0, 5)))
         want = [(c["id"], s) for c, s in _ref_rank(cards, query, Whitespace().tokenize, _io_text)]
-        got = rank(query, cards, tokenizer=Whitespace(), text_of=_io_text)
+        got = bm25(query, cards, tokenizer=Whitespace(), text_of=_io_text)
         assert [(h.id, h.score) for h in got.hits] == want
         compared += bool(want)
     assert compared > 100, "对拍样本几乎全是空结果，这条测试没有牙"
@@ -114,17 +119,17 @@ def test_matches_reference_bm25_exactly_on_random_corpora():
 
 def test_nonnegative_idf_and_duplicate_query_tokens_count_once():
     cards = [{"id": "a", "summary": "code"}, {"id": "b", "summary": "code"}]
-    one = rank("code", cards, tokenizer=Whitespace())
+    one = bm25("code", cards, tokenizer=Whitespace())
     assert one.hits[0].score == pytest.approx(math.log(1.2))
-    assert rank("code code", cards, tokenizer=Whitespace()).hits == one.hits
-    assert rank("missing", cards, tokenizer=Whitespace()).hits == []
+    assert bm25("code code", cards, tokenizer=Whitespace()).hits == one.hits
+    assert bm25("missing", cards, tokenizer=Whitespace()).hits == []
 
 
 def test_noncontiguous_terms_rank_above_partial_and_card_is_not_mutated():
     rows = [{"id": "late", "summary": "coffee grinder needs repair", "score": .01},
             {"id": "early", "summary": "coffee shop", "score": 99},
             {"id": "absent", "summary": "other"}]
-    result = rank("repair coffee", rows)
+    result = bm25("repair coffee", rows)
     assert result.ids == ["late", "early"]
     assert rows[0]["score"] == .01
     assert result.hits[0].matched == ("coffee", "repair")
@@ -133,44 +138,44 @@ def test_noncontiguous_terms_rank_above_partial_and_card_is_not_mutated():
 def test_identifiers_are_whole_tokens_not_substrings():
     rows = [{"id": "a", "summary": "NP-4286 CR2450"},
             {"id": "b", "summary": "NP-42860 CR24501"}]
-    assert rank("np-4286", rows).ids == ["a"]
-    assert rank("CR2450", rows).ids == ["a"]
+    assert bm25("np-4286", rows).ids == ["a"]
+    assert bm25("CR2450", rows).ids == ["a"]
 
 
 def test_ties_do_not_depend_on_candidate_order_and_tokenless_is_empty():
     rows = [{"id": "b", "summary": "needle"}, {"id": "a", "summary": "needle"}]
-    assert rank("needle", rows).ids == ["a", "b"]
-    assert rank("needle", rows).hits == rank("needle", rows[::-1]).hits
-    assert rank("💡!!", rows).hits == []
-    assert rank("", rows).hits == []
-    assert rank("needle", []).hits == []
+    assert bm25("needle", rows).ids == ["a", "b"]
+    assert bm25("needle", rows).hits == bm25("needle", rows[::-1]).hits
+    assert bm25("💡!!", rows).hits == []
+    assert bm25("", rows).hits == []
+    assert bm25("needle", []).hits == []
 
 
 def test_equal_scores_tie_by_occurred_at_then_id_with_bad_times_last():
     rows = [{"id": mid, "summary": "needle", "occurred_at": when} for mid, when in
             [("a", "2026-01-01T00:00:00Z"), ("b", "2026-02-01T00:00:00Z"),
              ("c", "bad"), ("d", "2026-02-01T08:00:00+08:00")]]
-    assert rank("needle", rows).ids == ["b", "d", "a", "c"]
+    assert bm25("needle", rows).ids == ["b", "d", "a", "c"]
 
 
 def test_no_stale_state_between_calls():
     row = {"id": "a", "summary": "old value"}
-    assert rank("old", [row]).hits
+    assert bm25("old", [row]).hits
     row["summary"] = "new value"
-    assert rank("old", [row]).hits == []
-    assert rank("new", []).hits == []
-    assert rank("new", [row]).hits
+    assert bm25("old", [row]).hits == []
+    assert bm25("new", []).hits == []
+    assert bm25("new", [row]).hits
 
 
 def test_resource_limits_fail_explicitly_even_for_tokenless_queries():
     rows = [{"id": "a", "summary": "needle"}]
     with pytest.raises(SearchLimitExceeded):
-        rank("needle", rows, max_text_bytes=3)
+        bm25("needle", rows, max_text_bytes=3)
     with pytest.raises(SearchLimitExceeded):
-        rank("!!!", rows, max_text_bytes=3)
+        bm25("!!!", rows, max_text_bytes=3)
     with pytest.raises(SearchLimitExceeded):
-        rank("needle", rows * 3, max_cards=2)
-    assert rank("needle", rows, max_cards=1, max_text_bytes=6).ids == ["a"]
+        bm25("needle", rows * 3, max_cards=2)
+    assert bm25("needle", rows, max_cards=1, max_text_bytes=6).ids == ["a"]
 
 
 # --------------------------------------------------------------------------- #
@@ -182,6 +187,8 @@ def test_default_tokenizer_shapes():
     assert tok.tokenize("NP-4286 / CR2450") == ["np-4286", "cr2450"]
     assert tok.tokenize(" !!! 🪴 \n") == []
     assert tok.tokenize("看医生") == ["看", "医", "生", "看医", "医生"]
+    # 和语法助词相邻的二字不生成（「的车」「车的」是跨词噪声），助词单字照常生成
+    assert tok.tokenize("我的车") == ["我", "的", "车"]
     assert tok.tokenize("尿酸480") == ["尿", "酸", "尿酸", "480"]
     assert tok.tokenize("PR #317 v2.3.1 k/d") == ["pr", "317", "v2.3.1", "k/d"]
     assert tok.tokenize("Café") == ["caf", "é"]
@@ -196,22 +203,22 @@ def test_single_cjk_character_query_finds_the_card():
 def test_min_score_and_limit():
     rows = [{"id": "strong", "summary": "alpha beta"}, {"id": "weak", "summary": "alpha gamma delta"},
             {"id": "none", "summary": "zeta"}]
-    full = rank("alpha beta", rows)
+    full = bm25("alpha beta", rows)
     assert full.ids == ["strong", "weak"]
     floor = (full.hits[0].score + full.hits[1].score) / 2
-    gated = rank("alpha beta", rows, min_score=floor)
+    gated = bm25("alpha beta", rows, min_score=floor)
     assert gated.ids == ["strong"]
     assert gated.trace["below_min_score"] == 1 and gated.trace["matched"] == 2
-    assert rank("alpha beta", rows, limit=1).ids == ["strong"]
+    assert bm25("alpha beta", rows, limit=1).ids == ["strong"]
     with pytest.raises(ValueError):
-        rank("alpha", rows, min_score=float("nan"))
+        bm25("alpha", rows, min_score=float("nan"))
 
 
 def test_stopwords_are_removed_from_the_query_only():
     rows = [{"id": "a", "summary": "the needle"}, {"id": "b", "summary": "the hay the hay"}]
-    assert rank("the", rows, stopwords={"the"}).hits == []
-    plain = rank("needle", rows)
-    with_stop = rank("the needle", rows, stopwords={"the"})
+    assert bm25("the", rows, stopwords={"the"}).hits == []
+    plain = bm25("needle", rows)
+    with_stop = bm25("the needle", rows, stopwords={"the"})
     # 卡片侧统计不变：去掉查询里的停用词后，剩下的词分数和单独查它完全相同
     assert [(h.id, h.score) for h in with_stop.hits] == [(h.id, h.score) for h in plain.hits]
 
@@ -224,6 +231,9 @@ def test_version_names_the_tokenizer_and_changes_with_config():
     tuned = rank("needle", rows, min_score=0.5).version
     assert tuned.startswith(base + "+cfg:") and tuned != base
     assert rank("needle", rows, min_score=0.5).version == tuned, "版本号必须确定"
+    assert bm25("needle", rows).version.startswith(base + "+cfg:"), "关掉默认门槛也是换了尺子"
+    assert rank("needle", rows, stopwords=retrieval.DEFAULT_STOPWORDS,
+                min_coverage=retrieval.DEFAULT_MIN_COVERAGE).version == base
 
 
 def test_trace_is_content_free():
@@ -246,7 +256,7 @@ def test_each_card_and_the_query_are_tokenized_exactly_once():
             return super().tokenize(text)
 
     rows = [{"id": str(i), "summary": f"card {i} needle"} for i in range(50)]
-    rank("needle card", rows, tokenizer=Counting())
+    bm25("needle card", rows, tokenizer=Counting())
     assert calls["needle card"] == 1
     assert all(calls[f"card {i} needle"] == 1 for i in range(50))
     assert sum(calls.values()) == 51
@@ -257,3 +267,71 @@ def test_default_search_text_prefers_host_projection_and_dedupes():
     card = {"summary": "same", "content": "same", "bucket": "工作",
             "threads": ["t1", 3], "retrieval_cues": ["  cue  one ", "cue one", 7]}
     assert default_search_text(card) == "same\n工作\nt1\ncue one"
+
+
+# --------------------------------------------------------------------------- #
+# MG-3：默认停用词与门槛
+# --------------------------------------------------------------------------- #
+
+def _garden():
+    return [
+        {"id": "like-1", "summary": "喜欢爵士乐", "content": "最近很喜欢听爵士乐，尤其是钢琴三重奏。"},
+        {"id": "like-2", "summary": "喜欢吃辣", "content": "他说自己越来越喜欢川菜。"},
+        {"id": "cat", "summary": "养了一只橘猫叫豆包", "content": "豆包很黏人。"},
+        {"id": "trip", "summary": "去京都的行程", "content": "第二天去伏见稻荷。"},
+        {"id": "jira", "summary": "JIRA-4821 事故复盘", "content": "token refresh 失败，回滚后恢复。"},
+    ] + [{"id": f"f{i}", "summary": f"周{i}吃了面", "content": "味道一般，排队很久。"} for i in range(20)]
+
+
+def test_stopwords_alone_never_produce_a_hit():
+    assert rank("我的是什么", _garden()).hits == []
+    assert rank("what is my", _garden()).hits == []
+    # 同样的查询关掉停用词，就会有卡被带进来 —— 证明上面那条不是碰巧为空
+    assert bm25("我的是什么", _garden()).hits
+
+
+def test_query_about_something_never_recorded_returns_nothing():
+    """「冰岛」花园里没有：只靠零散单字（冰、去）撞上的卡要被挡住。"""
+    garden = _garden() + [{"id": "ice", "summary": "夏天只喝冰美式"},
+                          {"id": "went", "summary": "上个月去看了海"}]
+    assert bm25("我有没有去过冰岛", garden).hits, "去掉门槛时单字确实会撞上"
+    result = rank("我有没有去过冰岛", garden)
+    assert result.hits == []
+    assert result.trace["below_gate"] >= 2
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "已知边界：泛用实词（喜欢）在默认分词器下被单字+二字重复计数，证据分够得上强证据闸，"
+    "「我喜欢什么颜色的车」仍会带回写着「喜欢」的卡（evals/retrieval q49 同一现象）。"
+    "修好时这条会变成 XPASS 而报红，提醒更新门槛说明。"))
+def test_generic_verb_alone_should_not_count_as_a_hit():
+    assert rank("我喜欢什么颜色的车", _garden()).hits == []
+
+
+def test_real_matches_survive_the_gate():
+    garden = _garden()
+    assert rank("豆包", garden).ids == ["cat"]
+    assert rank("猫", garden).ids == ["cat"]
+    assert rank("JIRA-4821", garden).ids == ["jira"]
+    assert rank("我喜欢听的爵士乐", garden).ids[:1] == ["like-1"]
+    assert all(0 < h.coverage <= 1 for h in rank("豆包 京都", garden).hits)
+
+
+def test_long_paste_passes_on_strong_evidence_despite_low_coverage():
+    garden = _garden()
+    paste = ("帮我看看这段是不是跟之前那次有关：09:12 alert auth-gateway 5xx rate 3.2% "
+             "login token refresh failing after gray release of JIRA-4821 follow-up patch, "
+             "rollback initiated ETA 10 min, error rate back to baseline, keeping incident open")
+    result = rank(paste, garden)
+    assert result.ids[:1] == ["jira"]
+    assert result.hits[0].coverage < retrieval.DEFAULT_MIN_COVERAGE, "这条要测的就是低覆盖率放行"
+
+
+def test_gate_parameters_are_validated_and_can_be_disabled():
+    garden = _garden()
+    with pytest.raises(ValueError):
+        rank("豆包", garden, min_coverage=-0.1)
+    with pytest.raises(ValueError):
+        rank("豆包", garden, strong_evidence=float("inf"))
+    closed = rank("我喜欢什么颜色的车", garden, stopwords=frozenset(), min_coverage=0.0)
+    assert closed.ids == bm25("我喜欢什么颜色的车", garden).ids

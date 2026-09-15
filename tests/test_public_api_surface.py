@@ -87,7 +87,8 @@ STABLE = {
         "HISTORY_IMPORT_FILTER_RUBRIC", "KEEP_ALL_MAP_SUFFIX", "KEEP_ALL_WRITE_SUFFIX",
     },
     "memgarden.retrieval": {
-        "RANKING_VERSION", "Tokenizer", "DefaultTokenizer",
+        "RANKING_VERSION", "DEFAULT_STOPWORDS", "DEFAULT_MIN_COVERAGE",
+        "DEFAULT_STRONG_EVIDENCE", "Tokenizer", "DefaultTokenizer",
         "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
     },
 }

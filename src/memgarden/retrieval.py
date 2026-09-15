@@ -50,6 +50,40 @@ _ASCII_TOKEN = re.compile(r"([a-z0-9]+(?:[-_./][a-z0-9]+)*)")
 #: 汉字（含扩展 A、兼容区）、假名、谚文。这些文字不用空格分词，按字处理。
 _CJK_CHAR = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af"
 _SEGMENT = re.compile(rf"([{_CJK_CHAR}]+)|([^\W_{_CJK_CHAR}]+)")
+#: 纯语法助词。和它们相邻的二字（「的车」「咪的」「么事」）几乎都是跨词边界的噪声，
+#: 不生成；助词本身的单字仍然生成（由停用词表决定查询里要不要它）。
+#: 评测里去掉这些二字不改变召回，但让门槛在更宽的参数区间内稳定（见 MG-3 说明）。
+_PARTICLES = frozenset("的了着吗呢吧啊呀嘛么")
+
+#: 默认停用词：中英高频虚词、代词、疑问词，以及英文缩写残片（``what's`` → ``s``）。
+#: **只从查询里去掉**。宿主传 ``stopwords=`` 覆盖，传 ``frozenset()`` 关闭。
+#:
+#: 刻意**不**收「喜欢」「工作」「今天」这类实词 —— 它们在记忆里是有意义的；
+#: 泛词撞上带来的误召回交给覆盖率门槛处理，不靠越列越长的词表。
+DEFAULT_STOPWORDS: frozenset[str] = frozenset("""
+的 地 得 了 着 过 是 在 有 没 不 也 都 就 还 又 和 与 跟 及 把 被 让 给 对 从 向 为
+我 你 您 他 她 它 们 这 那 哪 谁 啥 什 么 怎 吗 呢 吧 啊 呀 嘛 哦 嗯 个 些 一
+什么 怎么 怎样 怎么样 为什么 哪个 哪里 哪些 哪儿 我们 你们 他们 她们 它们 自己
+这个 那个 这些 那些 这样 那样 没有 有没 一个 一下 就是 还是 可以 是不 不是 的是 了吗
+来着 到底 然后 后来 之前 之后 时候 现在 以前 上次 那次 这次
+a an the and or but of to in on at by for with from as into about
+i me my mine we our you your he him his she her it its they them their
+is am are was were be been being do does did done have has had having
+what whats which who whom whose when where why how
+this that these those there here
+can could would should will shall may might must
+s t d ll m re ve
+any some not no yes
+""".split())
+
+#: 门槛默认值，由 ``evals/retrieval`` 校准（210 张卡、53 条查询）：
+#:
+#:   默认分词器   覆盖率 0.15–0.30、强证据 1.1–2.0 之间结果完全相同
+#:   jieba 分词器 覆盖率 0.25、强证据 ≤1.25 时无命中 4/5；强证据 1.5 起开始漏答案
+#:
+#: 取两者的交集。只有 53 条合成查询 —— **不能证明线上质量**，上线后看 trace。
+DEFAULT_MIN_COVERAGE = 0.25
+DEFAULT_STRONG_EVIDENCE = 1.25
 
 
 class SearchLimitExceeded(RuntimeError):
@@ -73,7 +107,7 @@ class DefaultTokenizer:
     """零依赖分词：casefold；整段 ASCII 标识符；CJK 单字 + 相邻二字；其余文字按词。
 
     单字让「猫」「辣」这种一字查询也能命中；二字让「体检」「医生」比两个单字各自
-    撞上更有分量（二字的 IDF 通常高得多）。
+    撞上更有分量（二字的 IDF 通常高得多）。和语法助词相邻的二字不生成。
     """
 
     name = "mg-default-v1"
@@ -92,7 +126,8 @@ class DefaultTokenizer:
                     out.append(word)
                     continue
                 out.extend(run)
-                out.extend(run[i:i + 2] for i in range(len(run) - 1))
+                out.extend(run[i:i + 2] for i in range(len(run) - 1)
+                           if run[i] not in _PARTICLES and run[i + 1] not in _PARTICLES)
         return out
 
 
@@ -105,6 +140,9 @@ class Hit:
     score: float
     #: 命中的查询 token（排序后）。**是用户文本的片段**，宿主落日志前自己决定要不要留。
     matched: tuple[str, ...] = ()
+    #: 命中的查询 token 占查询 IDF 总量的比例（0–1）。花园里一张都没有的查询词也算进分母
+    #: —— 「冰岛」没人写过，这正是「没记过」的信号。
+    coverage: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -169,6 +207,9 @@ def _occurred_ts(card: Mapping[str, Any]) -> float:
     return parsed.timestamp() if valid else float("-inf")
 
 
+_EMPTY_COUNTS = {"matched": 0, "below_min_score": 0, "below_gate": 0, "returned": 0}
+
+
 def _version(tokenizer_name: str, extra: Mapping[str, Any]) -> str:
     base = f"{RANKING_VERSION}+tok:{tokenizer_name}"
     if not extra:
@@ -186,6 +227,8 @@ def rank(
     text_of: Callable[[Mapping[str, Any]], str] = default_search_text,
     min_score: float = 0.0,
     stopwords: Iterable[str] | None = None,
+    min_coverage: float = DEFAULT_MIN_COVERAGE,
+    strong_evidence: float = DEFAULT_STRONG_EVIDENCE,
     k1: float = K1,
     b: float = B,
     max_cards: int | None = None,
@@ -196,27 +239,44 @@ def rank(
     ``candidates`` 必须是宿主**已经过完权限和生命周期过滤**的卡（带 ``id``）；
     这里不认识 owner、mount、归档状态。IDF 按这批候选算，所以候选池是谁决定了尺子。
 
-    只有分数 > ``min_score`` 的卡进结果；无命中返回空 ``hits``。``stopwords`` 只从
-    **查询**里去掉（卡片侧统计不变，所以换停用词表不改变其余词的分数）。
+    ## 什么算命中
+
+    BM25 只要有一个词重叠就给正分 —— 「我」「什么」「喜欢」就能把不相干的卡带进来，
+    查一个花园里根本没有的东西也几乎总有结果。所以打分之后还有两道闸，
+    一张卡要进结果必须同时满足：
+
+    1. 分数 > ``min_score``（默认 0，即 BM25 原义）；
+    2. **覆盖率** ≥ ``min_coverage``（命中词占查询 IDF 总量的比例），
+       **或者**分数 ≥ ``strong_evidence`` × 本批候选里最大可能的单词 IDF
+       （「证据相当于一个半以上的独有词」—— 长段粘贴时覆盖率天然很低，靠这条放行）。
+
+    ``stopwords`` 默认 :data:`DEFAULT_STOPWORDS`，只从**查询**里去掉（卡片侧统计不变，
+    换停用词表不改变其余词的分数）。无命中返回空 ``hits``。
+
+    要逐项复现 io ``memory_bm25`` 的旧行为：``stopwords=frozenset(), min_coverage=0``。
 
     上限（``max_cards`` / ``max_text_bytes``）超了抛 :class:`SearchLimitExceeded`，
     即使查询为空也检查 —— 资源边界不能因为输入碰巧为空就不生效。
     """
     tok = tokenizer or _DEFAULT
-    if not math.isfinite(min_score) or min_score < 0:
-        raise ValueError("min_score must be finite and non-negative")
+    for label, value in (("min_score", min_score), ("min_coverage", min_coverage),
+                         ("strong_evidence", strong_evidence)):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"{label} must be finite and non-negative")
     if max_cards is not None and len(candidates) > max_cards:
         raise SearchLimitExceeded("cards")
 
-    stop = frozenset(stopwords) if stopwords is not None else frozenset()
+    stop = frozenset(stopwords) if stopwords is not None else DEFAULT_STOPWORDS
     raw_terms = tok.tokenize(str(query or ""))
     query_terms = sorted(set(raw_terms) - stop)
 
     config: dict[str, Any] = {}
-    if stop:
+    if stop != DEFAULT_STOPWORDS:
         config["stopwords"] = sorted(stop)
     if min_score:
         config["min_score"] = min_score
+    if (min_coverage, strong_evidence) != (DEFAULT_MIN_COVERAGE, DEFAULT_STRONG_EVIDENCE):
+        config["min_coverage"], config["strong_evidence"] = min_coverage, strong_evidence
     if (k1, b) != (K1, B):
         config["k1"], config["b"] = k1, b
     version = _version(str(getattr(tok, "name", "") or type(tok).__name__), config)
@@ -241,7 +301,7 @@ def rank(
 
     if not query_terms or not documents:
         return RankResult(hits=[], version=version,
-                          trace={**trace, "matched": 0, "below_min_score": 0, "returned": 0})
+                          trace={**trace, **_EMPTY_COUNTS})
 
     frequency: Counter = Counter()
     total_length = 0
@@ -251,11 +311,13 @@ def rank(
     corpus = _Corpus(len(documents), total_length, frequency)
     if not corpus.total_length:
         return RankResult(hits=[], version=version,
-                          trace={**trace, "matched": 0, "below_min_score": 0, "returned": 0})
+                          trace={**trace, **_EMPTY_COUNTS})
     idf = {term: _idf(corpus.documents, frequency[term]) for term in query_terms}
+    query_mass = sum(idf.values())
+    strong_floor = strong_evidence * _idf(corpus.documents, 0)
 
     scored = []
-    below = 0
+    below = below_gate = 0
     for card, (terms, length) in zip(candidates, documents):
         if not any(term in terms for term in query_terms):
             continue
@@ -266,20 +328,26 @@ def rank(
             below += 1
             continue
         matched = tuple(term for term in query_terms if term in terms)
-        scored.append((value, card, matched))
+        coverage = sum(idf[term] for term in matched) / query_mass if query_mass else 0.0
+        if coverage < min_coverage and value < strong_floor:
+            below_gate += 1
+            continue
+        scored.append((value, card, matched, coverage))
 
     scored.sort(key=lambda row: (-row[0], -_occurred_ts(row[1]), str(row[1].get("id") or "")))
-    matched_count = len(scored) + below
+    matched_count = len(scored) + below + below_gate
     if limit is not None:
         scored = scored[:max(0, int(limit))]
-    hits = [Hit(id=str(card.get("id") or ""), score=value, matched=matched)
-            for value, card, matched in scored]
+    hits = [Hit(id=str(card.get("id") or ""), score=value, matched=matched,
+                coverage=round(coverage, 6))
+            for value, card, matched, coverage in scored]
     return RankResult(hits=hits, version=version,
                       trace={**trace, "matched": matched_count, "below_min_score": below,
-                             "returned": len(hits)})
+                             "below_gate": below_gate, "returned": len(hits)})
 
 
 __all__ = [
-    "RANKING_VERSION", "Tokenizer", "DefaultTokenizer",
+    "RANKING_VERSION", "DEFAULT_STOPWORDS", "DEFAULT_MIN_COVERAGE", "DEFAULT_STRONG_EVIDENCE",
+    "Tokenizer", "DefaultTokenizer",
     "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
 ]
