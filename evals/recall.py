@@ -101,7 +101,7 @@ def load_queries() -> list[dict]:
 POLICY = Chain(stages=(
     RoleStage("turning_point", limit=3, order_by="occurred_at"),
     RecentStage(limit=2, order_by="created_at"),
-    RelevanceStage(limit=3, any_score=True),
+    RelevanceStage(limit=3),
 ))
 
 

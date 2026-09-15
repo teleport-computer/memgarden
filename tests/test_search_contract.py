@@ -26,7 +26,7 @@ from memgarden import (  # noqa: E402
 )
 from memgarden.contracts import ToolCall  # noqa: E402
 from memgarden.mounted import MountPermissionError  # noqa: E402
-from memgarden.retrieval import select_context  # noqa: E402
+from memgarden.retrieval import RANKING_VERSION, select_context  # noqa: E402
 from memgarden.schema import schemas  # noqa: E402
 from memgarden.selection import Chain, RecentStage, RelevanceStage  # noqa: E402
 from memgarden.service import Service  # noqa: E402
@@ -80,7 +80,7 @@ def test_component_search_hits(query, expected):
     out = GardenComponent(model=_NoModel()).search(SearchRequest(query=query, candidates=CARDS))
     assert out.record_ids[:1] == [expected]
     assert out.hits[0]["id"] == expected and out.hits[0]["score"] > 0
-    assert out.ranking.startswith("memgarden-bm25-v1+tok:")
+    assert out.ranking.startswith(f"{RANKING_VERSION}+tok:")
 
 
 @pytest.mark.parametrize("query", ["我有没有去过冰岛", "what's my blood type", "PR #999", ""])
@@ -107,6 +107,16 @@ def test_component_tokenizer_is_injectable_and_named_in_the_ranking():
     out = garden.search(SearchRequest(query="aurora", candidates=CARDS))
     assert out.record_ids == ["aurora"]
     assert out.ranking.endswith("+tok:whitespace-test")
+
+
+def test_component_search_never_returns_empty_ids_and_accepts_limit_none():
+    garden = GardenComponent(model=_NoModel())
+    cards = [{"summary": "不吃辣，一吃就胃疼"}, {"id": "", "summary": "辣"}, *CARDS]
+    out = garden.search(SearchRequest(query="辣", candidates=cards, limit=None))
+    assert out.record_ids == ["spicy"]
+    assert all(hit["id"] for hit in out.hits)
+    many = garden.search(SearchRequest(query="周 面", candidates=CARDS, limit=None))
+    assert len(many.record_ids) == 12, "limit=None 按默认 20 处理"
 
 
 def test_component_search_limit():

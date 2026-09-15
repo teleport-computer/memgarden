@@ -194,7 +194,12 @@ class RelevanceStage:
     ``scorer="legacy"``：旧的 ``scoring.relevance`` 打分（deprecated，保留一个版本给
     还没切换的宿主当回滚闸）。下面 ``strong_min`` / ``medium_min`` /
     ``excluded_reasons`` / ``any_score`` 四个旋钮**只对 legacy 生效** —— 它们是对那套
-    算法校准的数字，换成 BM25 就没有意义了（codex 2026-08-17 指出过同一件事）。
+    算法校准的数字，换成 BM25 就没有意义了。
+
+    ``scorer="bm25"`` 时给了其中任何一个非默认值，构造时抛 ``ValueError``：0.20.1 的宿主
+    写 ``RelevanceStage(any_score=True)`` 本意是「宽松召回」，升级后默认换成带门槛的 BM25，
+    静默忽略这个旋钮等于悄悄把召回收紧。要旧语义就显式 ``scorer="legacy"``，
+    要新尺子就删掉这几个旋钮。
     """
 
     limit: int = 3
@@ -215,6 +220,19 @@ class RelevanceStage:
     #: 2026-08-17 实测踩到：不给这个开关，弱相关卡全被滤掉，
     #: 同一个用户问「我的狗是什么品种」也召不回狗卡。
     any_score: bool = False
+
+    def __post_init__(self) -> None:
+        if self.scorer != "bm25":
+            return
+        legacy_knobs = [name for name, value, default in (
+            ("strong_min", self.strong_min, 0.0), ("medium_min", self.medium_min, 0.0),
+            ("excluded_reasons", tuple(self.excluded_reasons), ()),
+            ("any_score", self.any_score, False)) if value != default]
+        if legacy_knobs:
+            raise ValueError(
+                f"RelevanceStage: {', '.join(legacy_knobs)} only apply to scorer='legacy'; "
+                "scorer='bm25' (the default) would silently ignore them. Remove them to use "
+                "the BM25 gate, or pass scorer='legacy' to keep the old thresholds.")
 
     def pick(self, remaining, query, *, budget) -> list[Pick]:
         if self.scorer == "bm25":

@@ -191,7 +191,7 @@ def test_default_tokenizer_shapes():
     assert tok.tokenize("我的车") == ["我", "的", "车"]
     assert tok.tokenize("尿酸480") == ["尿", "酸", "尿酸", "480"]
     assert tok.tokenize("PR #317 v2.3.1 k/d") == ["pr", "317", "v2.3.1", "k/d"]
-    assert tok.tokenize("Café") == ["caf", "é"]
+    assert tok.tokenize("Café") == ["café"]
     assert tok.tokenize("猫") == ["猫"]
 
 
@@ -371,3 +371,74 @@ def test_select_context_shares_the_scaled_gate_with_rank():
         assert trace["version"] == ranked.version
         assert trace["evidence_scale"] == ranked.trace["evidence_scale"]
         assert {c["id"] for c in picked} <= set(ranked.ids)
+
+
+# --------------------------------------------------------------------------- #
+# 发布前复审：重音拉丁词、小花园覆盖率、没有 id 的卡
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("text, tokens", [
+    ("Café", ["café"]),
+    ("cafe\u0301", ["café"]),                      # 分解写法（e + 组合重音）先 NFC
+    ("Mon résumé est prêt", ["mon", "résumé", "est", "prêt"]),
+    ("Herr Müller aus Köln", ["herr", "müller", "aus", "köln"]),
+    ("Straße", ["strasse"]),
+    ("café-np-4286", ["café", "np-4286"]),           # 编号仍整段保留
+    ("480 μmol/L", ["480", "μ", "mol/l"]),           # 拉丁与希腊字母之间照旧切开
+    ("привет-мир", ["привет", "мир"]),
+    ("हिन्दी", ["हिन्दी"]),                              # 组合元音符号不劈开词
+])
+def test_default_tokenizer_keeps_accented_words_whole(text, tokens):
+    assert DefaultTokenizer().tokenize(text) == tokens
+
+
+def test_accented_fragments_do_not_produce_false_hits():
+    """``mg-default-v1`` 把 café 切成 caf + é、Müller 切成 m + ü + ller：碎片互相撞上。"""
+    garden = [{"id": "resume", "summary": "Mon résumé est prêt"},
+              {"id": "cafe", "summary": "Rendez-vous au café"},
+              {"id": "muller", "summary": "Termin mit Herrn Müller"},
+              {"id": "keller", "summary": "Weinkeller aufräumen"}] + [
+        {"id": f"f{i}", "summary": f"note {i} lorem ipsum"} for i in range(20)]
+    assert rank("été", garden).ids == []
+    assert rank("café", garden).ids == ["cafe"]
+    assert rank("Müller", garden).ids == ["muller"]
+    assert rank("ller", garden).ids == []
+
+
+def test_tiny_garden_answer_is_not_gated_out_by_unseen_query_words():
+    """1 张卡时命中词 IDF 0.288、没命中的词 1.386，覆盖率被压到 0.12 —— 新用户问什么都是空。"""
+    cards = [{"id": "coffee", "summary": "喜欢喝美式咖啡，不加糖"}]
+    assert rank("我平时喝什么咖啡", cards).ids == ["coffee"]
+    assert rank("我平时喝什么咖啡", cards, coverage_pool_floor=1).ids == [], "关掉下限就是原来的缺陷"
+    two = cards + [{"id": "run", "summary": "周末去公园跑步"}]
+    assert rank("我平时喝什么咖啡", two).ids == ["coffee"]
+    picked, _trace = retrieval.select_context("我平时喝什么咖啡", cards)
+    assert [c["id"] for c in picked] == ["coffee"]
+
+
+def test_pool_floor_only_moves_the_coverage_gate():
+    cards = [{"id": "coffee", "summary": "喜欢喝美式咖啡，不加糖"},
+             {"id": "run", "summary": "周末去公园跑步"}]
+    floored = rank("咖啡 公园", cards)
+    raw = rank("咖啡 公园", cards, coverage_pool_floor=1)
+    assert [(h.id, h.score) for h in floored.hits] == [(h.id, h.score) for h in raw.hits]
+    # 候选池不小于下限时逐项不变
+    big = cards + [{"id": f"f{i}", "summary": f"周{i}吃了面"} for i in range(30)]
+    assert rank("我平时喝什么咖啡", big).hits == rank(
+        "我平时喝什么咖啡", big, coverage_pool_floor=1).hits
+    # 非默认值进版本号；不合法的值当场炸
+    assert "+cfg:" in raw.version and "+cfg:" not in floored.version
+    for bad in (0, -1, 2.5, True, None):
+        with pytest.raises(ValueError):
+            rank("咖啡", cards, coverage_pool_floor=bad)
+
+
+def test_rank_drops_cards_without_id():
+    cards = [{"summary": "needle in a haystack"}, {"id": "", "summary": "needle again"},
+             {"id": "real", "summary": "the needle"}]
+    result = rank("needle", cards)
+    assert result.ids == ["real"]
+    assert all(hit.id for hit in result.hits)
+    assert result.trace["candidates"] == 3 and result.trace["without_id"] == 2
+    with pytest.raises(SearchLimitExceeded):
+        rank("needle", cards, max_cards=2)

@@ -1045,8 +1045,10 @@ class GardenComponent:
         """
         from .retrieval import rank
 
-        result = rank(request.query, request.candidates, tokenizer=self._tokenizer,
-                      limit=max(0, int(request.limit)))
+        # limit=None 当默认值（20）处理：wire 的 null、宿主从可选配置透传的 None 都不该炸成 TypeError。
+        limit = SearchRequest.limit if request.limit is None else max(0, int(request.limit))
+        # 没有 id 的卡由 rank 丢掉 —— 结果里不会出现空 id（回填不了，也引用不了）。
+        result = rank(request.query, request.candidates, tokenizer=self._tokenizer, limit=limit)
         return SearchResult(
             record_ids=result.ids,
             hits=[{"id": h.id, "score": h.score, "matched": list(h.matched),

@@ -37,7 +37,7 @@ class Memory:
         self.garden = GardenComponent(
             model=model,                       # 模型你给，key 不给它
             selection_policy=Chain(stages=(    # 挑卡策略可换
-                RelevanceStage(limit=3, any_score=True),
+                RelevanceStage(limit=3),
                 RecentStage(limit=2, order_by="created_at"),
             )),
         )

@@ -105,7 +105,7 @@ def _cmd_recall(args) -> int:
     garden = GardenComponent(
         model=SubprocessModel(args.model_cmd or "cat"),
         selection_policy=Chain(stages=(
-            RelevanceStage(limit=args.limit, any_score=True),
+            RelevanceStage(limit=args.limit),
             RecentStage(limit=2, order_by="created_at"),
         )),
     )
