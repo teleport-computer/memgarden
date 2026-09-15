@@ -228,6 +228,7 @@ class _CapturePlan:
             policy=request.policy,
             locale=request.locale,
             material_kind=request.material_kind,
+            host_note=str(getattr(request, "host_note", "") or ""),
         )
 
     def next_prompt(self) -> str | None:

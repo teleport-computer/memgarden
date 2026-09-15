@@ -155,6 +155,7 @@ def _import_request(p: dict) -> Any:
         max_total_cards=(int(p["max_total_cards"])
                          if p.get("max_total_cards") is not None else None),
         fallback_occurred_at=str(p.get("fallback_occurred_at") or ""),
+        host_note=str(p.get("host_note") or ""),
     )
 
 

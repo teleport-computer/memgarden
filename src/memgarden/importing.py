@@ -681,6 +681,8 @@ class ImportSession:
             extras["identity"] = str(req.identity)
         if getattr(req, "batches", ()):
             extras["batches"] = True
+        # host_note 刻意不进指纹：它是给模型的参考，不改批次和进度语义；
+        # 宿主续传时换一份（比如随导入变化的「花园现有张数」）不能让进度作废。
         if extras:
             payload.append(extras)
         return hashlib.sha256(json.dumps(
@@ -730,6 +732,7 @@ class ImportSession:
             policy=self.policy, material_kind=str(req.material_kind or ""),
             source="history_import",
             max_cards=cap,
+            host_note=str(getattr(req, "host_note", "") or ""),
             idempotency_key=key,
         )
 
@@ -877,7 +880,7 @@ def _capture_prompt(request: Any) -> str:
         naming_rule=request.naming_rule, buckets=request.buckets,
         threads=request.threads, identity=request.identity, window=request.window,
         cards=request.cards, policy=request.policy, locale=request.locale,
-        material_kind=request.material_kind)
+        material_kind=request.material_kind, host_note=request.host_note)
 
 
 __all__ = [
