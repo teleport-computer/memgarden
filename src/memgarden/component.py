@@ -540,12 +540,44 @@ class _MaintenancePlan:
             return
         self._stage = "done"
 
+    def _drop_unsafe_targets(self) -> dict:
+        """丢掉指向截断卡、或指向没渲染进提示词的卡的整理建议。
+
+        提示词要求模型不改写 TRUNCATED 的卡 —— 但那只是请求。模型照样把它放进
+        ``card_ids`` 的话，这张卡会被一张只根据前 N 个字写出来的新卡取代，后半截正文
+        随旧卡退休。没渲染进去的卡模型根本没见过正文，同理。所以在出口硬拦：
+        **只丢这一条建议**，同一次整理里别的建议照收。``mutations`` 和 ``consolidations``
+        同步过滤（宿主用哪一个都一样）。
+        """
+        r = self.rendered
+        if r is None or not self.consolidations:
+            return {}
+        rendered, truncated = frozenset(r.rendered_ids), frozenset(r.truncated_ids)
+        kept, to_truncated, to_unrendered = [], 0, 0
+        for row in self.consolidations:
+            ids = {str(i) for i in row.get("card_ids") or ()}
+            if ids & truncated:
+                to_truncated += 1
+            elif ids - rendered:
+                to_unrendered += 1
+            else:
+                kept.append(row)
+        if not (to_truncated or to_unrendered):
+            return {}
+        self.consolidations = kept
+        self.owner._step(Step(kind="dropped", purpose="dream", attempt=self.calls,
+                              detail={"why": "unsafe_target", "truncated": to_truncated,
+                                      "unrendered": to_unrendered}))
+        return {"dropped_truncated_targets": to_truncated,
+                "dropped_unrendered_targets": to_unrendered}
+
     def finish(self) -> MaintenanceResult:
+        dropped = {} if self.err else self._drop_unsafe_targets()
         trace = {"reason": self.verdict.reason, "new_cards": self.verdict.new_cards,
                  "consolidations": len(self.consolidations),
                  "signature": self.snapshot.signature,
                  "seed_card_count": self.snapshot.seed_card_count,
-                 **self._render_trace()}
+                 **self._render_trace(), **dropped}
         self.owner._step(Step(kind="done", purpose="dream", attempt=self.calls,
                               detail={"consolidations": len(self.consolidations),
                                       "retried": self.retried, "error": self.err}))

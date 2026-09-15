@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
+from . import timestamps
 from .component import GardenComponent
 from .contracts import (
     Actor,
@@ -420,6 +421,16 @@ class MountedGarden:
             if not c.get("archived") and not c.get("superseded_by")
             and str(c.get("lifecycle") or "active") == "active"
         ]
+        # Dream 按 ``cards`` 的顺序渲染、预算满了就停（默认 60 张）。Store 读出来的顺序
+        # 不保证任何东西（SQLite 的 SELECT 没有 ORDER BY，实际是插入顺序），于是卡一多，
+        # 提示词里永远是最老的 60 张 —— 刚写进来、正是它们触发了这次整理的新卡模型看不到，
+        # 水位线和签名却照样推进，这批新卡再也不会被整理。
+        #
+        # 取**新的在前**（created_at 倒序，同时刻按 id 升序）：触发整理的正是水位线之后的
+        # 新卡，按时间取不需要知道「哪些是新的」（真删会让计数和具体卡对不上）。代价是
+        # 超出预算的老卡这次看不到 —— 预算本来就只能装下一部分，宁可让新卡和最近的邻居同框。
+        active.sort(key=lambda c: str(c.get("id") or ""))
+        active.sort(key=lambda c: timestamps.sort_key(c.get("created_at")), reverse=True)
         ledger = self.maintenance_ledger(scope, mount=mount)
         generations = getattr(snapshot, "seed_generations", {}) or {}
         seed_rows = sum(
