@@ -149,6 +149,11 @@ class CaptureRequest:
     source: str = "conversation_capture"
     #: 本批最终允许写出的卡数；None 表示使用 policy 自身规则。
     max_cards: int | None = None
+    #: 宿主给写卡这一步的补充指引，原样放进提示词（``[Host guidance]`` 段，
+    #: 在材料之后、输出格式之前）。内核不解读它：写什么、用什么语言由宿主负责
+    #: （比如「这个花园现在有多少张卡、这类材料一般该落多少张」）。
+    #: 空串（默认）= 不渲染这一段，提示词与没有这个字段时逐字节相同。
+    host_note: str = ""
 
     #: 幂等键。同一批对话重放时防止写两遍；宿主自己保证它对同一批输入稳定。
     idempotency_key: str = ""
@@ -259,6 +264,13 @@ class ImportRequest:
     #: 卡没有 ``occurred_at`` 时用这个日期兜底（宿主明确给的，比如关系开始的那天）。
     #: 内核自己**绝不**推测日期；不给就留空。
     fallback_occurred_at: str = ""
+    #: 宿主给**写卡阶段**的补充指引，语义同 ``CaptureRequest.host_note``：
+    #: ``single_pass`` 进每批的写卡提示词，``two_pass`` 只进写卡批次（抽候选那一步不带）。
+    #: 空串（默认）= 提示词逐字节不变。
+    #:
+    #: **不进续传指纹、不影响幂等键**：它是给模型的参考，不改变批次怎么切、进度怎么推进。
+    #: 宿主可以在续传时换一份（比如「花园现有张数」随导入变化），已存的进度照常续。
+    host_note: str = ""
 
 
 @dataclass

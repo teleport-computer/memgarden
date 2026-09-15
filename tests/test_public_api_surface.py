@@ -124,12 +124,13 @@ CONTRACT_FIELDS = {
     ("memgarden.contracts", "CaptureRequest"): {
         "cards": "", "naming_rule": None, "existing_cards": None,
         "index_cards_limit": 60, "index_budget_chars": 16_000, "index_summary_chars": 400,
+        "host_note": "",
     },
     # 分批导入（MG-8）。全部取默认值时导入语义与续传指纹不变。
     ("memgarden.contracts", "ImportRequest"): {
         "naming_rule": None, "identity": "", "batches": (), "strategy": "single_pass",
         "batch_chars": None, "write_batch_candidates": 40, "max_total_cards": None,
-        "fallback_occurred_at": "",
+        "fallback_occurred_at": "", "host_note": "",
     },
     ("memgarden.importing", "ImportProgress"): {
         "strategy": "single_pass", "cards_added": 0, "candidates_cursor": 0,

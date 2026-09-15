@@ -536,6 +536,8 @@ def _import_request_properties() -> dict:
         "write_batch_candidates": {"type": "integer", "minimum": 1, "default": 40},
         "max_total_cards": {"type": "integer", "minimum": 0},
         "fallback_occurred_at": _OPT_STR,
+        # 宿主给写卡阶段的补充指引（不进续传指纹）
+        "host_note": _OPT_STR,
         # 断点续跑：把上次的 progress 原样传回来
         "progress": _import_progress(),
     }

@@ -59,7 +59,7 @@ _CAPTURE_PROMPT_TEMPLATE = """{framing}
 [Existing memory index (merge/supersede may only copy an exact target_id from here)]{cards}
 [Your relationship]{identity}
 [{window_label}]{window}
-{cap_note}
+{cap_note}{host_note}
 [Output] Output JSON only, nothing else. If nothing is worth remembering, output {{"cards": []}}.
 {{
   "cards": [
@@ -195,6 +195,14 @@ def _cap_note(policy: CapturePolicy) -> str:
         return ("\nThere is no cap on how many cards you may produce here. "
                 "Produce as many as the material genuinely warrants.\n")
     return ""
+
+
+def _host_note(note: str) -> str:
+    """宿主补充指引。空 = 空串，模板逐字节不变（conversation_capture 的 golden 守着）。"""
+    text = str(note or "").strip()
+    if not text:
+        return ""
+    return f"\n[Host guidance]\n{text}\n"
 
 
 def _clamp01(value) -> float:
@@ -468,6 +476,7 @@ def build_capture_prompt(
     policy: CapturePolicy | str | None = None,
     locale: str,
     material_kind: str = "",
+    host_note: str = "",
 ) -> str:
     """Render the 落卡 prompt with this session's context injected.
 
@@ -480,6 +489,9 @@ def build_capture_prompt(
     internal unknown-name marker is rendered as a natural referent rather than
     leaking into the platform prompt.
     The io-side compat shell (``memory/capture_prompt_v1.py``) does that.
+
+    ``host_note`` 是宿主给写卡这一步的补充指引，非空时原样渲染成 ``[Host guidance]``
+    一段（材料之后、``[Output]`` 之前）；空串时模板逐字节不变。
 
     ``policy`` 决定用哪把「什么值得记」的尺子（见 ``memgarden.policies``）。
     留空 = 日常聊天档，其 rubric 与本模板原先内联的那段逐字相同，
@@ -525,6 +537,7 @@ def build_capture_prompt(
         occurred_at_field=_occurred_at_field(resolved),
         window_label=_window_label(resolved),
         cap_note=_cap_note(resolved),
+        host_note=_host_note(host_note),
         ai_name=resolved_ai,
         user_name=resolved_user,
         naming_rule=naming_rule,

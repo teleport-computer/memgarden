@@ -286,7 +286,7 @@ history.import_cancel(session_id)        丢掉会话，progress 不变
 
 `write_mode=service`（默认）时服务把每批写进自己的 Store：写卡前重读、CAS 提交、冲突最多重算 3 次。`write_mode=host` 时服务不碰 Store，已有记忆索引来自 begin 的 `existing_cards` 与每次 commit 登记的卡。会话在进程内（与 capture 共用 15 分钟 TTL 和容量上限），服务重启或过期后给 `unknown_session`；**持久状态只有宿主存下的 `progress`**。已提交的批次续传时不再调模型；写回幂等键由批次内容和导入语义算出，但续传若对同一批拿到不同的模型回复，Store 会报 `idempotency_conflict` 而不是写第二份——所以每个回复之后都要存 progress。⚠️ `two_pass` 的 progress 含用户内容，按记忆正文等级保存，不要写进日志；服务自身不记录 progress、prompt 或 reply。
 
-「已有记忆索引」按和这一批文字的相关性挑旧卡（最多 60 张，其中四分之一留给重要度最高的卡），不再只取重要度前 60。相关性默认用 `retrieval.rank`（关掉门槛、分词器跟组件的 `tokenizer=`，即 `importing.bm25_index_ranker`）；宿主可传 `index_ranker(batch_text, cards) -> ids` 换成自己的检索。桶名只做确定性收敛（大小写/空白一致并到已有写法，`中文/English` 通用桶对按 locale 取一半），近义词不猜。`fallback_occurred_at` 只填没有日期的卡，内核不推测日期。
+「已有记忆索引」按和这一批文字的相关性挑旧卡（最多 60 张，其中四分之一留给重要度最高的卡），不再只取重要度前 60。相关性默认用 `retrieval.rank`（关掉门槛、分词器跟组件的 `tokenizer=`，即 `importing.bm25_index_ranker`）；宿主可传 `index_ranker(batch_text, cards) -> ids` 换成自己的检索。桶名只做确定性收敛（大小写/空白一致并到已有写法，`中文/English` 通用桶对按 locale 取一半），近义词不猜。`fallback_occurred_at` 只填没有日期的卡，内核不推测日期。`host_note`（`ImportRequest` 与 `CaptureRequest` 同名同义）是宿主给写卡阶段的补充指引：非空时原样作为 `[Host guidance]` 段放在材料之后、`[Output]` 之前，两段式只进写卡批次；空串时提示词逐字节不变。它不进续传指纹，续传时换一份不影响进度和幂等键。
 
 `strategy="two_pass"`：每批先抽「候选事实 + 原话证据」（不写卡），材料读完后按 `write_batch_candidates`（默认 40）分组，用同一个 Capture 提示词写卡、去重、归桶。候选按字面归一后跨批去重（同义改写交给写卡模型），总数上限 4000，超出记进 `skipped`。⚠️ 两段式的 `ImportProgress.candidates` 含用户内容，宿主要按记忆正文的等级保存进度。两种形状哪个默认更好尚无结论，默认仍是 `single_pass`。
 
