@@ -16,6 +16,7 @@
 - 新增 `GardenComponent.import_session(request, *, progress, existing_cards, owner_key, index_ranker)`，返回 `ImportSession`：内核负责切批、提示词、解析与重问、跨批去重、单批/整次上限和 `ImportProgress` 推进；宿主调模型、写库，并用 `commit(outcome, record_ids=...)` / `fail(outcome, error)` 回报结果。给自己持有模型 key、加密和执行器的宿主（如 io）用。顶层新增导出 `ImportSession`、`ImportBatch`、`ImportBatchResult`。
 - `ImportRequest` 新增字段（均有默认值，默认时行为不变）：`batches`（宿主预切批次，可带 `label` / `occurred_from` / `occurred_to`）、`strategy`（`single_pass` 默认 / `two_pass`）、`batch_chars`、`write_batch_candidates`、`max_total_cards`、`fallback_occurred_at`、`naming_rule`、`identity`。wire `history.import` 接受前六项；`ImportProgress` 新增 `strategy`、`cards_added`、`candidates`、`candidates_cursor`。
 - `two_pass`：每批先抽候选事实（`prompts/history_import.py`），读完材料后分组交给 Capture 提示词统一写卡。⚠️ 这时 `ImportProgress.candidates` 含用户内容，宿主要按记忆正文等级保存进度；候选总数上限 4000。
+- `memgarden.conformance`（进 `STABLE_MODULES`）：写入路径共用验收场景（Seven 2026-09-14 §4.5 / §7.1）。22 个场景覆盖新增、修改、取代（含并发同目标）、归档、真删（六条读路径都读不到）、created_at / updated_at / occurred_at 写入与排序、owner 隔离、幂等重放与键冲突、CAS 与取代/删除冲突、Capture 写库失败的进度与重试、长度上限、字段读回与错误回执。宿主实现 `Host` 适配器后 `run_all`，有意差异按条款声明 `Deviation`（`by_design` / `bug`），未声明的失败和过期声明都算失败。`ReferenceHost` 是 MountedGarden + 官方 Store 的参考适配器，零声明全绿。只依赖标准库，不调模型、不含 Dream 写回场景。
 - 跨批桶名确定性收敛（大小写/空白、通用桶的双语斜杠写法、模型把通用桶清单相邻两项连抄成「工作、目标与成长」时取第一个）。
 
 ### Changed

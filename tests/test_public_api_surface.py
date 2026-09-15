@@ -96,6 +96,12 @@ STABLE = {
         "DEFAULT_QUOTAS", "select_context",
     },
     "memgarden.related": {"one_hop", "links", "RELATIONS", "DEFAULT_CAP"},
+    "memgarden.conformance": {
+        "SCENARIO_VERSION", "ERROR_KINDS", "READ_PATHS", "STATUSES",
+        "Outcome", "Host", "Deviation", "ClauseFailure", "Checks", "Scenario", "Result",
+        "SCENARIOS", "card", "scenario_ids", "run_scenario", "run_all", "assert_conformant",
+        "results_table", "ReferenceHost",
+    },
 }
 
 #: 公开请求/进度对象上宿主会直接设置或读取的字段（名字 → 默认值）。字段不在 ``__all__`` 里，
