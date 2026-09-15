@@ -219,3 +219,25 @@ def test_ids_must_be_a_list(store):
     garden = MountedGarden(model=_NoModel(), store=store)
     with pytest.raises(ValueError):
         garden.related(_scope(), "trip")
+
+
+def test_recall_search_and_related_share_one_lifecycle_filter(store):
+    """想起、搜索、关联读取走同一个 _scoped_cards：外部 Store 直接写的 status 也算数。
+
+    以前想起和搜索只靠 Store 的 archived / superseded_by 过滤，一张写着
+    ``status="archived"``（或没见过的 ``pending``）的卡能被搜到、被想起，关联读取却认它是归档卡。
+    """
+    _apply(store, "alice", [
+        {"op": "add", "card": _card("live", "搬家纸箱", threads=["搬家"])},
+        {"op": "add", "card": _card("filed", "搬家纸箱旧清单", status="archived", threads=["搬家"])},
+        {"op": "add", "card": _card("odd", "搬家纸箱待定", status="pending", threads=["搬家"])},
+        {"op": "add", "card": _card("src", "搬家", threads=["搬家"])},
+    ], "seed")
+    garden = MountedGarden(model=_NoModel(), store=store)
+    scope = _scope()
+    found = set(garden.search(scope, "搬家纸箱").record_ids)
+    recalled = set(garden.context_for_turn(scope, "搬家纸箱").record_ids)
+    related = {r["id"] for r in garden.related(scope, ["src"], cap=10)}
+    assert "live" in found and "live" in related
+    for gone in ("filed", "odd"):
+        assert gone not in found and gone not in recalled and gone not in related

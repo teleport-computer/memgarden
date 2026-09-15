@@ -19,7 +19,7 @@ mutation 执行、CAS、幂等键、整理账本、工具搜索、失败后重�
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Sequence
 
 from .component import GardenComponent
 from .contracts import (
@@ -298,14 +298,7 @@ class MountedGarden:
         以前要调用方先把候选准备好，于是每个接入方都要重写一遍：查库、
         生命周期过滤、mount 过滤、权限过滤、投影、回填。现在归这里。
         """
-        # 宿主可以把这一轮**收窄**到某一个挂载点。收窄同样要过权限检查 ——
-        # 悄悄忽略一个不认识的 mount，宿主会以为自己限制住了，实际读的是全部。
-        if mount is not None:
-            scope.check(mount)
-        mounts = (mount,) if mount is not None else scope.mounts()
-        candidates = [c for c in self._readable_cards(scope)
-                      if mount is None
-                      or str(c.get("mount") or DEFAULT_MOUNT) == mount]
+        mounts, candidates = self._scoped_cards(scope, mount=mount)
         return self.component.build_context(ContextRequest(
             query=query,
             actor=scope.actor,
@@ -329,15 +322,11 @@ class MountedGarden:
         **不走 selection_policy**：策略里可能有 RecentStage 这类不看查询的段，
         自动想起用它打底没问题，主动搜索混进来就是答非所问。无命中返回空。
 
-        生命周期和 :meth:`context_for_turn` 一致：只看当前有效的卡
-        （归档、被取代的不参与；真删的卡 Store 里已经没有）。
+        权限和生命周期过滤与 :meth:`context_for_turn`、:meth:`related` 是同一个
+        :meth:`_scoped_cards`：只看当前有效的卡（归档、被取代的不参与；真删的卡
+        Store 里已经没有）。
         """
-        if mount is not None:
-            scope.check(mount)
-        mounts = (mount,) if mount is not None else scope.mounts()
-        candidates = [c for c in self._readable_cards(scope)
-                      if mount is None
-                      or str(c.get("mount") or DEFAULT_MOUNT) == mount]
+        mounts, candidates = self._scoped_cards(scope, mount=mount)
         return self.component.search(SearchRequest(
             query=query,
             actor=scope.actor,
@@ -380,8 +369,8 @@ class MountedGarden:
         wanted = [str(i).strip() for i in ids if str(i or "").strip()]
         if not wanted:
             return []
-        cards = [_with_lifecycle_status(c) for c in self._readable_cards(
-            scope, include_archived=True, include_superseded=True)]
+        _mounts, cards = self._scoped_cards(
+            scope, statuses=("active", "superseded", "archived"), annotate=True)
         allowed = {"active"}
         if include_archived:
             allowed.add("archived")
@@ -404,10 +393,8 @@ class MountedGarden:
             sources.append(card)
         if not sources:
             return []
-        # 不认识的生命周期值不猜成 active —— fail closed，不当候选。
-        return one_hop(sources, [c for c in cards
-                                 if c["status"] in {"active", "superseded", "archived"}],
-                       cap=cap)
+        # 不认识的生命周期值不猜成 active —— fail closed，_scoped_cards 已经把它们挡在外面。
+        return one_hop(sources, cards, cap=cap)
 
     # -- 整理 ------------------------------------------------------------ #
 
@@ -839,7 +826,7 @@ class MountedGarden:
             # 走 search，不走 context_for_turn：后者按挑卡策略执行，策略里的
             # RecentStage 会把「最近写的几张」混进搜索结果（2026-09-15 修）。
             # 候选只读一次：结果和回填用同一份快照，不会出现「搜到了、回填时卡已不在」。
-            cards = self._readable_cards(scope)
+            _mounts, cards = self._scoped_cards(scope)
             found = self.component.search(SearchRequest(
                 query=query, actor=scope.actor, mounts=tuple(scope.mounts()),
                 candidates=cards, limit=8))
@@ -1009,6 +996,40 @@ class MountedGarden:
                 out.add(name)
         return out
 
+    def _scoped_cards(
+        self, scope: Scope, *, mount: str | None = None,
+        statuses: Sequence[str] = ("active",), annotate: bool = False,
+    ) -> tuple[tuple[str, ...], list[dict]]:
+        """想起、搜索、关联读取共用的候选：**owner + 挂载点 + 生命周期**一次过完。
+
+        三条读路以前各写一遍（前两条一模一样，关联读取另有一套生命周期翻译），
+        漏一处的表现是某一条路读到归档卡或别的挂载点的卡 —— 不会报错。
+
+        - ``mount``：宿主把这次读**收窄**到某一个挂载点。收窄同样要过权限检查 ——
+          悄悄忽略一个不认识的 mount，宿主会以为自己限制住了，实际读的是全部。
+        - ``statuses``：允许的规范生命周期（见 :func:`_lifecycle_status`）。
+          不认识的值一律不当候选（fail closed）。
+        - ``annotate``：给返回的卡副本写上规范 ``status``（:mod:`memgarden.related` 要读它）；
+          想起和搜索不写，候选原样交给组件。
+
+        返回 ``(这次读涉及的挂载点, 卡)``。
+        """
+        if mount is not None:
+            scope.check(mount)
+        mounts = (mount,) if mount is not None else tuple(scope.mounts())
+        allowed = frozenset(statuses)
+        retired = bool(allowed & {"archived", "superseded"})
+        cards = []
+        for card in self._readable_cards(scope, include_archived=retired,
+                                         include_superseded="superseded" in allowed):
+            if mount is not None and str(card.get("mount") or DEFAULT_MOUNT) != mount:
+                continue
+            status = _lifecycle_status(card)
+            if status not in allowed:
+                continue
+            cards.append({**card, "status": status} if annotate else card)
+        return mounts, cards
+
     def _readable_cards(
         self, scope: Scope, *, include_archived: bool = False,
         include_superseded: bool = False,
@@ -1156,11 +1177,12 @@ class MountedGarden:
                                 revision=str(applied.revision), trace=trace)
 
 
-def _with_lifecycle_status(card: dict) -> dict:
-    """把参考 Store 的生命周期标记翻译成 :mod:`memgarden.related` 认的 ``status``。
+def _lifecycle_status(card: dict) -> str:
+    """把卡上的生命周期标记翻译成规范 ``status``：active / superseded / archived / deleted / unknown。
 
-    被取代优先于归档：参考 Store 的 supersede 会同时写 ``archived`` 和
-    ``superseded_by``，那张卡是「历史版本」，不是「收起来了」。
+    认参考 Store 写的 ``archived`` / ``superseded_by``，也认外部 Store 直接写的
+    ``status`` / ``lifecycle``。被取代优先于归档：参考 Store 的 supersede 会同时写
+    ``archived`` 和 ``superseded_by``，那张卡是「历史版本」，不是「收起来了」。
     """
     status = str(card.get("status") or card.get("lifecycle") or "").strip().lower()
     if status == "deleted" or card.get("deleted") is True:
@@ -1173,7 +1195,7 @@ def _with_lifecycle_status(card: dict) -> dict:
         status = "active"
     else:
         status = "unknown"
-    return {**card, "status": status}
+    return status
 
 
 def _digest_key(scope: Scope, mutations: list[dict]) -> str:
