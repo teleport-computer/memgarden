@@ -80,3 +80,26 @@ uv run python examples/retrieval_runtime.py
 发布前至少检查：语义近似但用词不同的命中、编号/专名的精确命中、无关卡排除、空查询、部分向量缺失、角色和最近时间、更新/取代/删除后索引一致。对比旧策略和新策略的同一批人工标注样本，记录参数与模型/投影版本。纯数学与模拟向量测试不等于真实 embedding 质量评测。
 
 早期实现说明：[T510/T513](T510-selection.md)、[T523](T523-hybrid.md)。当前接入方式以上述指南和源码接口为准，当前验收范围只在 [Status](STATUS.md) 维护。
+
+## 7. 关联读取（一跳邻居）
+
+模型或用户取回某几张卡时，`MountedGarden.related(scope, ids, cap=6)` 顺带给出与它们相连的卡，每项 `{id, summary, source_id, relation, status}`，`summary` 折叠空白后最多120字，不含正文。它不是搜索：没有查询文本，只沿卡片上已经存在的关系走一步。
+
+| relation | 来源 | 能否带出历史卡 |
+|---|---|---|
+| `anchor` | 源卡的 `anchor_memory_ids` | 能，仅当该卡 `status == "superseded"`，并如实标在 `status` |
+| `supersedes` | 源卡的 `supersedes`；参考 Store 中另含 `superseded_by` 指向源卡的旧卡 | 同上 |
+| `thread` | 源卡与候选卡的 `threads` 有交集 | 不能 |
+
+- 优先级 anchor > supersedes > thread；显式链接排在线索邻居之前，各自按 id 排序，截到 `cap`。同一张卡被多张源卡命中时保留最强关系。
+- 归档、删除的卡永不出现；没有 `summary` 的卡不出现。`related` 只读 Scope 的 owner 与挂载点，硬删的卡不在库里自然读不到；不认识的生命周期值不当候选。
+- 源卡默认只取 active；`include_archived` / `include_superseded` 可放开源卡范围（不影响候选规则）。
+- 不做反向（从旧卡找取代它的新卡）和多跳；这两项需要产品确认后另加。
+
+不使用内置 Store 的宿主可直接调用纯函数 `memgarden.related.one_hop(sources, candidates, cap=6)`。它要求：
+
+1. 候选已按 owner、可见性过滤；函数不做授权。
+2. 生命周期写成规范字段 `status`（`active` / `superseded` / `archived` / `deleted`）或 `superseded_by`；宿主自有的归档标记（如 `archived_at`）先翻译成 `status="archived"`，但**已是 `superseded` 的卡保留 `superseded`**，否则历史版本会被当成普通归档而消失。
+3. 摘要放在 `summary`；旧标题字段先翻译过来。
+
+v1 行为与宿主 io 读侧的实现逐项一致，由 [黄金用例](../tests/fixtures/related_one_hop_golden.json) 锁定（144 组，含 120 组带种子的随机花园）。

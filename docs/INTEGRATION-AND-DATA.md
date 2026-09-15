@@ -7,6 +7,7 @@
 | 时机 | SDK / wire 入口 | 宿主处理结果 |
 |---|---|---|
 | 对话前召回 | `context_for_turn` / `context.get` | 把 `blocks` 注入本轮上下文，保留 `record_ids` 供追溯 |
+| 取回卡时的关联提示 | `related`（仅 SDK；纯函数 `memgarden.related.one_hop`） | 把返回的一跳邻居（id、摘要、关系、是否历史版本）附在取回结果旁；要读全文由宿主在同一 Scope 再取。见 [Retrieval §7](RETRIEVAL.md#7-关联读取一跳邻居) |
 | 对话后记忆 | `capture_and_store` / `capture.run` | 检查业务回执，再标记这段素材已处理 |
 | 宿主自行调模型 | `capture.begin/feed/cancel` | 按 `needs_model` 调模型并 feed，直到 `completed`，再检查其中回执 |
 | 检查、执行整理 | `check_maintenance`、`run_and_store_maintenance` / `maintenance.check/run` | 调度归宿主，卡片与整理账本由 Garden 一起提交 |
