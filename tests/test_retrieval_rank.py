@@ -442,3 +442,9 @@ def test_rank_drops_cards_without_id():
     assert result.trace["candidates"] == 3 and result.trace["without_id"] == 2
     with pytest.raises(SearchLimitExceeded):
         rank("needle", cards, max_cards=2)
+
+
+def test_orphan_combining_marks_are_dropped_and_marks_do_not_split_words():
+    tok = DefaultTokenizer()
+    assert tok.tokenize("́abc 中́文") == ["abc", "中", "文"]
+    assert tok.tokenize("हिन्दी-भाषा") == ["हिन्दी", "भाषा"]

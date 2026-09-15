@@ -50,6 +50,8 @@ B = 0.75
 _CJK_CHAR = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af"
 #: 标识符里的连接符：``np-4286``、``v2.3.1``、``k/d``、``foo_bar``。
 _JOINER = re.compile(r"([-_./])")
+#: CJK 连续段 | 字母数字连成、可由连接符串起来的词。
+_SEGMENT = re.compile(rf"([{_CJK_CHAR}]+)|([^\W_{_CJK_CHAR}]+(?:[-_./][^\W_{_CJK_CHAR}]+)*)")
 #: 纯语法助词。和它们相邻的二字（「的车」「咪的」「么事」）几乎都是跨词边界的噪声，
 #: 不生成；助词本身的单字仍然生成（由停用词表决定查询里要不要它）。
 #: 评测里去掉这些二字不改变召回，但让门槛在更宽的参数区间内稳定（见 MG-3 说明）。
@@ -133,13 +135,11 @@ _LATIN = (r"a-z0-9\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff"
 
 
 @functools.lru_cache(maxsize=1)
-def _patterns() -> tuple["re.Pattern[str]", "re.Pattern[str]"]:
-    """（CJK 连续段 | 词，词内按文字切段）两个正则。
+def _script_pattern() -> "re.Pattern[str]":
+    """词内按文字（拉丁 / 其他）切段，组合附加符号跟着前一个字符走。
 
-    词 = 字母、数字、组合附加符号，可由连接符串起来。组合附加符号（Unicode ``M*`` 类：
-    ``é`` 分解写法里的 U+0301、印地语元音符号）在 Python 正则里不算 ``\\w``，不收进来的话
-    一个词会被它们劈开。第一次分词时扫一遍码表建字符类（约 20ms），之后复用；导入模块
-    不付这个代价。
+    附加符号字符类要扫一遍码表（约 20ms）：第一次遇到含非 ASCII 字母的词时才建，
+    导入模块和纯 ASCII / CJK 文本不付这个代价。
     """
     marks = [cp for cp in (*range(0x30000), *range(0xE0100, 0xE01F0))
              if unicodedata.category(chr(cp))[0] == "M"]
@@ -150,10 +150,40 @@ def _patterns() -> tuple["re.Pattern[str]", "re.Pattern[str]"]:
         else:
             spans.append([cp, cp])
     mark = "".join(f"{re.escape(chr(lo))}-{re.escape(chr(hi))}" for lo, hi in spans)
-    word_char = rf"(?:[^\W_{_CJK_CHAR}]|[{mark}])"
-    segment = re.compile(rf"([{_CJK_CHAR}]+)|({word_char}+(?:[-_./]{word_char}+)*)")
-    script = re.compile(rf"[{_LATIN}][{_LATIN}{mark}]*|[^{_LATIN}{mark}][^{_LATIN}]*|[{mark}]+")
-    return segment, script
+    return re.compile(rf"[{_LATIN}][{_LATIN}{mark}]*|[^{_LATIN}{mark}][^{_LATIN}]*|[{mark}]+")
+
+
+def _leading_marks(text: str) -> str:
+    """``text`` 开头连续的组合附加符号（Unicode ``M*`` 类）。"""
+    end = 0
+    while end < len(text) and unicodedata.category(text[end])[0] == "M":
+        end += 1
+    return text[:end]
+
+
+def _segments(folded: str) -> list[tuple[bool, str]]:
+    """（是不是词, 文本）：CJK 连续段，或由字母、数字、组合附加符号连成的词。
+
+    组合附加符号（``é`` 分解写法里的 U+0301、印地语元音符号）在 Python 正则里不算 ``\\w``，
+    正则会在它们处把词劈开。这里把「只隔着附加符号」的相邻词段拼回去，词尾的附加符号也并进词。
+    词与词之间通常隔着空格或标点，只看间隔的第一个字符，几乎不花时间。不挨着词的孤立附加符号丢掉。
+    """
+    items: list[list] = []
+    last_end = 0
+    for match in _SEGMENT.finditer(folded):
+        gap = folded[last_end:match.start()]
+        word = match.group(2)
+        marks = _leading_marks(gap) if items and items[-1][0] else ""
+        if marks:
+            items[-1][1] += marks
+        if word is not None and marks and marks == gap:
+            items[-1][1] += word
+        else:
+            items.append([word is not None, word if word is not None else match.group(1)])
+        last_end = match.end()
+    if items and items[-1][0]:
+        items[-1][1] += _leading_marks(folded[last_end:])
+    return [(is_word, text) for is_word, text in items]
 
 
 def _word_tokens(run: str) -> list[str]:
@@ -166,7 +196,7 @@ def _word_tokens(run: str) -> list[str]:
     """
     if run.isascii():
         return [run]
-    _segment, script = _patterns()
+    script = _script_pattern()
     parts = _JOINER.split(run)
     out: list[str] = []
     for index in range(0, len(parts), 2):
@@ -199,11 +229,13 @@ class DefaultTokenizer:
 
     def tokenize(self, text: str) -> list[str]:
         out: list[str] = []
-        folded = unicodedata.normalize("NFC", str(text or "")).casefold()
-        for match in _patterns()[0].finditer(folded):
-            run, word = match.group(1), match.group(2)
-            if word:
-                out.extend(_word_tokens(word))
+        folded = str(text or "")
+        if not folded.isascii():
+            folded = unicodedata.normalize("NFC", folded)
+        folded = folded.casefold()
+        for is_word, run in _segments(folded):
+            if is_word:
+                out.extend(_word_tokens(run))
                 continue
             out.extend(run)
             out.extend(run[i:i + 2] for i in range(len(run) - 1)

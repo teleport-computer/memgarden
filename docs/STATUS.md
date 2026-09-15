@@ -16,7 +16,8 @@
 | Dream 带正文（MG-7） | 整理提示词恢复卡片正文，`MaintenanceRequest` 新增四个预算字段；**提示词文本有变化**，依赖整份提示词快照的宿主要更新 |
 | 宿主驱动历史导入（MG-8） | `GardenComponent.import_session` / `ImportSession`；`MountedGarden.import_history` 改跑在同一状态机上，默认请求的续传指纹不变；`two_pass` 的进度对象含用户内容；**单段式 `history_import` 提示词有变化** |
 | wire 接通与分面声明（`feat/wire-capabilities`） | JSON Lines 新增 `records.related`、宿主驱动导入 `history.import_begin/feed/commit/fail/cancel`（manifest `import_session`），`maintenance.run/begin` 接受四个渲染预算；`memgarden.surfaces` 按实际方法给出 SDK / JSON Lines / DSH 各自的能力表并双向测试。老方法请求与回复不变；manifest 多出 `related`、`import_session` 两个能力键 |
-| 写入路径共用验收场景（`feat/store-conformance`） | `memgarden.conformance`：22 个宿主无关场景 + `Host` 适配器协议 + 按条款的 `Deviation` 声明；`ReferenceHost`（MountedGarden + SqliteStore / InMemoryStore）零声明全绿，10 个坏宿主各破坏一条语义、对应场景全部变红（`tests/test_conformance.py`，Python 3.14 与 3.10 全量 947 passed, 2 xfailed）。宿主 io 已在真实 Postgres 写读路径上跑同一套场景，差异与缺陷清单在 io 仓库 `tests/test_memory_store_conformance.py`。不含 Dream 写回场景 |
+| 写入路径共用验收场景（`feat/store-conformance`） | `memgarden.conformance`：22 个宿主无关场景 + `Host` 适配器协议 + 按条款的 `Deviation` 声明；`ReferenceHost`（MountedGarden + SqliteStore / InMemoryStore）零声明全绿，10 个坏宿主各破坏一条语义、对应场景全部变红（`tests/test_conformance.py`，Python 3.14 与 3.10 全量 947 passed, 2 xfailed）。一个生产宿主已在自己的 Postgres 写读路径上跑同一套场景并维护差异清单（在该宿主仓库内）。不含 Dream 写回场景 |
+| 发布前复审修复（`fix/review-retrieval-import`） | 默认分词器 `mg-default-v2`（重音拉丁词整词）；覆盖率闸小花园下限 20 张（`memgarden-bm25-v2`，`evals/retrieval/small_pool.py`）；`RelevanceStage` bm25 拒绝 legacy 旋钮；Store 路径 Dream 先渲染最新的卡、截断/未渲染卡的整理建议出口硬拦；导入「写了没存进度」续传不再卡死（`commit_applied`、Store 同键冲突当已写入、`import_commit already_applied`），导入与 Mounted 捕获校验编造的 `target_id`；Capture 索引小于张数上限时也按相关性排；wire `naming_rule`。逐项见 CHANGELOG Unreleased |
 | 整合 | 导入的已有记忆索引默认用 `retrieval.rank` 挑卡；想起/搜索/关联读取共用一个候选过滤（外部 Store 写在卡上的非 active 生命周期不再进想起和搜索）；`related` 进 `STABLE_MODULES`，宿主设置的请求字段与默认值进快照；多轮窗口评测与可选的 `strong_evidence_terms` |
 
 没有新增存储表、加解密、默认向量存储或外部运行依赖；运行包仍只依赖标准库。
