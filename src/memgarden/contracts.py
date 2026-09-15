@@ -442,6 +442,10 @@ class MaintenanceRequest:
     locale: str = ""
     ai_name: str = ""
     user_name: str = ""
+    #: 怎么称呼这个人的规则，语义同 ``CaptureRequest.naming_rule``：``None``（默认）
+    #: 用 :func:`memgarden.naming.naming_rule` 按 ``user_name`` + ``locale`` 生成；
+    #: 宿主给的串原样进 Dream 提示词，必须已经是目标 locale 的写法。
+    naming_rule: str | None = None
     #: 最近的对话，渲染好的。整理时用来判断哪些记忆已经过时。
     recent_conversations: str = ""
     #: 喂进提示词的那批卡的 id。
