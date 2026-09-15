@@ -342,10 +342,31 @@ def _tool_call_is_proven(events: list[dict], cards: list[dict], marker: str) -> 
     return called and persisted
 
 
+def _offered_tool_per_request(events: list[dict], name: str) -> list[bool]:
+    """Whether each logged DSH request header offered ``name`` to the model.
+
+    DSH snapshots the tool list before ``agent/pre-step``; a tool registered
+    late is missing from the first request even though the Adapter log later
+    says it registered. 2026-09-15 this was the B-group flake's cause.
+    """
+    offered = []
+    for event in events:
+        if not (isinstance(event, dict) and event.get("type") == "request/header"
+                and isinstance(event.get("data"), dict)):
+            continue
+        header = event["data"].get("header")
+        tools = header.get("tools") if isinstance(header, dict) else None
+        offered.append(any(isinstance(tool, dict) and tool.get("name") == name
+                           for tool in (tools or [])))
+    return offered
+
+
 def _tool_write_diagnostic(events: list[dict], cards: list[dict], marker: str) -> str:
     """Show which half of the evidence is missing without dumping model text."""
     return json.dumps({
         "event_count": len(events),
+        "write_tool_offered_per_request": _offered_tool_per_request(
+            events, "memgarden_memory_write")[:10],
         "tool_calls": [str(event.get("data", {}).get("name", ""))[:120]
                        for event in events if isinstance(event, dict)
                        and event.get("type") == "tool/call"

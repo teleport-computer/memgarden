@@ -461,7 +461,86 @@ async function disposeRightAfterFailedSpawnDoesNotSignalHostGroup() {
   rmSync(dir, { recursive: true, force: true })
 }
 
+/**
+ * 真实 DSH 在 `agent/pre-step` 之前就把工具列表快照进模型请求，SDK 的
+ * initialize 也不等插件 apply 的 Promise。所以只有「apply() 同步返回时工具已
+ * 注册」才能保证首个请求里有 memgarden_* 工具。以前握手后才注册：日志里
+ * 「注册了」照样出现，验收 B 组却因首轮没有工具而时过时不过。
+ */
+async function toolsAreRegisteredBeforeApplyReturns() {
+  const bin = process.env.MEMGARDEN_BIN
+  assert.ok(bin, '需要 MEMGARDEN_BIN 指向真实 memgarden CLI')
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-tools-'))
+  const registered = []
+  const ctx = { ...fakeContext(), tools: { register(t) { registered.push(t); return () => {} } } }
+  const { apply } = await loadPlugin()
+  apply(ctx, {
+    bin, storage: `sqlite:///${path.join(dir, 'garden.db')}`,
+    tenant: 'tenant-tools', memoryOwner: 'owner-tools',
+    stateDir: path.join(dir, 'state'),
+  })
+  // 不 await、不让出事件循环：DSH 下一步可能就是组装首个请求。
+  assert.deepEqual(registered.map((t) => t.name).sort(),
+                   ['memgarden_memory_search', 'memgarden_memory_write'])
+  const write = registered.find((t) => t.name === 'memgarden_memory_write')
+  assert.deepEqual(write.parameters.required, ['summary', 'content'])
+  await ctx.hooks.get('dispose')()
+  rmSync(dir, { recursive: true, force: true })
+}
+
+async function runningServiceWinsWhenToolDefinitionsDrift() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-drift-'))
+  const debugLog = path.join(dir, 'debug.log')
+  process.env.MEMGARDEN_DEBUG_LOG = debugLog
+  process.env.MEMGARDEN_FAKE_CLI_TOOLS = JSON.stringify([{
+    name: 'memory_write', description: 'stale', parameters: { type: 'object' },
+  }])
+  const live = new Set()
+  let disposed = 0
+  const ctx = {
+    ...fakeContext(),
+    tools: { register(t) { live.add(t.name); return () => { disposed += 1; live.delete(t.name) } } },
+  }
+  const { apply } = await loadPlugin()
+  apply(ctx, {
+    bin: SERVICE, storage: 'ignored', tenant: 'tenant-drift',
+    memoryOwner: 'owner-drift', stateDir: path.join(dir, 'state'),
+  })
+  assert.deepEqual([...live], ['memgarden_memory_write'], '启动时同步注册')
+  // 假服务的 tool.list 回空：握手后必须以运行中的服务为准注销旧定义。
+  await waitFor(() => readFileSync(debugLog, 'utf8').includes('以服务为准重新注册'))
+  assert.equal(disposed, 1)
+  assert.deepEqual([...live], [])
+  await ctx.hooks.get('dispose')()
+  delete process.env.MEMGARDEN_FAKE_CLI_TOOLS
+  delete process.env.MEMGARDEN_DEBUG_LOG
+  rmSync(dir, { recursive: true, force: true })
+}
+
+async function brokenServiceBinaryStillLetsHostStart() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-bad-'))
+  const debugLog = path.join(dir, 'debug.log')
+  process.env.MEMGARDEN_DEBUG_LOG = debugLog
+  const registered = []
+  const ctx = { ...fakeContext(), tools: { register(t) { registered.push(t.name) } } }
+  const { apply } = await loadPlugin()
+  // 抛错会让 DSH 整棵插件树加载失败 —— 记忆坏了不能连对话都起不来。
+  apply(ctx, {
+    bin: path.join(dir, 'no-such-memgarden'), storage: 'ignored',
+    tenant: 'tenant-bad', memoryOwner: 'owner-bad', stateDir: path.join(dir, 'state'),
+  })
+  assert.deepEqual(registered, [])
+  assert.ok(readFileSync(debugLog, 'utf8').includes('同步取工具定义失败'),
+            '降级必须留下可诊断日志')
+  await ctx.hooks.get('dispose')()
+  delete process.env.MEMGARDEN_DEBUG_LOG
+  rmSync(dir, { recursive: true, force: true })
+}
+
 await disposeRightAfterFailedSpawnDoesNotSignalHostGroup()
+await toolsAreRegisteredBeforeApplyReturns()
+await runningServiceWinsWhenToolDefinitionsDrift()
+await brokenServiceBinaryStillLetsHostStart()
 await successfulTurnGoesThroughAdapter()
 await recoveryKeepsFailedReceipt()
 await actualServiceAlsoClosesTheHostDrivenLoop()

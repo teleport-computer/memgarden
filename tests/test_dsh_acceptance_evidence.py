@@ -91,6 +91,19 @@ def test_tool_write_diagnostic_distinguishes_call_from_persistence_without_bodie
     assert len(detail) < 4000
 
 
+def test_tool_write_diagnostic_shows_whether_first_request_offered_the_tool():
+    # 2026-09-15 B 组波动的根因：工具晚注册，首个请求里没有它。
+    def header(*names):
+        return {"type": "request/header", "data": {"header": {
+            "system": "PRIVATE PROMPT",
+            "tools": [{"name": n, "description": "PRIVATE"} for n in names]}}}
+    events = [header("bash"), {"type": "tool/call", "data": {"name": "bash"}},
+              header("bash", "memgarden_memory_write")]
+    detail = acceptance._tool_write_diagnostic(events, [], "MARKER")
+    assert '"write_tool_offered_per_request":[false,true]' in detail
+    assert "PRIVATE" not in detail
+
+
 def test_maintenance_failure_diagnostic_is_bounded_without_card_bodies():
     logs = "\n".join([
         "[memgarden] 召回 0 条",
