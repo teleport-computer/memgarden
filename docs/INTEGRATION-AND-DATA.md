@@ -66,8 +66,11 @@ JSON Lines 每行一个请求与响应，stdout 承载协议。示例请求：
 | `memgarden.garden_language` | 花园语言判定 |
 | `memgarden.policies` | 落卡档位与提示词常量 |
 | `memgarden.retrieval` | 统一排序器 `rank`、自动想起 `select_context`、`Tokenizer` 插口 |
+| `memgarden.related` | 关联读取纯函数 `one_hop`（挂了 Store 用 `MountedGarden.related`） |
 
-不在清单里的模块（`prompts.capture`、`prompts.dream`、`scoring.*`、`rendering` 等）是内部零件：可以读、可以在测试里用，但不承诺兼容。宿主应在自己仓库加一条「只 import 公开 API」的守卫，以 `STABLE_MODULES` 和各模块 `__all__` 为准；`tests/test_public_api_surface.py` 在本仓库对这两样做快照。
+分批导入的会话对象 `ImportSession` / `ImportBatch` / `ImportBatchResult` 从顶层导出。Dream 带正文渲染的预算是 `MaintenanceRequest` 的 `cards_limit` / `cards_budget_chars` / `card_body_chars` / `card_summary_chars` 字段；渲染函数 `prompts.dream.render_dream_cards` 本身不是公开合同，宿主走 `maintenance_session` / `run_maintenance` 就会用到它。请求对象上宿主直接设置的字段和默认值同样由快照测试钉住。
+
+不在清单里的模块（`prompts.capture`、`prompts.dream`、`scoring.*`、`rendering`、`importing` 的其余名字等）是内部零件：可以读、可以在测试里用，但不承诺兼容。宿主应在自己仓库加一条「只 import 公开 API」的守卫，以 `STABLE_MODULES` 和各模块 `__all__` 为准；`tests/test_public_api_surface.py` 在本仓库对这两样做快照。
 
 ## 2. 归属与权限
 

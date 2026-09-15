@@ -95,6 +95,27 @@ STABLE = {
         "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
         "DEFAULT_QUOTAS", "select_context",
     },
+    "memgarden.related": {"one_hop", "links", "RELATIONS", "DEFAULT_CAP"},
+}
+
+#: 公开请求/进度对象上宿主会直接设置或读取的字段（名字 → 默认值）。字段不在 ``__all__`` 里，
+#: 删一个或改默认值同样会让宿主升级后才炸，所以一起钉住。
+CONTRACT_FIELDS = {
+    # Dream 带正文渲染的预算（MG-7）。宿主走 maintenance_session / run_maintenance 时设这几项；
+    # 渲染函数本身（prompts.dream.render_dream_cards）仍是内部零件。
+    ("memgarden.contracts", "MaintenanceRequest"): {
+        "cards_limit": 60, "cards_budget_chars": 60_000,
+        "card_body_chars": 5_000, "card_summary_chars": 2_000,
+    },
+    # 分批导入（MG-8）。全部取默认值时导入语义与续传指纹不变。
+    ("memgarden.contracts", "ImportRequest"): {
+        "naming_rule": None, "identity": "", "batches": (), "strategy": "single_pass",
+        "batch_chars": None, "write_batch_candidates": 40, "max_total_cards": None,
+        "fallback_occurred_at": "",
+    },
+    ("memgarden.importing", "ImportProgress"): {
+        "strategy": "single_pass", "cards_added": 0, "candidates_cursor": 0,
+    },
 }
 
 #: io（release/memory-overhaul，backend + tools，不含测试）2026-09-15 实际用到的名字。
@@ -137,7 +158,8 @@ IO_USES = {
 #: io 仍在用、但**刻意不升格**的内部零件，以及它们的出路。清单只许变短。
 IO_INTERNAL_WITH_EXIT = {
     "memgarden.prompts.capture": "io 的 capture_prompt_v1 垫片；落卡走 GardenComponent，垫片删除",
-    "memgarden.prompts.dream": "io 的 dream_prompt_v1 垫片；V1 Dream 改走 maintenance_session",
+    "memgarden.prompts.dream": ("io 的 dream_prompt_v1 垫片；V1 Dream 改走 maintenance_session"
+                                "（带正文渲染与 MaintenanceRequest 的预算字段一起拿到，不直接调 render_dream_cards）"),
     "memgarden.scoring.relevance": "自动想起改用 memgarden.retrieval.select_context",
     "memgarden.scoring.selector": "io 的 docker e2e 工具；改用 memgarden.retrieval.rank",
 }
@@ -166,6 +188,20 @@ def test_each_stable_module_all_is_snapshotted_and_resolvable():
         )
         missing = [n for n in exported if not hasattr(module, n)]
         assert not missing, f"{name}.__all__ 列了但取不到：{missing}"
+
+
+def test_public_request_fields_and_defaults_are_snapshotted():
+    import dataclasses
+
+    for (module_name, cls_name), expected in CONTRACT_FIELDS.items():
+        cls = getattr(importlib.import_module(module_name), cls_name)
+        fields = {f.name: f for f in dataclasses.fields(cls)}
+        for name, default in expected.items():
+            assert name in fields, f"{cls_name}.{name} 不见了"
+            field = fields[name]
+            actual = (field.default if field.default is not dataclasses.MISSING
+                      else field.default_factory())
+            assert actual == default, f"{cls_name}.{name} 默认值变了：{actual!r} != {default!r}"
 
 
 def test_every_name_io_imports_today_is_public():
