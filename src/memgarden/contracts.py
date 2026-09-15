@@ -117,6 +117,23 @@ class CaptureRequest:
     identity: str = ""
     #: 已有卡片的索引，渲染好的。模型要 supersede 时从这里挑 target_id。
     cards: str = ""
+    #: 这个人**现有的、宿主确认可见的**卡（明文，至少 ``id`` + ``summary``；
+    #: ``bucket`` / ``importance`` 有就用）。``None``（默认）= 宿主不提供，
+    #: 行为与之前逐字相同。给了（空列表也算）时：
+    #:
+    #: 1. ``cards`` 为空 → 组件按这段对话挑旧卡进索引（与历史导入同一把尺子：
+    #:    ``retrieval.rank`` 挑相关的，留四分之一名额给重要度最高的），相关的排前面，
+    #:    受下面三个预算约束。``cards`` 非空时仍原样用宿主渲染的那份。
+    #: 2. merge/supersede 的 ``target_id`` 必须是这批卡里的一张 —— 不是就当作
+    #:    本地可证的语义错误重问一次，仍不是就只丢那一张。
+    #:
+    #: 为什么交整批而不是渲染好的串：只有这样组件才知道哪些 id 是真的。模型抄错
+    #: 一个 id，在「整批原子提交」的宿主里会让同一窗口里的好卡一起被拒。
+    existing_cards: list[dict] | None = None
+    #: 索引最多带几张 / 总字数 / 每张摘要字数。只在组件自己渲染索引时生效。
+    index_cards_limit: int = 60
+    index_budget_chars: int = 16_000
+    index_summary_chars: int = 400
 
     ai_name: str = ""
     user_name: str = ""
