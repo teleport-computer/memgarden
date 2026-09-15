@@ -33,6 +33,7 @@ from memgarden.importing import (
     select_index_cards,
 )
 from memgarden.policies import HISTORY_IMPORT_OPENING_RUBRIC
+from memgarden.retrieval import DefaultTokenizer
 from memgarden.service import Service
 from memgarden.stores.memory import InMemoryStore
 
@@ -267,6 +268,41 @@ def test_host_ranker_is_used_for_the_index():
     picked = select_index_cards(cards, "x", limit=8, ranker=lambda _t, cs: ["c99", "c98", "nope"])
     assert [c["id"] for c in picked[:2]] == ["c99", "c98"]
     assert len(picked) == 8
+
+
+def test_default_index_ranker_weighs_rare_words_over_shared_filler():
+    """默认挑卡器是 retrieval.rank：和材料共享泛词的短卡不能挤掉带稀有词的相关旧卡。
+
+    旧的词面重叠按「重叠词数 / √卡片词数」打分、不看稀有度，80 张写着「今天」「然后」「朋友」
+    的短卡会排在一张带 JIRA-4821 的长卡前面，60 个名额里它进不去。
+    """
+    filler = [{"id": f"f{i:03d}", "summary": f"今天然后和朋友吃饭{i}", "importance": 0.9}
+              for i in range(80)]
+    target = {"id": "jira", "summary": "JIRA-4821 灰度发布事故",
+              "content": "负责的 JIRA-4821 在周三灰度时把 5% 用户的登录 token 刷掉了，半夜两点回滚，"
+                         "事后写了复盘文档，说这是入职以来最丢脸的一次。" * 3,
+              "importance": 0.1}
+    batch = "今天然后和朋友聊到 JIRA-4821 那次回滚，今天然后又说起朋友吃饭的事。"
+    picked = select_index_cards(filler + [target], batch, limit=20)
+    assert "jira" in [c["id"] for c in picked[:15]]
+
+
+def test_index_ranker_uses_the_component_tokenizer():
+    calls = []
+
+    class SpyTokenizer:
+        name = "spy-v1"
+
+        def tokenize(self, text):
+            calls.append(text)
+            return DefaultTokenizer().tokenize(text)
+
+    cards = [{"id": f"c{i:03d}", "summary": f"第{i}张卡", "importance": 0.5} for i in range(80)]
+    request = ImportRequest(material=_material("第7张卡的事"), locale="zh-Hans", batch_chars=200)
+    session = GardenComponent(model=None, tokenizer=SpyTokenizer()).import_session(
+        request, existing_cards=cards)
+    session.next_batch().next_prompt()
+    assert calls, "索引挑卡没有走组件注入的分词器"
 
 
 def test_bucket_spelling_converges_across_batches():

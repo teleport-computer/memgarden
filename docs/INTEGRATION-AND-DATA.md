@@ -223,7 +223,7 @@ History Import 的 cursor 是原材料的字符偏移（宿主预切 `batches` �
 
 `MountedGarden.import_history` 和 `GardenComponent.import_session` 走同一个 `ImportSession`：切批、提示词、解析与重问、跨批去重、上限和进度推进是同一份代码。区别只在谁调模型、谁写库，以及索引从哪来——前者每个写卡批次前重读 Store，后者用宿主开会话时给的 `existing_cards`，并在每次 `commit(outcome, record_ids=...)` 时把刚写的卡（带宿主的真实 id）登记进后面批次的索引。`record_ids` 必须与 `mutations` 一一对应；写库失败用 `fail(outcome, error)` 记录，游标不动。
 
-「已有记忆索引」按这一批文字的词面重叠挑相关旧卡（最多 60 张，其中四分之一留给重要度最高的卡），不再只取重要度前 60；宿主可传 `index_ranker(batch_text, cards) -> ids` 换成自己的检索。桶名只做确定性收敛（大小写/空白一致并到已有写法，`中文/English` 通用桶对按 locale 取一半），近义词不猜。`fallback_occurred_at` 只填没有日期的卡，内核不推测日期。
+「已有记忆索引」按和这一批文字的相关性挑旧卡（最多 60 张，其中四分之一留给重要度最高的卡），不再只取重要度前 60。相关性默认用 `retrieval.rank`（关掉门槛、分词器跟组件的 `tokenizer=`，即 `importing.bm25_index_ranker`）；宿主可传 `index_ranker(batch_text, cards) -> ids` 换成自己的检索。桶名只做确定性收敛（大小写/空白一致并到已有写法，`中文/English` 通用桶对按 locale 取一半），近义词不猜。`fallback_occurred_at` 只填没有日期的卡，内核不推测日期。
 
 `strategy="two_pass"`：每批先抽「候选事实 + 原话证据」（不写卡），材料读完后按 `write_batch_candidates`（默认 40）分组，用同一个 Capture 提示词写卡、去重、归桶。候选按字面归一后跨批去重（同义改写交给写卡模型），总数上限 4000，超出记进 `skipped`。⚠️ 两段式的 `ImportProgress.candidates` 含用户内容，宿主要按记忆正文的等级保存进度。两种形状哪个默认更好尚无结论，默认仍是 `single_pass`。
 

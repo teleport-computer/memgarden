@@ -13,6 +13,7 @@ python evals/retrieval/harness.py --misses            # 逐条列出漏召回 / 
 python evals/retrieval/harness.py --ranker my_rank.py:rank --name my-ranker --json out.json
 python evals/retrieval/harness.py --compare evals/retrieval/results/baseline-2026-09-15.json
 python evals/retrieval/harness.py --set multi_turn        # 多轮窗口查询集（自动想起的查询形状）
+python evals/retrieval/import_index.py                    # 历史导入「已有记忆索引」挑卡器对比
 ```
 
 外部 ranker 只需一个函数 `rank(query, cards, k) -> list[card_id]`，`cards` 是已过宿主生命周期
@@ -143,3 +144,19 @@ jieba 下 recall@5 0.896 → 0.875、有答案却返回空 3 → 4（多出来�
   recall@5 掉到 0.87 以下）。
 - 16 条合成窗口、3 条无命中——**只够说明方向，不够定线上阈值**。`tests/test_retrieval_eval_gate.py` 用 strict xfail
   记着默认闸的无命中缺陷，并守放大闸的质量线；上线后看 trace 里的 `below_gate` / `evidence_scale`。
+
+## 历史导入的「已有记忆索引」（2026-09-15）
+
+`import_index.py`：同一花园和标注，拼成导入批次（随机取 k 条查询 + 与花园无关的闲聊行填到目标字数），
+看 `importing.select_index_cards` 的 60 个名额里有没有这批该看到的旧卡。MG-8 初版的内置词面重叠 vs 现在的默认
+`bm25_index_ranker`（`retrieval.rank` 关掉门槛）：
+
+| 话题数 / 字数 | card-recall 重叠 → rank | 整批都进 重叠 → rank | rank + jieba |
+|---|---|---|---|
+| 1 / 1500 | 0.733 → 0.923 | 71% → 92% | 0.968 / 96% |
+| 3 / 3000 | 0.784 → 0.942 | 46% → 81% | 0.976 / 92% |
+| 4 / 6000 | 0.775 → 0.944 | 33% → 76% | 0.967 / 86% |
+| 8 / 6000 | 0.769 → 0.934 | 9% → 57% | 0.937 / 58% |
+
+每批耗时 2–3 ms → 5–8 ms（jieba 9–14 ms），相对一次写卡模型调用可以忽略。重叠计数不看稀有度，
+「今天」「然后」和编号一样算一分，共享泛词的短卡会挤掉真正相关的旧卡。

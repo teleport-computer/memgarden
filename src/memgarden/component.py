@@ -776,7 +776,8 @@ class GardenComponent:
         ``owner_key``：绑定进续传指纹的主体标识（默认 ``actor.user_id``）——
         同一份进度不能拿到另一个人的导入上续传。
         ``index_ranker``：可选，``ranker(batch_text, cards) -> 卡 id 列表``，
-        用宿主自己的检索挑「已有记忆索引」。
+        用宿主自己的检索挑「已有记忆索引」。不给就用 ``retrieval.rank``
+        （关掉门槛，分词器用本组件的 ``tokenizer``），见 :func:`memgarden.importing.bm25_index_ranker`。
         """
         from .importing import ImportSession
 

@@ -173,30 +173,6 @@ def batch_key(base: str, *, offset: int, chunk: str) -> str:
 # 已有记忆索引：按这一批的文字挑相关的旧卡
 # --------------------------------------------------------------------------- #
 
-_ASCII_WORD = re.compile(r"[a-z0-9][a-z0-9_+#.-]*")
-
-
-def _is_cjk(ch: str) -> bool:
-    return "㐀" <= ch <= "鿿" or "豈" <= ch <= "﫿"
-
-
-def _index_tokens(text: str) -> set[str]:
-    """ASCII 词 + 汉字二元组。只用来挑候选旧卡，不是检索排序器。"""
-    lowered = str(text or "").casefold()
-    tokens = {w for w in _ASCII_WORD.findall(lowered) if len(w) >= 2}
-    run: list[str] = []
-    for ch in lowered + " ":
-        if _is_cjk(ch):
-            run.append(ch)
-            continue
-        if len(run) == 1:
-            tokens.add(run[0])
-        else:
-            tokens.update(run[i] + run[i + 1] for i in range(len(run) - 1))
-        run = []
-    return tokens
-
-
 def _importance(card: Mapping) -> float:
     try:
         return float(card.get("importance") or 0)
@@ -204,19 +180,29 @@ def _importance(card: Mapping) -> float:
         return 0.0
 
 
-def _card_index_text(card: Mapping) -> str:
-    threads = card.get("threads") if isinstance(card.get("threads"), list) else []
-    cues = card.get("retrieval_cues") if isinstance(card.get("retrieval_cues"), list) else []
-    return " ".join([
-        str(card.get("summary") or ""), str(card.get("content") or ""),
-        str(card.get("bucket") or ""),
-        " ".join(str(t) for t in threads), " ".join(str(c) for c in cues),
-    ])
-
-
 #: 宿主可注入的挑卡器：``ranker(batch_text, cards) -> 按相关性排好的卡 id``。
-#: 有更好的检索（BM25、向量）的宿主传进来；不传用内置的词面重叠。
+#: 不传时用 :func:`bm25_index_ranker`（``retrieval.rank``，和搜索、自动想起同一个排序器）。
 IndexRanker = Callable[[str, Sequence[Mapping]], Sequence[str]]
+
+
+def bm25_index_ranker(tokenizer: Any = None) -> IndexRanker:
+    """默认的索引挑卡器：:func:`memgarden.retrieval.rank`，**关掉门槛**。
+
+    门槛是给「这张卡值不值得说出来」用的；这里要的是「写卡模型该知道哪些旧卡已经在了」，
+    宁多勿漏 —— 名额本身就是上限。停用词照旧去掉，分词器跟组件走（io 注入 jieba）。
+
+    为什么不用词面重叠：一批导入材料几千字，重叠计数不看词的稀有度，「今天」「然后」
+    和「JIRA-4821」一样算一分，于是和材料共享泛词的短卡挤掉真正相关的旧卡。
+    ``evals/retrieval`` 的卡片与查询拼成的合成导入批次上（210 张卡，每批 ~6000 字含 4 个话题），
+    该进索引的旧卡进了 0.775 → 0.944，整批都进了 33% → 76%（jieba 分词 0.967 / 86%）。
+    """
+    from .retrieval import rank
+
+    def ranker(text: str, cards: Sequence[Mapping]) -> list[str]:
+        return rank(text, cards, tokenizer=tokenizer, min_coverage=0.0,
+                    strong_evidence=0.0).ids
+
+    return ranker
 
 
 def select_index_cards(
@@ -227,7 +213,7 @@ def select_index_cards(
 
     卡不多于 ``limit`` 时全给。多了就按和这一批文字的相关性挑，**留四分之一名额
     给重要度最高的卡** —— 核心事实（名字、关系、边界）常常和某一批的字面不重合，
-    但模型写卡时仍需要知道它们已经在了。
+    但模型写卡时仍需要知道它们已经在了。相关性默认由 :func:`bm25_index_ranker` 给。
     """
     usable = [dict(c) for c in cards
               if str(c.get("id") or "").strip() and str(c.get("summary") or "").strip()]
@@ -239,26 +225,15 @@ def select_index_cards(
     by_importance = sorted(usable, key=lambda c: (-_importance(c), str(c.get("id"))))
     budget = limit - limit // 4
     picked: list[dict] = []
-    if ranker is not None:
-        by_id = {str(c["id"]): c for c in usable}
-        seen: set[str] = set()
-        for rid in ranker(text, usable):
-            rid = str(rid)
-            if rid in by_id and rid not in seen:
-                seen.add(rid)
-                picked.append(by_id[rid])
-            if len(picked) >= budget:
-                break
-    else:
-        query = _index_tokens(text)
-        scored = []
-        for card in usable:
-            tokens = _index_tokens(_card_index_text(card))
-            overlap = len(query & tokens)
-            if overlap:
-                scored.append((overlap / math.sqrt(len(tokens)), card))
-        scored.sort(key=lambda sc: (-sc[0], -_importance(sc[1]), str(sc[1].get("id"))))
-        picked = [card for _score, card in scored[:budget]]
+    by_id = {str(c["id"]): c for c in usable}
+    seen: set[str] = set()
+    for rid in (ranker or bm25_index_ranker())(text, usable):
+        if len(picked) >= budget:
+            break
+        rid = str(rid)
+        if rid in by_id and rid not in seen:
+            seen.add(rid)
+            picked.append(by_id[rid])
     taken = {str(c["id"]) for c in picked}
     for card in by_importance:
         if len(picked) >= limit:
@@ -473,7 +448,9 @@ class ImportSession:
 
         self._owner = owner
         self.request = request
-        self._ranker = ranker
+        # 没给就用默认的 BM25 挑卡器，分词器跟组件（MountedGarden 与宿主驱动同一个）。
+        self._ranker = ranker if ranker is not None else bm25_index_ranker(
+            getattr(owner, "_tokenizer", None))
         self._index_limit = index_limit
         strategy = str(getattr(request, "strategy", "") or "single_pass").strip()
         if strategy not in STRATEGIES:
@@ -912,6 +889,7 @@ __all__ = [
     "ImportProgress",
     "ImportSession",
     "batch_key",
+    "bm25_index_ranker",
     "converge_bucket",
     "select_index_cards",
     "split_material",
