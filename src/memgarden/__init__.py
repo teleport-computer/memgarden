@@ -97,6 +97,7 @@ STABLE_MODULES: tuple[str, ...] = (
     "memgarden.observability",
     "memgarden.garden_language",
     "memgarden.policies",
+    "memgarden.retrieval",
 )
 
 __all__ = [

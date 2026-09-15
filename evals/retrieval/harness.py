@@ -56,6 +56,7 @@ if str(HERE) not in sys.path:
 
 import filler  # noqa: E402
 from memgarden.prompts.recall_fields import retrieval_cues  # noqa: E402
+from memgarden import retrieval  # noqa: E402
 from memgarden.scoring import relevance  # noqa: E402
 
 KS = (1, 3, 5, 8)
@@ -150,7 +151,13 @@ def mg_scores(query: str, cards: list[dict], k: int) -> list[str]:
     return [cid for _s, _o, cid in scored[:k]]
 
 
-BUILTIN: dict[str, Ranker] = {"mg-relevant": mg_relevant, "mg-scores": mg_scores}
+def mg_bm25(query: str, cards: list[dict], k: int) -> list[str]:
+    """``memgarden.retrieval.rank``：统一排序器，默认分词器和默认参数。"""
+    return retrieval.rank(query, cards, limit=k).ids
+
+
+BUILTIN: dict[str, Ranker] = {"mg-relevant": mg_relevant, "mg-scores": mg_scores,
+                              "mg-bm25": mg_bm25}
 
 
 def load_external(spec: str) -> Ranker:

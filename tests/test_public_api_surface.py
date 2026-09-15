@@ -86,6 +86,10 @@ STABLE = {
         "language_rule", "RESTRAINT_RULE_QUOTE", "HISTORY_IMPORT_OPENING_RUBRIC",
         "HISTORY_IMPORT_FILTER_RUBRIC", "KEEP_ALL_MAP_SUFFIX", "KEEP_ALL_WRITE_SUFFIX",
     },
+    "memgarden.retrieval": {
+        "RANKING_VERSION", "Tokenizer", "DefaultTokenizer",
+        "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
+    },
 }
 
 #: io（release/memory-overhaul，backend + tools，不含测试）2026-09-15 实际用到的名字。
