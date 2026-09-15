@@ -283,6 +283,13 @@ def converge_bucket(bucket: str, known_buckets: Sequence[str], *, locale: str = 
     name = str(bucket or "").strip()
     if not name:
         return name
+    common = {zh for zh, _en in COMMON_BUCKETS_V1} | {en for _zh, en in COMMON_BUCKETS_V1}
+    listed = [p.strip() for p in re.split(r"[、，,]", name) if p.strip()]
+    if len(listed) > 1 and all(p in common for p in listed):
+        # 真模型实测（2026-09-15，DeepSeek）：提示词里通用桶清单是「工作、目标与成长、…」
+        # 一行，模型会把前两个连着抄成一个桶名「工作、目标与成长」。只在每一段都是
+        # 通用桶时取第一个；自定义桶名里带顿号的不动。
+        name = listed[0]
     if "/" in name:
         parts = [p.strip() for p in name.split("/") if p.strip()]
         pairs = {(zh, en) for zh, en in COMMON_BUCKETS_V1}

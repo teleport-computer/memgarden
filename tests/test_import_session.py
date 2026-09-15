@@ -274,6 +274,9 @@ def test_bucket_spelling_converges_across_batches():
     assert converge_bucket("健康/Health", [], locale="zh-Hans") == "健康"
     assert converge_bucket("Health/健康", [], locale="en") == "Health"
     assert converge_bucket("工作/职业", ["工作"]) == "工作/职业"  # 不是通用桶对，不猜
+    # 模型把通用桶清单里相邻两个连着抄成一个桶名（真模型对比里出现过）。
+    assert converge_bucket("工作、目标与成长", ["工作"]) == "工作"
+    assert converge_bucket("妈妈、爸爸", []) == "妈妈、爸爸"  # 不全是通用桶，不动
 
     material = _material("I climb every weekend", "I also climb indoors")
     request = ImportRequest(material=material, locale="en", batch_chars=200)
