@@ -6,7 +6,7 @@
 
 ## 1. 合并、发布与本轮改动
 
-- 基线 `main` 为 [10e566f](https://github.com/teleport-computer/memgarden/commit/10e566f)（v0.20.1 之后，PR #5 已合并）。`release/next` 在它之上依次合入 `fix/parse-edge-cases` → `feat/recall-eval`（两者是链式分支）→ `feat/retrieval-unify` → `feat/related-dream-body` → `feat/import-session`，再加整合提交。**尚未发布新版本**；合并状态看 PR，发布状态看 Release/PyPI。
+- 基线 `main` 为 [10e566f](https://github.com/teleport-computer/memgarden/commit/10e566f)（v0.20.1 之后，PR #5 已合并）。`release/next` 在它之上依次合入 `fix/parse-edge-cases` → `feat/recall-eval`（两者是链式分支）→ `feat/retrieval-unify` → `feat/related-dream-body` → `feat/import-session`，再加整合提交。本批改动以 **0.21.0** 发布；合并状态看 PR，发布状态看 Release/PyPI。
 - 逐项变化与兼容影响见 [CHANGELOG](../CHANGELOG.md) 的 Unreleased 段；这里只列能力面。
 
 | 本轮内容 | 变化及兼容边界 |
@@ -31,7 +31,7 @@
 | 召回排序评测闸 | 单句集（53 条，默认分词器）recall@5 0.932、MRR 0.891、无命中 4/5、有答案却返回空 1；多轮窗口集（16 条）默认闸 recall@5 0.962 / 无命中 0/3（strict xfail），`strong_evidence_terms=8` recall@5 0.923 / 无命中 3/3。数字与 jieba 对照见 [evals/retrieval](../evals/retrieval/README.md) |
 | 导入索引挑卡 | `evals/retrieval/import_index.py`：4 话题 / 6000 字批次，该进索引的旧卡 0.775（初版词面重叠）→ 0.944（`retrieval.rank`） |
 | 接入示例 | quickstart、mount_in_ten_minutes、wire_capture、retrieval_runtime 均退出 0 |
-| 打包 | `uv build` 出 wheel/sdist（0.20.1）；wheel 含 `related` / `importing` / `retrieval` / `prompts/history_import`，运行依赖为零（Requires-Dist 只有 dev extra） |
+| 打包 | `uv build` 出 wheel/sdist（0.21.0）；wheel 含 `related` / `importing` / `retrieval` / `prompts/history_import`，运行依赖为零（Requires-Dist 只有 dev extra） |
 | 版本与 diff | `scripts/check_version_consistency.py` 通过；`git diff --check` 通过 |
 
 未做：远程 CI（分支未推送）、Python 3.11–3.13 矩阵、干净 venv 安装 wheel 后跑示例、Node 侧 DSH Adapter 以外的真实运行。本地结果不等于远程 CI。
