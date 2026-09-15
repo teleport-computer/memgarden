@@ -87,6 +87,7 @@ JSON Lines 每行一个请求与响应，stdout 承载协议。示例请求：
 | `memgarden.retrieval` | 统一排序器 `rank`、自动想起 `select_context`、`Tokenizer` 插口 |
 | `memgarden.related` | 关联读取纯函数 `one_hop`（挂了 Store 用 `MountedGarden.related`） |
 | `memgarden.surfaces` | SDK / JSON Lines / DSH 各自接通的能力（`surface_capabilities()`） |
+| `memgarden.conformance` | 写入路径共用验收场景：宿主实现 `Host` 适配器，在自己真实的写读路径上跑 `run_all`；`ReferenceHost` 是 MountedGarden + 官方 Store 的参考实现（见 §6） |
 
 分批导入的会话对象 `ImportSession` / `ImportBatch` / `ImportBatchResult` 从顶层导出。Dream 带正文渲染的预算是 `MaintenanceRequest` 的 `cards_limit` / `cards_budget_chars` / `card_body_chars` / `card_summary_chars` 字段；渲染函数 `prompts.dream.render_dream_cards` 本身不是公开合同，宿主走 `maintenance_session` / `run_maintenance` 就会用到它。请求对象上宿主直接设置的字段和默认值同样由快照测试钉住。
 
@@ -239,6 +240,26 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 后加的两个 Maintenance 能力默认 false，外部 Store 须主动实现和声明。相同幂等键和内容重放不能重复写；同键不同内容报冲突；CAS 冲突必须重读重算。继承的旧 SQLite 回执若无 digest，保留兼容的同键命中语义，不能称为完整的历史内容冲突检测。
 
 复用 [共享 Store 契约测试](../tests/test_store_contract.py)，并为真实外部数据库补事务、重启、并发和隔离测试。能力声明本身不能替代这些证据。
+
+### 共用验收场景（`memgarden.conformance`）
+
+Store 契约测试验的是 `StoragePort` 这一层。**不走 MountedGarden、写入用自己执行器的宿主**（io 就是这种接法）过不了、也不该只拿它当证据：内置 Store 通过了幂等、删除、CAS，不代表宿主那条路也满足。`memgarden.conformance` 把共同业务语义写成 22 个可运行场景，宿主实现一个 `Host` 适配器（add / patch / supersede / archive / delete / observe、Capture 提交与进度、`inspect` 存储真相，以及 fetch / index / search / recall / related / history 六条产品读路径）后，在真实数据库上 `run_all`：
+
+| 场景组 | 断言的语义 |
+|---|---|
+| `add.*`、`order.occurred_at` | 字段原样读回；created_at / updated_at 是带时区的同一写入时刻；自带 id 撞上已有卡（含历史卡）被拒且原卡不变；同分搜索按 occurred_at 从新到旧，日期与带时区值同轴 |
+| `reads.no_side_effects` | 六条读路径都不刷新 created_at / updated_at / occurred_at |
+| `patch.*` | 修改后只有一个当前版本；就地修改保留 id 与 created_at；修正正文不改 occurred_at / source / bucket / threads |
+| `supersede.*`、`archive.retires` | 旧卡 superseded 并指向新卡、只在历史读取中出现；并发取代同一目标只成功一次；归档退出召回、历史可见 |
+| `delete.*`、`conflict.*` | 真删后存储与六条读路径都读不到（含关联读取与正文）、重复删除安全、id 不复用；删除已被取代的卡优先；目标已删或已改时，基于旧观察的取代 / 修改报 not_found / conflict，不写继任卡 |
+| `owner.isolation` | 另一 owner 读不到正文，patch / supersede / archive / delete 一律 not_found 且原卡不变 |
+| `idempotency.*` | 同一请求重放不重复写、不改写时间；同一请求身份不同内容报 idempotency_conflict |
+| `receipt.errors`、`content.length` | 规范错误类别（`ERROR_KINDS`），回执不回显正文；超长正文要么完整保存要么明确 invalid |
+| `capture.*` | 判断成功但写库失败回 storage_failed、进度不动、不留半批，重试写一次、重放不重复；没什么可记推进进度且不是错误 |
+
+宿主**有意**不同的地方按条款声明 `Deviation("by_design", 理由)`，已知缺陷声明 `Deviation("bug", 理由)`。结果只有四种：`pass`、`deviation`、`bug`、`fail`；未声明的失败和「声明了但其实已经通过」都是 `fail`，所以声明清单只会变短。`ReferenceHost`（MountedGarden + SqliteStore / InMemoryStore）零声明通过全部场景，`tests/test_conformance.py` 另用一组各破坏一条语义的坏宿主证明每组场景都会红。
+
+范围：v1 不含 Dream 写回场景（账本与卡改动的原子性由 `test_maintenance_reaches_the_store.py` 覆盖），不含加解密，不调模型。场景证明的是写库与读路径语义，不证明检索质量。
 
 ## 7. 导入、分页和规模
 
