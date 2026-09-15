@@ -105,7 +105,10 @@ class Client {
 
   close() {
     this.closed = true
-    try { this.child?.kill() } catch { /* 已经没了就算了 */ }
+    // 🔴 没有 pid 就不 kill。spawn 失败（路径不存在）而 error 事件还没派发时，
+    // Node 的 handle 仍在、pid 是 0，kill() 落到 kill(0, SIGTERM) ——
+    // 杀掉的是**宿主自己所在的整个进程组**。
+    try { if (this.child?.pid) this.child.kill() } catch { /* 已经没了就算了 */ }
     this.failAll('service_closed', 'plugin disposed')
   }
 

@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -427,6 +427,41 @@ async function finishErrorStillPropagatesWithoutFeedingOrClearingOutbox() {
   rmSync(dir, { recursive: true, force: true })
 }
 
+/**
+ * spawn 失败（服务路径不存在）后立刻 dispose 时，Node 的 child 还没收到
+ * error 事件、pid 为 0。以前 close() 照样 kill()，落到 kill(0, SIGTERM)，
+ * 把宿主所在的整个进程组杀掉。场景放进独立进程组里跑，免得误杀测试本身。
+ */
+async function disposeRightAfterFailedSpawnDoesNotSignalHostGroup() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-kill-'))
+  const script = `
+    const { apply } = await import(${JSON.stringify(pathToFileURL(PLUGIN).href)})
+    const hooks = new Map()
+    apply({ tools: { register() {} }, llm: {}, on(n, f) { hooks.set(n, f) } }, {
+      bin: ${JSON.stringify(path.join(dir, 'no-such-memgarden'))}, storage: 'ignored',
+      tenant: 'tenant-kill', memoryOwner: 'owner-kill',
+      stateDir: ${JSON.stringify(path.join(dir, 'state'))},
+    })
+    await hooks.get('dispose')()
+    await new Promise((r) => setTimeout(r, 300))
+    console.log('HOST_STILL_ALIVE')
+  `
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    detached: true, stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let out = ''
+  child.stdout.on('data', (c) => { out += c })
+  child.stderr.on('data', () => {})
+  const [code, signal] = await new Promise((resolve) => {
+    child.on('exit', (c, s) => resolve([c, s]))
+  })
+  assert.equal(signal, null, '宿主进程被信号杀掉: ' + signal)
+  assert.equal(code, 0)
+  assert.ok(out.includes('HOST_STILL_ALIVE'))
+  rmSync(dir, { recursive: true, force: true })
+}
+
+await disposeRightAfterFailedSpawnDoesNotSignalHostGroup()
 await successfulTurnGoesThroughAdapter()
 await recoveryKeepsFailedReceipt()
 await actualServiceAlsoClosesTheHostDrivenLoop()
