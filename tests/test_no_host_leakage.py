@@ -19,6 +19,10 @@ BANNED = {
     r"_memory_inner_from_action": "io 的内部函数名",
     r"io_cli": "io 的内部工具名",
     r"\bADMIN_KEY\b": "凭据名",
+    # 私下评审文档的章节号（读者拿不到那份文档），以及宿主私有仓库里的文件路径。
+    r"(?i)seven(?:floor)?\s*(?:\d{4}-\d{2}-\d{2}\s*)?§": "私有评审文档引用",
+    r"backend/memory_bm25\.py": "宿主私有仓库路径",
+    r"_MEMORY_CARDS_LIMIT|_DREAM_CARDS_MAX_CHARS": "宿主内部常量名",
 }
 
 

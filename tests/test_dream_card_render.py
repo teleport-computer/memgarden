@@ -221,7 +221,12 @@ def test_session_and_built_in_loop_agree_with_bodies_and_truncation():
     assert prompts == built_model.prompts
     assert (driven.mutations, driven.consolidations, driven.trace, driven.error) == (
         built.mutations, built.consolidations, built.trace, built.error)
-    assert built.error is None and built.mutations
+    # 两张目标卡都被截断了：提示词让模型别动它们，模型动了 —— 出口硬拦，两条路一致。
+    assert built.error is None and built.mutations == [] and built.consolidations == []
+    assert built.trace["dropped_truncated_targets"] == 1
+    untouched = MaintenanceRequest(cards=cards, locale="zh-Hans")  # 默认预算，全文渲染
+    whole = GardenComponent(model=Recorder(reply)).run_maintenance(untouched)
+    assert whole.error is None and whole.mutations
 
 
 def test_parsing_is_unchanged_by_the_new_rendering():

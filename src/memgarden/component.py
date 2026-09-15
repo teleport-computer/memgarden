@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .contracts import (
     Actor,
@@ -188,7 +188,7 @@ class _CapturePlan:
 
         cards_text = request.cards
         if request.existing_cards is not None:
-            existing = [dict(c) for c in request.existing_cards if isinstance(c, dict)]
+            existing = [dict(c) for c in request.existing_cards if isinstance(c, Mapping)]
             # 校验用**全部**现有卡，不是渲染进索引的那几张：一张没挤进索引、但
             # 模型从对话里看到了 id 的真卡，不该被当成编造的打回。
             self.known_ids = frozenset(
@@ -201,10 +201,13 @@ class _CapturePlan:
                 from .importing import bm25_index_ranker, select_index_cards
                 from .rendering import render_card_index_budgeted
 
+                # always_rank：卡数没超过张数上限时也按相关性排 —— 字数预算照样可能从末尾截，
+                # 不排的话截掉的是宿主列表末尾的卡，而不是最不相关的。
                 picked = select_index_cards(
                     existing, request.window or "",
                     limit=request.index_cards_limit,
                     ranker=bm25_index_ranker(owner._tokenizer),
+                    always_rank=True,
                 )
                 cards_text, shown = render_card_index_budgeted(
                     picked,
@@ -541,12 +544,44 @@ class _MaintenancePlan:
             return
         self._stage = "done"
 
+    def _drop_unsafe_targets(self) -> dict:
+        """丢掉指向截断卡、或指向没渲染进提示词的卡的整理建议。
+
+        提示词要求模型不改写 TRUNCATED 的卡 —— 但那只是请求。模型照样把它放进
+        ``card_ids`` 的话，这张卡会被一张只根据前 N 个字写出来的新卡取代，后半截正文
+        随旧卡退休。没渲染进去的卡模型根本没见过正文，同理。所以在出口硬拦：
+        **只丢这一条建议**，同一次整理里别的建议照收。``mutations`` 和 ``consolidations``
+        同步过滤（宿主用哪一个都一样）。
+        """
+        r = self.rendered
+        if r is None or not self.consolidations:
+            return {}
+        rendered, truncated = frozenset(r.rendered_ids), frozenset(r.truncated_ids)
+        kept, to_truncated, to_unrendered = [], 0, 0
+        for row in self.consolidations:
+            ids = {str(i) for i in row.get("card_ids") or ()}
+            if ids & truncated:
+                to_truncated += 1
+            elif ids - rendered:
+                to_unrendered += 1
+            else:
+                kept.append(row)
+        if not (to_truncated or to_unrendered):
+            return {}
+        self.consolidations = kept
+        self.owner._step(Step(kind="dropped", purpose="dream", attempt=self.calls,
+                              detail={"why": "unsafe_target", "truncated": to_truncated,
+                                      "unrendered": to_unrendered}))
+        return {"dropped_truncated_targets": to_truncated,
+                "dropped_unrendered_targets": to_unrendered}
+
     def finish(self) -> MaintenanceResult:
+        dropped = {} if self.err else self._drop_unsafe_targets()
         trace = {"reason": self.verdict.reason, "new_cards": self.verdict.new_cards,
                  "consolidations": len(self.consolidations),
                  "signature": self.snapshot.signature,
                  "seed_card_count": self.snapshot.seed_card_count,
-                 **self._render_trace()}
+                 **self._render_trace(), **dropped}
         self.owner._step(Step(kind="done", purpose="dream", attempt=self.calls,
                               detail={"consolidations": len(self.consolidations),
                                       "retried": self.retried, "error": self.err}))
@@ -821,6 +856,7 @@ class GardenComponent:
         existing_cards: Sequence[dict] | None = None,
         owner_key: str = "",
         index_ranker: Any = None,
+        tenant: str = "",
     ) -> "ImportSession":
         """开一次由**宿主驱动**的分批历史导入。见 :mod:`memgarden.importing`。
 
@@ -830,6 +866,9 @@ class GardenComponent:
         ``existing_cards``：宿主库里这个人**已有的、可见的**卡（明文，带 ``id``）。
         ``owner_key``：绑定进续传指纹的主体标识（默认 ``actor.user_id``）——
         同一份进度不能拿到另一个人的导入上续传。
+        ``tenant``：多租户宿主的租户标识，同样进指纹（同一个 owner_key 在两个租户下的进度
+        不能互相续传）。默认空串，指纹与不传时逐字节相同，老进度照常续传。
+        与 ``MountedGarden.import_session`` 绑的是同一对 ``(tenant, owner)``。
         ``index_ranker``：可选，``ranker(batch_text, cards) -> 卡 id 列表``，
         用宿主自己的检索挑「已有记忆索引」。不给就用 ``retrieval.rank``
         （关掉门槛，分词器用本组件的 ``tokenizer``），见 :func:`memgarden.importing.bm25_index_ranker`。
@@ -838,7 +877,7 @@ class GardenComponent:
 
         return ImportSession(
             self, request, progress=progress, existing_cards=existing_cards,
-            binding=("", str(owner_key or request.actor.user_id or "")),
+            binding=(str(tenant or ""), str(owner_key or request.actor.user_id or "")),
             ranker=index_ranker)
 
     def write_one(self, request: CuratedWriteRequest) -> CaptureResult:
@@ -1046,8 +1085,10 @@ class GardenComponent:
         """
         from .retrieval import rank
 
-        result = rank(request.query, request.candidates, tokenizer=self._tokenizer,
-                      limit=max(0, int(request.limit)))
+        # limit=None 当默认值（20）处理：wire 的 null、宿主从可选配置透传的 None 都不该炸成 TypeError。
+        limit = SearchRequest.limit if request.limit is None else max(0, int(request.limit))
+        # 没有 id 的卡由 rank 丢掉 —— 结果里不会出现空 id（回填不了，也引用不了）。
+        result = rank(request.query, request.candidates, tokenizer=self._tokenizer, limit=limit)
         return SearchResult(
             record_ids=result.ids,
             hits=[{"id": h.id, "score": h.score, "matched": list(h.matched),

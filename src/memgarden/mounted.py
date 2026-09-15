@@ -5,7 +5,7 @@
     GardenComponent   只判断，不碰存储。内核可被独立测试、可被替换的前提。
     MountedGarden     把 StoragePort 接上，负责 load → 判断 → 原子写回 → 回执。
 
-为什么要有这一层（sevenfloor 2026-09-02 §3.1）：只有 ``GardenComponent`` 的话，
+为什么要有这一层：只有 ``GardenComponent`` 的话，
 **每个接入方都得自己编排** tenant、actor、allowed mounts、load、生命周期过滤、
 mutation 执行、CAS、幂等键、整理账本、工具搜索、失败后重读重算。那不叫插件，
 叫零件——而且这些语义写错了不会报错，只会悄悄丢记忆。
@@ -21,6 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
+from . import timestamps
 from .component import GardenComponent
 from .contracts import (
     Actor,
@@ -253,6 +254,11 @@ class MountedGarden:
             cards=request.cards or render_card_index(cards),
             buckets=request.buckets or render_buckets(cards),
             threads=request.threads or render_threads(cards),
+            # Store 是事实源：merge/supersede 的 target_id 只许指向这次快照里的卡。
+            # 宿主另给的 existing_cards 一律换成快照 —— 两份来源会让「索引里看到的」和
+            # 「校验认的」对不上；CAS 冲突重算时这里重新读，校验名单跟着新快照走。
+            # 模型编出来的 id 由组件重问、仍不对只丢那一张，同窗口的好卡照常落库。
+            existing_cards=cards,
         )
         return prepared, snapshot.revision
 
@@ -420,6 +426,16 @@ class MountedGarden:
             if not c.get("archived") and not c.get("superseded_by")
             and str(c.get("lifecycle") or "active") == "active"
         ]
+        # Dream 按 ``cards`` 的顺序渲染、预算满了就停（默认 60 张）。Store 读出来的顺序
+        # 不保证任何东西（SQLite 的 SELECT 没有 ORDER BY，实际是插入顺序），于是卡一多，
+        # 提示词里永远是最老的 60 张 —— 刚写进来、正是它们触发了这次整理的新卡模型看不到，
+        # 水位线和签名却照样推进，这批新卡再也不会被整理。
+        #
+        # 取**新的在前**（created_at 倒序，同时刻按 id 升序）：触发整理的正是水位线之后的
+        # 新卡，按时间取不需要知道「哪些是新的」（真删会让计数和具体卡对不上）。代价是
+        # 超出预算的老卡这次看不到 —— 预算本来就只能装下一部分，宁可让新卡和最近的邻居同框。
+        active.sort(key=lambda c: str(c.get("id") or ""))
+        active.sort(key=lambda c: timestamps.sort_key(c.get("created_at")), reverse=True)
         ledger = self.maintenance_ledger(scope, mount=mount)
         generations = getattr(snapshot, "seed_generations", {}) or {}
         seed_rows = sum(
@@ -587,9 +603,8 @@ class MountedGarden:
 
     # -- 历史导入 ---------------------------------------------------------- #
 
-    #: 一批多少字。够模型一次读完，也够小到中断时不心疼。
-    #: （保留作兼容别名；真正的默认值在 ``importing.IMPORT_BATCH_CHARS``，
-    #: 请求里的 ``batch_chars`` 可以覆盖。）
+    #: 一批多少字。**只读的兼容别名**：导入会话不读它，子类改写这个属性不改变批次大小。
+    #: 默认值在 ``importing.IMPORT_BATCH_CHARS``；要换批次大小传 ``ImportRequest.batch_chars``。
     IMPORT_BATCH_CHARS = 6000
 
     def import_history(self, scope: Scope, request: Any, *,
@@ -618,7 +633,10 @@ class MountedGarden:
 
         ran = 0
         while max_batches is None or ran < int(max_batches):
-            if session.next_batch() is None:
+            # 只看游标处还有没有批次，不在这里取批：取批会按旧索引白挑一遍卡，
+            # prepare_import_batch 重读库后还要再挑一次。整次上限满了由它记下来。
+            session._consume_trailing()
+            if session._expected() is None:
                 break
             ran += 1
             if self._import_one_batch(scope, session):
@@ -664,9 +682,12 @@ class MountedGarden:
         要出现在这一批的提示词里（跨批去重靠它）。候选批次不读库，版本为 None。
         返回 ``(None, None)`` = 没有可跑的批次了。
         """
-        batch = session.next_batch()
-        if batch is None or batch.stage == "candidates":
-            return batch, None
+        session._consume_trailing()
+        expected = session._expected()
+        if expected is None or expected[0] == "candidates":
+            # 不写卡的批次（或没有批次）不读库。直接取批 —— 先取一次再带着库里的卡取第二次
+            # 会白算一遍索引挑卡（每批一次 BM25）。
+            return session.next_batch(), None
         mount = scope.check(getattr(session.request, "mount", None) or DEFAULT_MOUNT)
         snapshot = self._snapshot(scope)
         cards = [c for c in self._visible(scope, snapshot.cards)
@@ -680,6 +701,9 @@ class MountedGarden:
         - 判断失败（``outcome.error``）：记进 ``progress.failed``，游标不动；
         - 候选批次、没什么可记：不写库，游标前进；
         - 写库失败：``session.fail``，游标不动；
+        - ``idempotency_conflict``：同一个批次键之前已经写进去过（崩在写库之后、存进度
+          之前，续传时模型回复又变了）—— 当作已写入，``session.commit_applied``，游标前进，
+          ``skipped`` 记 ``already_applied``，回执 ``reason="already_applied"``、不带 error；
         - ``revision_conflict``：**进度不动、也不记失败** —— 调用方重新
           :meth:`prepare_import_batch` 重读重算（重算次数由调用方封顶），
           放弃时自己调 ``session.fail(outcome, "revision_conflict")``。
@@ -701,6 +725,12 @@ class MountedGarden:
         )
         if receipt.error == "revision_conflict":
             return receipt
+        if receipt.error == "idempotency_conflict":
+            # 批次键 = 导入语义 + 批次位置 + 这批材料的摘要，不含模型回复。同键不同内容只会是
+            # 「上次写进去了、进度没存下来」：再写一份是重复，报失败则游标永远卡在这一批。
+            session.commit_applied(outcome)
+            return OperationReceipt(reason="already_applied", trace={
+                **trace, "idempotency_conflict": True})
         if receipt.error:
             session.fail(outcome, receipt.error)
         elif not receipt.written:

@@ -508,7 +508,7 @@ class SearchRequest:
     """「用户/模型明确要找这件事」。和 :class:`ContextRequest` 分开是刻意的。
 
     自动想起可以有背景打底（最近卡、转折点），主动搜索不行：用户明说要找
-    某件事时，拿「最近写的几张」凑数等于答非所问（Seven 2026-09-14 §4.2）。
+    某件事时，拿「最近写的几张」凑数等于答非所问。
     """
 
     query: str = ""
@@ -554,7 +554,7 @@ class BrowseItem:
     一个空页面，那看起来像数据丢了。
 
     ⚠️ 这是**展示协议**，不是要求 Garden 删掉 bucket/thread。
-    Garden 原生展示照常用它们（sevenfloor §10）。
+    Garden 原生展示照常用它们。
     """
 
     record_ref: str          # 必需：稳定 id，宿主据此回填内容

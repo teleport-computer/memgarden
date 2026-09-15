@@ -2,18 +2,18 @@
 
 ## 为什么是 BM25、为什么分词器是插口
 
-宿主 io 线上跑着两套排序：自动想起用内核的相关性打分（``scoring.relevance``），
-主动搜索用 io 自己的 BM25 + jieba。同一个问题两条路给出不同答案，trace 里也对不上。
+之前自动想起用内核的相关性打分（``scoring.relevance``），主动搜索在宿主那边另跑一套
+BM25。同一个问题两条路给出不同答案，trace 里也对不上。
 ``evals/retrieval`` 的基线显示 BM25 的召回全面更好（recall@5 0.90 vs 0.67），
 编号、短查询、线程类尤其明显，所以统一到 BM25。
 
-数学逐行移植自 io ``backend/memory_bm25.py``（Robertson IDF 取 ``log1p``、查询里
-重复的 token 只算一次、同分按 ``occurred_at`` 新的在前再按 id）。**给同一个分词器，
-分数与排序逐项相同** —— ``tests/test_retrieval_rank.py`` 用一份照抄的参考实现对拍。
+数学是标准 BM25（Robertson IDF 取 ``log1p``、查询里重复的 token 只算一次、同分按
+``occurred_at`` 新的在前再按 id），与一个已在线上运行的宿主实现逐项一致 ——
+``tests/test_retrieval_rank.py`` 用一份冻结的参考实现对拍，给同一个分词器分数逐位相同。
 
 分词是唯一依赖语言资源的一步。内核只依赖标准库，所以分词器由宿主注入
-（io 注入 jieba）；不注入时用 :class:`DefaultTokenizer`：整段 ASCII 标识符 +
-CJK 单字与相邻二字。它不承诺和 jieba 等价，质量以 ``evals/retrieval`` 的数字为准。
+（例如注入 jieba）；不注入时用 :class:`DefaultTokenizer`：整段 ASCII 标识符、
+按 Unicode 字母切的词、CJK 单字与相邻二字。它不承诺和 jieba 等价，质量以 ``evals/retrieval`` 的数字为准。
 
 ## 缓存只活在一次调用里
 
@@ -27,9 +27,11 @@ CJK 单字与相邻二字。它不承诺和 jieba 等价，质量以 ``evals/ret
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import math
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence, runtime_checkable
@@ -39,17 +41,17 @@ from .prompts.recall_fields import retrieval_cues
 
 #: 排序算法的版本。换公式、换默认停用词表、换默认分数下限都要改它 ——
 #: 宿主靠它判断两条路是不是同一把尺子、线上 trace 属于哪一版。
-RANKING_VERSION = "memgarden-bm25-v1"
+RANKING_VERSION = "memgarden-bm25-v2"
 
 K1 = 1.2
 B = 0.75
 
-#: 整段 ASCII 标识符：``np-4286``、``v2.3.1``、``k/d``、``x100v``。沿用 io 的写法，
-#: 编号不被切成碎片，也不会被当成更长编号的子串命中。
-_ASCII_TOKEN = re.compile(r"([a-z0-9]+(?:[-_./][a-z0-9]+)*)")
 #: 汉字（含扩展 A、兼容区）、假名、谚文。这些文字不用空格分词，按字处理。
 _CJK_CHAR = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af"
-_SEGMENT = re.compile(rf"([{_CJK_CHAR}]+)|([^\W_{_CJK_CHAR}]+)")
+#: 标识符里的连接符：``np-4286``、``v2.3.1``、``k/d``、``foo_bar``。
+_JOINER = re.compile(r"([-_./])")
+#: CJK 连续段 | 字母数字连成、可由连接符串起来的词。
+_SEGMENT = re.compile(rf"([{_CJK_CHAR}]+)|([^\W_{_CJK_CHAR}]+(?:[-_./][^\W_{_CJK_CHAR}]+)*)")
 #: 纯语法助词。和它们相邻的二字（「的车」「咪的」「么事」）几乎都是跨词边界的噪声，
 #: 不生成；助词本身的单字仍然生成（由停用词表决定查询里要不要它）。
 #: 评测里去掉这些二字不改变召回，但让门槛在更宽的参数区间内稳定（见 MG-3 说明）。
@@ -97,6 +99,16 @@ DEFAULT_STRONG_EVIDENCE = 1.25
 #: 且 8 这个值两侧都窄（6 或 10 都会让某一组退步）。要不要为自动想起开它是宿主的产品取舍，
 #: 数字见 ``evals/retrieval/README.md``。
 DEFAULT_STRONG_EVIDENCE_TERMS: int | None = None
+#: 覆盖率的 IDF 至少按这么多张卡的候选池算（多出来的是「不含任何查询词」的虚拟卡）。
+#: **只影响覆盖率这道闸**：分数、排序、强证据闸都照真实候选数算。候选池不小于它时没有任何变化。
+#:
+#: 为什么要有：覆盖率 = 命中词的 IDF / 查询全部词的 IDF，而花园里一张都没有的词拿到的是最大 IDF。
+#: 池子很小时这两者差得离谱 —— 1 张卡时命中词 IDF 0.288、没命中的词 1.386，
+#: 于是「我平时喝什么咖啡」在只有一张「喜欢喝美式咖啡，不加糖」的花园里覆盖率 0.12，被挡成空。
+#: 新用户的花园恰恰就是这么小。按至少 F 张卡算，命中词和缺失词的 IDF 比值回到大花园里的量级。
+#:
+#: 取值见 ``evals/retrieval/small_pool.py``（README「小花园」）。
+DEFAULT_COVERAGE_POOL_FLOOR = 20
 
 
 class SearchLimitExceeded(RuntimeError):
@@ -116,31 +128,118 @@ class Tokenizer(Protocol):
     def tokenize(self, text: str) -> list[str]: ...
 
 
-class DefaultTokenizer:
-    """零依赖分词：casefold；整段 ASCII 标识符；CJK 单字 + 相邻二字；其余文字按词。
+#: 拉丁字母（ASCII 字母数字 + 带重音的拉丁字母）。重音字母和 ASCII 字母同属一个词，
+#: 不在它们中间切；拉丁字母和别的文字（希腊 ``μ``、西里尔字母）之间照旧切开。
+_LATIN = (r"a-z0-9\u00c0-\u00d6\u00d8-\u00f6\u00f8-\u024f\u1e00-\u1eff"
+          r"\u2c60-\u2c7f\ua720-\ua7ff\uab30-\uab6f")
 
-    单字让「猫」「辣」这种一字查询也能命中；二字让「体检」「医生」比两个单字各自
-    撞上更有分量（二字的 IDF 通常高得多）。和语法助词相邻的二字不生成。
+
+@functools.lru_cache(maxsize=1)
+def _script_pattern() -> "re.Pattern[str]":
+    """词内按文字（拉丁 / 其他）切段，组合附加符号跟着前一个字符走。
+
+    附加符号字符类要扫一遍码表（约 20ms）：第一次遇到含非 ASCII 字母的词时才建，
+    导入模块和纯 ASCII / CJK 文本不付这个代价。
+    """
+    marks = [cp for cp in (*range(0x30000), *range(0xE0100, 0xE01F0))
+             if unicodedata.category(chr(cp))[0] == "M"]
+    spans: list[list[int]] = []
+    for cp in marks:
+        if spans and cp == spans[-1][1] + 1:
+            spans[-1][1] = cp
+        else:
+            spans.append([cp, cp])
+    mark = "".join(f"{re.escape(chr(lo))}-{re.escape(chr(hi))}" for lo, hi in spans)
+    return re.compile(rf"[{_LATIN}][{_LATIN}{mark}]*|[^{_LATIN}{mark}][^{_LATIN}]*|[{mark}]+")
+
+
+def _leading_marks(text: str) -> str:
+    """``text`` 开头连续的组合附加符号（Unicode ``M*`` 类）。"""
+    end = 0
+    while end < len(text) and unicodedata.category(text[end])[0] == "M":
+        end += 1
+    return text[:end]
+
+
+def _segments(folded: str) -> list[tuple[bool, str]]:
+    """（是不是词, 文本）：CJK 连续段，或由字母、数字、组合附加符号连成的词。
+
+    组合附加符号（``é`` 分解写法里的 U+0301、印地语元音符号）在 Python 正则里不算 ``\\w``，
+    正则会在它们处把词劈开。这里把「只隔着附加符号」的相邻词段拼回去，词尾的附加符号也并进词。
+    词与词之间通常隔着空格或标点，只看间隔的第一个字符，几乎不花时间。不挨着词的孤立附加符号丢掉。
+    """
+    items: list[list] = []
+    last_end = 0
+    for match in _SEGMENT.finditer(folded):
+        gap = folded[last_end:match.start()]
+        word = match.group(2)
+        marks = _leading_marks(gap) if items and items[-1][0] else ""
+        if marks:
+            items[-1][1] += marks
+        if word is not None and marks and marks == gap:
+            items[-1][1] += word
+        else:
+            items.append([word is not None, word if word is not None else match.group(1)])
+        last_end = match.end()
+    if items and items[-1][0]:
+        items[-1][1] += _leading_marks(folded[last_end:])
+    return [(is_word, text) for is_word, text in items]
+
+
+def _word_tokens(run: str) -> list[str]:
+    """一个（可能带连接符的）词 → token。
+
+    纯 ASCII 的整段保留（``np-4286``、``v2.3.1``：编号不被切碎，也不会被当成更长编号的子串
+    命中）。含非 ASCII 字符时先按连接符、再按文字（拉丁 / 其他）切段：带重音的拉丁词整词
+    保留（``café``、``müller``、``résumé``），相邻的纯 ASCII 段仍按标识符拼回去
+    （``café-np-4286`` → ``café`` + ``np-4286``，``μmol/l`` → ``μ`` + ``mol/l``）。
+    """
+    if run.isascii():
+        return [run]
+    script = _script_pattern()
+    parts = _JOINER.split(run)
+    out: list[str] = []
+    for index in range(0, len(parts), 2):
+        joiner = parts[index - 1] if index else ""
+        for position, piece in enumerate(script.findall(parts[index])):
+            if (position == 0 and joiner and out and out[-1].isascii()
+                    and piece.isascii()):
+                out[-1] += joiner + piece
+            else:
+                out.append(piece)
+    return out
+
+
+class DefaultTokenizer:
+    """零依赖分词：NFC + casefold；词按 Unicode 字母切分；CJK 单字 + 相邻二字。
+
+    - 词：字母、数字和组合附加符号连成的一段不拆开。纯 ASCII 的段连同 ``-_./`` 连接符
+      整段保留为一个标识符；含非 ASCII 字母的词（``café``、``Müller``）同样整词保留。
+    - CJK：单字让「猫」「辣」这种一字查询也能命中；二字让「体检」「医生」比两个单字各自
+      撞上更有分量（二字的 IDF 通常高得多）。和语法助词相邻的二字不生成。
+
+    ``mg-default-v1`` 先切 ASCII 标识符再处理其余文字，重音拉丁词会从 ASCII 与非 ASCII 的
+    交界处劈开（``café`` → ``caf`` + ``é``，``résumé`` → ``r`` + ``sum`` + ``é``，
+    ``Müller`` → ``m`` + ``ü`` + ``ller``）：碎片互相撞上（「é」出现在几乎每个法语词里），
+    法语、德语查询得到不相干的命中。v2 按整词切；纯 ASCII、CJK 文本的 token 与 v1 相同
+    （例外：NFC 会把 CJK 兼容表意字 U+F900–U+FAFF 归一成对应的统一表意字）。
     """
 
-    name = "mg-default-v1"
+    name = "mg-default-v2"
 
     def tokenize(self, text: str) -> list[str]:
         out: list[str] = []
-        for index, part in enumerate(_ASCII_TOKEN.split(str(text or "").casefold())):
-            if not part:
+        folded = str(text or "")
+        if not folded.isascii():
+            folded = unicodedata.normalize("NFC", folded)
+        folded = folded.casefold()
+        for is_word, run in _segments(folded):
+            if is_word:
+                out.extend(_word_tokens(run))
                 continue
-            if index % 2:
-                out.append(part)
-                continue
-            for match in _SEGMENT.finditer(part):
-                run, word = match.group(1), match.group(2)
-                if word:
-                    out.append(word)
-                    continue
-                out.extend(run)
-                out.extend(run[i:i + 2] for i in range(len(run) - 1)
-                           if run[i] not in _PARTICLES and run[i + 1] not in _PARTICLES)
+            out.extend(run)
+            out.extend(run[i:i + 2] for i in range(len(run) - 1)
+                       if run[i] not in _PARTICLES and run[i + 1] not in _PARTICLES)
         return out
 
 
@@ -240,6 +339,7 @@ def rank(
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     strong_evidence: float = DEFAULT_STRONG_EVIDENCE,
     strong_evidence_terms: int | None = DEFAULT_STRONG_EVIDENCE_TERMS,
+    coverage_pool_floor: int = DEFAULT_COVERAGE_POOL_FLOOR,
     k1: float = K1,
     b: float = B,
     max_cards: int | None = None,
@@ -263,19 +363,29 @@ def rank(
        给了 ``strong_evidence_terms`` 且查询超过这么多个 token 时，这道闸再乘
        √(token 数 / terms)（默认不放大，取舍见 :data:`DEFAULT_STRONG_EVIDENCE_TERMS`）。
 
+    覆盖率的 IDF 至少按 ``coverage_pool_floor`` 张卡算（小花园里缺失词的 IDF 不会压倒命中词，
+    见 :data:`DEFAULT_COVERAGE_POOL_FLOOR`）；传 1 即按真实候选数算。
+
     ``stopwords`` 默认 :data:`DEFAULT_STOPWORDS`，只从**查询**里去掉（卡片侧统计不变，
     换停用词表不改变其余词的分数）。无命中返回空 ``hits``。
 
-    要逐项复现 io ``memory_bm25`` 的旧行为：``stopwords=frozenset(), min_coverage=0``。
+    要逐项复现旧的无门槛 BM25：``stopwords=frozenset(), min_coverage=0``。
+
+    没有 ``id`` 的卡不参与打分、也不进 IDF 统计（与 :func:`select_context` 一致）——
+    命中一张没有 id 的卡，宿主拿到的是一个空 id，回填不了也引用不了。
 
     上限（``max_cards`` / ``max_text_bytes``）超了抛 :class:`SearchLimitExceeded`，
     即使查询为空也检查 —— 资源边界不能因为输入碰巧为空就不生效。
     """
+    if max_cards is not None and len(candidates) > max_cards:
+        raise SearchLimitExceeded("cards")
+    pool = [c for c in candidates if str(c.get("id") or "")]
     scored, rejected, version, trace = _evaluate(
-        query, candidates, tokenizer=tokenizer, text_of=text_of, min_score=min_score,
+        query, pool, tokenizer=tokenizer, text_of=text_of, min_score=min_score,
         stopwords=stopwords, min_coverage=min_coverage, strong_evidence=strong_evidence,
-        strong_evidence_terms=strong_evidence_terms,
+        strong_evidence_terms=strong_evidence_terms, coverage_pool_floor=coverage_pool_floor,
         k1=k1, b=b, max_cards=max_cards, max_text_bytes=max_text_bytes)
+    trace = {**trace, "candidates": len(candidates), "without_id": len(candidates) - len(pool)}
     if limit is not None:
         scored = scored[:max(0, int(limit))]
     hits = [row.hit for row in scored]
@@ -291,7 +401,8 @@ class _Row:
 
 
 def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, min_coverage,
-              strong_evidence, strong_evidence_terms, k1, b, max_cards, max_text_bytes):
+              strong_evidence, strong_evidence_terms, coverage_pool_floor, k1, b, max_cards,
+              max_text_bytes):
     """打分 + 过闸，返回（通过的行按序、被闸挡下的行按序、版本号、trace）。
 
     ``rank`` 和 ``select_context`` 共用这一份 —— 两条路是**同一把尺子**的结构保证。
@@ -305,6 +416,9 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
             isinstance(strong_evidence_terms, bool) or not isinstance(strong_evidence_terms, int)
             or strong_evidence_terms < 1):
         raise ValueError("strong_evidence_terms must be a positive int or None")
+    if (isinstance(coverage_pool_floor, bool) or not isinstance(coverage_pool_floor, int)
+            or coverage_pool_floor < 1):
+        raise ValueError("coverage_pool_floor must be a positive int")
     if max_cards is not None and len(candidates) > max_cards:
         raise SearchLimitExceeded("cards")
 
@@ -321,6 +435,8 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
         config["min_coverage"], config["strong_evidence"] = min_coverage, strong_evidence
     if strong_evidence_terms != DEFAULT_STRONG_EVIDENCE_TERMS:
         config["strong_evidence_terms"] = strong_evidence_terms
+    if coverage_pool_floor != DEFAULT_COVERAGE_POOL_FLOOR:
+        config["coverage_pool_floor"] = coverage_pool_floor
     if (k1, b) != (K1, B):
         config["k1"], config["b"] = k1, b
     version = _version(str(getattr(tok, "name", "") or type(tok).__name__), config)
@@ -356,7 +472,11 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
     if not corpus.total_length:
         return [], [], version, {**trace, **empty}
     idf = {term: _idf(corpus.documents, frequency[term]) for term in query_terms}
-    query_mass = sum(idf.values())
+    # 覆盖率用的 IDF：候选池按至少 coverage_pool_floor 张算。池子够大时就是 idf 本身。
+    pool_size = max(corpus.documents, coverage_pool_floor)
+    coverage_idf = (idf if pool_size == corpus.documents else
+                    {term: _idf(pool_size, frequency[term]) for term in query_terms})
+    query_mass = sum(coverage_idf.values())
     evidence_scale = 1.0
     if strong_evidence_terms is not None and len(query_terms) > strong_evidence_terms:
         evidence_scale = math.sqrt(len(query_terms) / strong_evidence_terms)
@@ -371,7 +491,8 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
         if value <= 0:
             continue
         matched = tuple(term for term in query_terms if term in terms)
-        coverage = sum(idf[term] for term in matched) / query_mass if query_mass else 0.0
+        coverage = (sum(coverage_idf[term] for term in matched) / query_mass
+                    if query_mass else 0.0)
         hit = Hit(id=str(card.get("id") or ""), score=value, matched=matched,
                   coverage=round(coverage, 6))
         if value <= min_score:
@@ -414,6 +535,7 @@ def select_context(
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     strong_evidence: float = DEFAULT_STRONG_EVIDENCE,
     strong_evidence_terms: int | None = DEFAULT_STRONG_EVIDENCE_TERMS,
+    coverage_pool_floor: int = DEFAULT_COVERAGE_POOL_FLOOR,
     max_cards: int | None = None,
     max_text_bytes: int | None = None,
 ) -> tuple[list[dict], dict]:
@@ -440,11 +562,14 @@ def select_context(
     - 没有 ``id`` 的卡不参与打分，也不进 IDF 统计。
     """
     cap = max(0, int(cap))
+    if max_cards is not None and len(candidates) > max_cards:
+        raise SearchLimitExceeded("cards")
     pool = [c for c in candidates if str(c.get("id") or "")]
     passed, rejected, version, rank_trace = _evaluate(
         query, pool, tokenizer=tokenizer, text_of=text_of, min_score=0.0,
         stopwords=stopwords, min_coverage=min_coverage, strong_evidence=strong_evidence,
-        strong_evidence_terms=strong_evidence_terms, k1=K1, b=B, max_cards=max_cards, max_text_bytes=max_text_bytes)
+        strong_evidence_terms=strong_evidence_terms, coverage_pool_floor=coverage_pool_floor,
+        k1=K1, b=B, max_cards=max_cards, max_text_bytes=max_text_bytes)
 
     chosen: list[tuple[_Row, str]] = []
     seen: set[str] = set()
@@ -518,7 +643,7 @@ def _neg_id(card_id: str) -> tuple[int, ...]:
 
 __all__ = [
     "RANKING_VERSION", "DEFAULT_STOPWORDS", "DEFAULT_MIN_COVERAGE", "DEFAULT_STRONG_EVIDENCE",
-    "DEFAULT_STRONG_EVIDENCE_TERMS",
+    "DEFAULT_STRONG_EVIDENCE_TERMS", "DEFAULT_COVERAGE_POOL_FLOOR",
     "Tokenizer", "DefaultTokenizer",
     "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
     "DEFAULT_QUOTAS", "select_context",

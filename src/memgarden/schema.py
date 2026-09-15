@@ -1,4 +1,4 @@
-"""JSON Schema —— 给非 Python 的 Runtime 用（sevenfloor 2026-09-02 §3.8）。
+"""JSON Schema —— 给非 Python 的 Runtime 用。
 
 ## 为什么需要它
 
@@ -523,6 +523,8 @@ def _import_request_properties() -> dict:
         "max_cards": {"type": "integer", "minimum": 1, "default": 50},
         "policy": _OPT_STR, "mount": _OPT_STR,
         "ai_name": _OPT_STR, "user_name": _OPT_STR, "idempotency_key": _OPT_STR,
+        # 称呼规则，原样进提示词（语义同 ImportRequest.naming_rule）；不传用内核默认规则
+        "naming_rule": {"type": ["string", "null"]},
         # 宿主预切的批次（给了就让 material 为空串）
         "batches": {"type": "array", "items": {
             "type": "object", "required": ["text"],
@@ -553,6 +555,8 @@ def _maintenance_request_properties() -> dict:
         "scope": _scope_ref(), "locale": _STR, "mount": _OPT_STR,
         "ai_name": _OPT_STR, "user_name": _OPT_STR,
         "recent_conversations": _OPT_STR, "idempotency_key": _OPT_STR,
+        # 称呼规则，原样进 Dream 提示词（语义同 MaintenanceRequest.naming_rule）；不传用内核默认规则
+        "naming_rule": {"type": ["string", "null"]},
         "cards_limit": {"type": "integer", "minimum": 1, "default": 60},
         "cards_budget_chars": {"type": "integer", "minimum": 1, "default": 60_000},
         "card_body_chars": {"type": "integer", "minimum": 1, "default": 5_000},
@@ -796,9 +800,13 @@ def method_schemas() -> dict[str, Any]:
             "request": {"type": "object",
                         "required": ["session_id", "record_ids"],
                         "properties": {"session_id": _STR,
-                                       # 与 needs_commit 的 batch.mutations 一一对应
+                                       # 与 needs_commit 的 batch.mutations 一一对应；
+                                       # already_applied 时是写入记录里这个批次键的 id（不知道就 []）
                                        "record_ids": {"type": "array",
-                                                      "items": _STR}},
+                                                      "items": _STR},
+                                       # 宿主的写入记录里已有 batch.idempotency_key：只推进游标
+                                       "already_applied": {"type": "boolean",
+                                                           "default": False}},
                         "additionalProperties": True},
             "response": _ok_envelope(import_state),
         },

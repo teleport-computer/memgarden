@@ -156,3 +156,13 @@ def test_relevance_stage_legacy_scorer_still_available_and_unknown_is_rejected()
     assert legacy.card_ids and all(p.reason != "bm25_match" for p in legacy.picks)
     with pytest.raises(ValueError):
         RelevanceStage(scorer="vector").pick(garden, "咖啡", budget=3)
+
+
+@pytest.mark.parametrize("knob", [{"any_score": True}, {"strong_min": 0.5}, {"medium_min": 0.2},
+                                  {"excluded_reasons": ("generic",)}])
+def test_legacy_thresholds_with_bm25_are_rejected_not_silently_ignored(knob):
+    with pytest.raises(ValueError, match="scorer='legacy'"):
+        Chain(stages=(RelevanceStage(limit=3, **knob),))
+    # 显式 legacy 照常可用；bm25 不带旧旋钮照常可用
+    Chain(stages=(RelevanceStage(limit=3, scorer="legacy", **knob),)).select(_garden(), "咖啡", limit=3)
+    Chain(stages=(RelevanceStage(limit=3),)).select(_garden(), "咖啡", limit=3)

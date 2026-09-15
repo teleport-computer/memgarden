@@ -6,13 +6,13 @@ Garden 提供排序、选卡算法和策略接口；宿主决定怎样把它接�
 
 ## 1. 选择入口
 
-自动想起和主动搜索用**同一个排序器** `memgarden.retrieval`：BM25 词法打分 + 停用词 + 覆盖率/强证据门槛。两条路的 trace 带同一个 `version`（如 `memgarden-bm25-v1+tok:mg-default-v1`），宿主据此确认用的是同一把尺子。
+自动想起和主动搜索用**同一个排序器** `memgarden.retrieval`：BM25 词法打分 + 停用词 + 覆盖率/强证据门槛。两条路的 trace 带同一个 `version`（如 `memgarden-bm25-v2+tok:mg-default-v2`），宿主据此确认用的是同一把尺子。
 
 | 入口 | 行为 | 如何接入 |
 |---|---|---|
-| `retrieval.rank` | 按相关性排序；无命中返回空；可设 `limit` 与资源上限 | 主动搜索、宿主自己的索引页；传入已授权候选 |
+| `retrieval.rank` | 按相关性排序；无命中返回空；可设 `limit` 与资源上限（`max_cards` / `max_text_bytes`，超出抛 `SearchLimitExceeded`）；没有 `id` 的卡不参与 | 主动搜索、宿主自己的索引页；传入已授权候选 |
 | `retrieval.select_context` | 自动想起：每张都先过门槛；转折≤3、最近≤2 软配额决定座位，空位按分数补；输出按分数排，默认总数 8 | 低层函数，或包成 SelectionPolicy（见第 3 节） |
-| `selection.Chain` + `RelevanceStage` | 可组合；`RelevanceStage` 默认 `scorer="bm25"`（即 `rank`），`RecentStage`/`RoleStage` 不看查询 | 传给 `MountedGarden(selection_policy=...)` |
+| `selection.Chain` + `RelevanceStage` | 可组合；`RelevanceStage` 默认 `scorer="bm25"`（即 `rank`），`RecentStage`/`RoleStage` 不看查询。`strong_min` / `medium_min` / `excluded_reasons` / `any_score` 只属于 `scorer="legacy"`，和 bm25 一起给会在构造时抛 `ValueError` | 传给 `MountedGarden(selection_policy=...)` |
 | `scoring.relevance`（deprecated） | 旧短语/稀有词打分，保留一个版本给未切换的宿主回滚；`RelevanceStage(scorer="legacy")` 同理 | 不要在新接入里使用 |
 | `select_hybrid_context_memories_with_trace` | 向量与词法分别过门槛，再用加权 RRF 融合；词法一侧仍是旧打分 | 显式传入宿主向量及参数；不在默认策略中启用 |
 
@@ -22,13 +22,14 @@ Garden 提供排序、选卡算法和策略接口；宿主决定怎样把它接�
 
 ### 分词器、停用词与门槛
 
-- **分词器是插口**：`Tokenizer` 协议只要 `name` 和 `tokenize(text) -> list[str]`，`name` 进版本号。不传时用零依赖的 `DefaultTokenizer`：整段 ASCII 标识符（`jira-4821`、`v2.3.1`、`x100v` 不被切碎，也不会子串命中）、CJK 单字 + 相邻二字（不生成和语法助词相邻的二字）、其余文字按词。包本身仍然零依赖；jieba 之类由宿主注入。
+- **分词器是插口**：`Tokenizer` 协议只要 `name` 和 `tokenize(text) -> list[str]`，`name` 进版本号。不传时用零依赖的 `DefaultTokenizer`（`mg-default-v2`）：NFC + casefold；整段 ASCII 标识符（`jira-4821`、`v2.3.1`、`x100v` 不被切碎，也不会子串命中）；按 Unicode 字母切词，带重音的拉丁词整词保留（`café`、`résumé`、`Müller`；v1 会切成 `caf` + `é` 这样的碎片，法语/德语查询因此误命中）；CJK 单字 + 相邻二字（不生成和语法助词相邻的二字）。包本身仍然零依赖；jieba 之类由宿主注入。
 - **停用词**（`DEFAULT_STOPWORDS`）只从查询里去掉，不改变卡片侧统计。
 - **门槛**：卡片命中查询 IDF 总量 ≥25%（`min_coverage`），或分数 ≥ 1.25 × 本批候选的最大单词 IDF（`strong_evidence`，给长段粘贴用）。花园里没有的词也算进分母——这正是「没记过」的信号。
+- **小花园**：覆盖率的 IDF 至少按 20 张卡的候选池算（`coverage_pool_floor`，默认 `DEFAULT_COVERAGE_POOL_FLOOR=20`）。不这样的话 1–2 张卡时没命中的词 IDF 远大于命中的词，「我平时喝什么咖啡」在只有一张「喜欢喝美式咖啡」的花园里被挡成空。只动覆盖率闸：分数、顺序、强证据闸不变，候选池 ≥20 张时逐项不变。取值见 [evals/retrieval](../evals/retrieval/README.md) 的「小花园」。
 - **长查询（多轮窗口）**：把最近几条对话拼起来当自动想起的查询时，默认闸挡不住泛词累加的杂卡（评测里无关闲聊窗口平均带回 7.9 张）。`strong_evidence_terms=8` 让强证据闸随查询 token 数按 √(n/8) 放大，无关窗口全部返回空，代价是长粘贴里只靠一个编号命中的答案也会被挡。默认不开，数字与取舍见 [evals/retrieval](../evals/retrieval/README.md) 的「多轮窗口」一节。
 - 数值由 `evals/retrieval` 校准，过程与放弃的候选见 [evals/retrieval/README.md](../evals/retrieval/README.md)。只有 53 条合成查询，**不证明线上质量**；换分词器或改门槛后请在自己的语料上重测，上线后看 trace。
 - 词法方法拿不到换说法、跨语言；它也不证明答案正确，只证明用词重叠。
-- 复现 io 旧 `memory_bm25` 的逐项结果：`rank(..., tokenizer=<jieba 分词器>, stopwords=frozenset(), min_coverage=0)`，版本号会带 `+cfg:` 后缀。
+- 复现无停用词、无门槛的纯 BM25：`rank(..., stopwords=frozenset(), min_coverage=0)`，版本号会带 `+cfg:` 后缀。
 
 ## 2. 三个容易混淆的字段
 
@@ -68,7 +69,7 @@ uv run python examples/retrieval_runtime.py
 | 无命中 | 可以为空，也可以只有策略里的背景卡 | **空**；本版没有 `suggestions` 字段 |
 | 返回 | `record_ids` + `blocks` + trace | `record_ids` + `hits[{id, score, matched, coverage}]` + `ranking` + trace |
 
-- `GardenComponent.search(SearchRequest)`：候选由宿主给（已过权限与生命周期过滤），默认 `limit=20`。分词器在构造组件时注入：`GardenComponent(model=..., tokenizer=my_tokenizer)`；`MountedGarden(..., tokenizer=...)` 同样透传。
+- `GardenComponent.search(SearchRequest)`：候选由宿主给（已过权限与生命周期过滤），默认 `limit=20`（`limit=None` 同默认）；没有 `id` 的候选不会出现在结果里。资源上限 `max_cards` / `max_text_bytes` 只在直接调 `retrieval.rank` / `select_context` 时可设，`search` / `MountedGarden.search` / `records.search` 不接受——候选规模由宿主（或 Store）自己约束。分词器在构造组件时注入：`GardenComponent(model=..., tokenizer=my_tokenizer)`；`MountedGarden(..., tokenizer=...)` 同样透传。
 - `MountedGarden.search(scope, query, *, limit=20, mount=None)`：候选按 Scope 从库里取，只含当前有效的卡；另一个 owner、未授权 mount、真删或被取代的卡都搜不到。
 - `memory_search` 工具（SDK 与 `tool.invoke`）走同一个 `search`，只返回命中卡的摘要文本，无命中时 `content` 为空串。
 - JSON Lines：`records.search`，manifest 声明 `capabilities.search`；Store 不支持 owner 分区时和其它读路径一起关闭。

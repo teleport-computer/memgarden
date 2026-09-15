@@ -97,3 +97,27 @@ def test_chat_window_query_matches_io_construction():
                 {"role": "user", "content": "三"}, {"role": "openclaw", "content": "四"},
                 {"role": "user", "content": "五"}]
     assert harness.chat_window_query(messages) == "二\n三\n四\n五"
+
+
+# ---------------------------------------------------------------- 小花园（候选池 1–5 张卡）
+#
+# evals/retrieval/small_pool.py：一张答案卡 + 无关卡填到 N 张 / N 张无关卡。默认分词器、rank 默认参数、
+# 2 个种子，2026-09-15 实测：
+#
+#   池子大小                 1      2      5
+#   找到答案  下限关（F=1）  0.806  0.944  0.972
+#             默认 F=20      0.917  0.972  1.000
+#   无关卡被返回（两者相同） 0.014  0.087  0.188
+
+
+def test_small_gardens_find_the_answer_without_letting_more_noise_in():
+    import small_pool
+    from memgarden import retrieval
+
+    floor = retrieval.DEFAULT_COVERAGE_POOL_FLOOR
+    table = small_pool.run(None, path="search", floors=[1, floor], sizes=[1, 2, 5],
+                           seeds=2)["table"]
+    for size, line in ((1, 0.90), (2, 0.96), (5, 0.99)):
+        got = table[f"{floor}:{size}"]
+        assert got["answer_found"] >= line, (size, got)
+        assert got["noise_returned"] <= table[f"1:{size}"]["noise_returned"] + 0.01, (size, got)
