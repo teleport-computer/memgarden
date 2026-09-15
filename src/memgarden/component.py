@@ -473,6 +473,7 @@ class _MaintenancePlan:
             self.rendered.rendered_ids)
         self.prompt = build_dream_prompt(
             ai_name=request.ai_name, user_name=request.user_name,
+            naming_rule=request.naming_rule,
             cards=("\n" + self.rendered.text) if self.rendered.text else "",
             recent_conversations=request.recent_conversations,
             locale=request.locale,

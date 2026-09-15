@@ -118,6 +118,7 @@ CONTRACT_FIELDS = {
     ("memgarden.contracts", "MaintenanceRequest"): {
         "cards_limit": 60, "cards_budget_chars": 60_000,
         "card_body_chars": 5_000, "card_summary_chars": 2_000,
+        "naming_rule": None,
     },
     # Capture 交现有卡（索引由组件挑、target 校验）。None = 旧行为。
     ("memgarden.contracts", "CaptureRequest"): {
