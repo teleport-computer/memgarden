@@ -346,6 +346,69 @@ class MountedGarden:
             limit=limit,
         ))
 
+    # -- 关联读取 -------------------------------------------------------- #
+
+    def related(
+        self,
+        scope: Scope,
+        ids: Any,
+        *,
+        cap: int = 6,
+        include_archived: bool = False,
+        include_superseded: bool = False,
+    ) -> list[dict]:
+        """取回 ``ids`` 这几张卡时顺带给出的一跳邻居 —— **候选自己从库里取**。
+
+        语义见 :func:`memgarden.related.one_hop`。这里负责的是它要求宿主做的
+        那一半：只读 ``scope`` 的 owner 与挂载点；硬删的卡不在库里，自然读不到；
+        生命周期翻译成规范 ``status``（被取代 → ``superseded``，普通归档 →
+        ``archived``），于是归档卡永不出现、被取代的卡只沿显式链接出现。
+
+        参考 Store 执行 supersede 时只在**旧卡**上写 ``superseded_by``。为了让
+        「这张新卡取代了哪几张」这条正向关系在内置 Store 上也成立，源卡的
+        ``supersedes`` 会并入「``superseded_by`` 指向源卡」的那些卡。反方向
+        （从旧卡找取代它的新卡）不做。
+
+        ``ids`` 里读不到的卡（别人的、硬删的、不在允许挂载点的）静默忽略 ——
+        它们本来就不该被证明存在。源卡默认只取 active；取回历史卡时用
+        ``include_archived`` / ``include_superseded`` 放开，和浏览的开关同义。
+        """
+        from .related import links, one_hop
+
+        if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+            raise ValueError("ids must be a list of record ids")
+        wanted = [str(i).strip() for i in ids if str(i or "").strip()]
+        if not wanted:
+            return []
+        cards = [_with_lifecycle_status(c) for c in self._readable_cards(
+            scope, include_archived=True, include_superseded=True)]
+        allowed = {"active"}
+        if include_archived:
+            allowed.add("archived")
+        if include_superseded:
+            allowed.add("superseded")
+        by_id = {str(c.get("id") or ""): c for c in cards}
+        sources = []
+        for rid in dict.fromkeys(wanted):
+            card = by_id.get(rid)
+            if card is None or card["status"] not in allowed:
+                continue
+            replaced = sorted(
+                str(c.get("id")) for c in cards
+                if str(c.get("superseded_by") or "").strip() == rid
+                and isinstance(c.get("id"), str))
+            if replaced:
+                explicit = links(card.get("supersedes"))
+                card = {**card, "supersedes": explicit + [
+                    r for r in replaced if r not in explicit]}
+            sources.append(card)
+        if not sources:
+            return []
+        # 不认识的生命周期值不猜成 active —— fail closed，不当候选。
+        return one_hop(sources, [c for c in cards
+                                 if c["status"] in {"active", "superseded", "archived"}],
+                       cap=cap)
+
     # -- 整理 ------------------------------------------------------------ #
 
     def prepare_maintenance(
@@ -1129,6 +1192,26 @@ class MountedGarden:
                     if r.get("id"))
         return OperationReceipt(written=True, record_ids=ids,
                                 revision=str(applied.revision), trace=trace)
+
+
+def _with_lifecycle_status(card: dict) -> dict:
+    """把参考 Store 的生命周期标记翻译成 :mod:`memgarden.related` 认的 ``status``。
+
+    被取代优先于归档：参考 Store 的 supersede 会同时写 ``archived`` 和
+    ``superseded_by``，那张卡是「历史版本」，不是「收起来了」。
+    """
+    status = str(card.get("status") or card.get("lifecycle") or "").strip().lower()
+    if status == "deleted" or card.get("deleted") is True:
+        status = "deleted"
+    elif status == "superseded" or str(card.get("superseded_by") or "").strip():
+        status = "superseded"
+    elif status == "archived" or card.get("archived") is True:
+        status = "archived"
+    elif status in {"", "active"}:
+        status = "active"
+    else:
+        status = "unknown"
+    return {**card, "status": status}
 
 
 def _digest_key(scope: Scope, mutations: list[dict]) -> str:

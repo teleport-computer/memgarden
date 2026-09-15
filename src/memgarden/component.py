@@ -74,6 +74,7 @@ from .prompts.capture import (
 from .prompts.migrate import build_migrate_prompt, parse_migrated_cards
 from .prompts.dream import (
     build_dream_prompt,
+    render_dream_cards,
     build_dream_retry_prompt,
     parse_dream_consolidations,
 )
@@ -369,6 +370,8 @@ class _MaintenancePlan:
         self.request = request
         self.rejected: MaintenanceResult | None = None
         self.prompt = ""
+        self.rendered = None
+        self.known_ids: frozenset[str] = frozenset(request.known_ids)
         self.consolidations: list[dict] = []
         self.err: str | None = None
         self.retried = 0
@@ -399,21 +402,42 @@ class _MaintenancePlan:
             )
             return
 
-        rendered = "\n".join(
-            f"- [{c.get('id')}] {c.get('summary','')}" for c in request.cards
+        # 带正文渲染，单卡和总量都有上限。只给标题时 thicken/merge 会在看不到
+        # 正文的情况下重写整张卡（io 2026-08-04 修过，08-29 搬进组件时退回了
+        # 只渲染标题）。
+        self.rendered = render_dream_cards(
+            request.cards,
+            max_cards=request.cards_limit,
+            summary_chars=request.card_summary_chars,
+            body_chars=request.card_body_chars,
+            total_chars=request.cards_budget_chars,
         )
+        # 墓碑卡守卫至少覆盖模型真正见过的卡；宿主另给的 id 一并保留。
+        self.known_ids = frozenset(request.known_ids) | frozenset(
+            self.rendered.rendered_ids)
         self.prompt = build_dream_prompt(
             ai_name=request.ai_name, user_name=request.user_name,
-            cards=rendered, recent_conversations=request.recent_conversations,
+            cards=("\n" + self.rendered.text) if self.rendered.text else "",
+            recent_conversations=request.recent_conversations,
             locale=request.locale,
         )
+
+    def _render_trace(self) -> dict:
+        r = self.rendered
+        if r is None:
+            return {}
+        return {"cards_rendered": len(r.rendered_ids),
+                "cards_truncated": len(r.truncated_ids),
+                "cards_omitted": r.omitted,
+                "truncated_card_ids": list(r.truncated_ids)}
 
     def next_prompt(self) -> str | None:
         if self._stage == "first":
             self.owner._step(Step(
                 kind="prompt_built", purpose="dream", attempt=0,
                 detail={"prompt_chars": len(self.prompt),
-                        "cards": len(self.request.cards)},
+                        "cards": len(self.request.cards),
+                        **self._render_trace()},
                 prompt=self.prompt,
             ))
             return self.prompt
@@ -444,7 +468,7 @@ class _MaintenancePlan:
         strict = self._stage == "first"
         cons, _questions, err = parse_dream_consolidations(
             text, strict=strict, signals=self.owner._signals,
-            known_ids=frozenset(self.request.known_ids),
+            known_ids=self.known_ids,
         )
         self.consolidations, self.err = cons, err
         if self._stage == "format_retry":
@@ -463,7 +487,8 @@ class _MaintenancePlan:
         trace = {"reason": self.verdict.reason, "new_cards": self.verdict.new_cards,
                  "consolidations": len(self.consolidations),
                  "signature": self.snapshot.signature,
-                 "seed_card_count": self.snapshot.seed_card_count}
+                 "seed_card_count": self.snapshot.seed_card_count,
+                 **self._render_trace()}
         self.owner._step(Step(kind="done", purpose="dream", attempt=self.calls,
                               detail={"consolidations": len(self.consolidations),
                                       "retried": self.retried, "error": self.err}))

@@ -8,6 +8,7 @@
 |---|---|---|
 | 对话前召回 | `context_for_turn` / `context.get` | 把 `blocks` 注入本轮上下文，保留 `record_ids` 供追溯 |
 | 主动搜索 | `search` / `records.search` | 只返回真实命中（`record_ids` + `hits` + `ranking`），无命中为空；不经过挑卡策略，不补最近卡 |
+| 取回卡时的关联提示 | `related`（仅 SDK；纯函数 `memgarden.related.one_hop`） | 把返回的一跳邻居（id、摘要、关系、是否历史版本）附在取回结果旁；要读全文由宿主在同一 Scope 再取。见 [Retrieval §7](RETRIEVAL.md#7-关联读取一跳邻居) |
 | 对话后记忆 | `capture_and_store` / `capture.run` | 检查业务回执，再标记这段素材已处理 |
 | 宿主自行调模型 | `capture.begin/feed/cancel` | 按 `needs_model` 调模型并 feed，直到 `completed`，再检查其中回执 |
 | 检查、执行整理 | `check_maintenance`、`run_and_store_maintenance` / `maintenance.check/run` | 调度归宿主，卡片与整理账本由 Garden 一起提交 |
@@ -29,6 +30,8 @@ SDK 完整参数见 [contracts.py](../src/memgarden/contracts.py) 和 [mounted.p
 Python 模型接口是 `complete(prompt, *, purpose="") -> str`。凭据、超时、取消和模型选择由宿主实现。需要使用 Runtime 自己的模型调度时，走 begin/feed 路径。
 
 Capture 与 Maintenance 的 SDK / 宿主驱动入口分别共用各自的内核状态机。成功调用却返回空白正文时，会按现有重试预算请求一次格式修正（默认最多额外一次）；连续空白明确失败，不当作“无需记忆／整理”，也不推进处理进度或整理账本。非空但没有 JSON 的纯文本仍按原策略报解析失败。截断、格式修正共享同一预算，provider 明确报错不伪装成空正文。SDK 可接既有 `{text, truncated}` 回复信封；宿主驱动时将正文和 `truncated` 分开传入 feed。
+
+Dream（整理）提示词里的卡片**带正文**：按 `MaintenanceRequest.cards` 的顺序渲染 id、bucket、threads、occurred_at、summary、retrieval_cues 和 content。上限由请求字段控制——`cards_limit`（默认60张）、`cards_budget_chars`（卡片区总字符，默认60000，按整张卡累加，放不下下一张就停，不切半张也不跳着塞短卡）、`card_body_chars`（单卡正文，默认5000）、`card_summary_chars`（单卡摘要，默认2000）。被截断的卡在卡头和正文处标 `TRUNCATED`，提示词禁止把这种卡放进 `card_ids`；这是提示词约束，解析和守卫不据此拦截，需要硬拦的宿主可读 trace 的 `truncated_card_ids` 自行检查。trace 另记 `cards_rendered` / `cards_truncated` / `cards_omitted`。墓碑卡守卫的 `known_ids` 自动并入实际渲染的卡。宿主要把最该整理的卡排在前面；读字段只认 `summary` / `content` 等规范名，旧标题字段先翻译。wire 的 `maintenance.*` 方法目前使用默认上限。
 
 解析对模型输出的容错范围是有限的：Capture/Dream/Migrate 从回复中取第一个完整 JSON 对象，允许前后有说明文字、Markdown 代码围栏或推理块；合法 JSON 字符串里的 `{` `}` 不影响取块。只有 Capture 在直接解析失败后会尝试补转义裸引号，并按 JSON 结构判断：只修**对象成员的值**里的引号，例如 `她说"好的"然后走了`、`他报价"1000"块`、`He said "ok" and left`、`他说"好"、"行"`，以及引语在值末尾的 `"他只说了"算了""`；键名和数组元素（如 `threads`）里的裸引号一概不修。值里的引号后面紧跟 `,` `}` `]` `:`（如 `她说"好的", 然后`）与字段结束无法区分，也修不了。只要结构上还有别的错，整份不修：漏冒号（`"is_sensitive" True,`，无论后面跟的是什么）、数组元素之间写错分隔符（`["a"， "b"]`、`["a"、"b"]`、`["a” "b"]`、`["a" "b"]`）、成员或对象之间写错分隔符、缺/多逗号、截断。这些情况都报 `json_decode_error`（Capture 与 Maintenance 会按现有重试预算重问），修复不会把它们猜成另一种意思落库。值里既有裸引号又有 `}`（`"她说"好"然后看 } 这个符号"`）时，Capture 会用完整对象去修；Dream/Migrate 不做引号修复，这类回复对它们仍是 `json_decode_error`。已知局限（会按字面解析而不是报错）：值里的引号后面恰好是 `,` 且残文又拼成合法 JSON（`"她说"好的","content":"…"`）；值末尾多敲一个引号（`"好的""` 读成 `好的"`）；值里的引号后面紧跟 `}` 且对象恰好在这里闭合（`{"content":"a "b" }"}` 读成 `a "b`）。
 

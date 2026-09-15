@@ -10,6 +10,14 @@
 - `memgarden.retrieval.rank(query, candidates, *, tokenizer=None, ...)`：BM25 词法排序，数学逐项移植自 io 的 `memory_bm25`（给同一分词器时分数逐位相同）。分词器是插口（`Tokenizer` 协议，`name` 进排序版本号）；不注入时用零依赖的 `DefaultTokenizer`（整段 ASCII 标识符 + CJK 单字与二字）。返回 `RankResult(hits, version, trace)`，`version` 形如 `memgarden-bm25-v1+tok:mg-default-v1`，trace 内容无关。查询和每张卡在单次调用内只分析一次，不跨调用缓存。可选资源上限超出时抛 `SearchLimitExceeded`。
 - `retrieval.rank` 默认带停用词（`DEFAULT_STOPWORDS`，只从查询里去掉）和覆盖率/强证据门槛（`min_coverage=0.25`、`strong_evidence=1.25`），无命中返回空。数值由 `evals/retrieval` 校准，校准过程和放弃的候选见 `evals/retrieval/README.md`；`tests/test_retrieval_eval_gate.py` 守质量线。复现旧 BM25 语义传 `stopwords=frozenset(), min_coverage=0`（版本号随之带上 `+cfg:` 后缀）。`Hit` 带 `coverage`。
 - `retrieval.select_context(query, candidates, *, tokenizer=None, cap=8, quotas=DEFAULT_QUOTAS, ...)`：自动想起。和 `rank` 同一次打分、同一道门槛、同一个版本号；转折点/最近软配额语义同 `select_relevant_context_memories_with_trace`（每张都要先过门槛，空位按分数补）。返回 `(卡片副本, trace)`，trace 内容无关，能直接喂 `observability.injection_record`。
+- **关联读取** `memgarden.related.one_hop(sources, candidates, *, cap=6)` 与
+  `MountedGarden.related(scope, ids, *, cap=6, include_archived=False, include_superseded=False)`。
+  取回卡时给出一跳邻居：`anchor` / `supersedes`（源卡上的显式链接）优先，其次同线索的卡；
+  归档、删除的卡不出现，被取代的卡只沿显式链接出现并标 `status="superseded"`。
+  v1 与宿主 io 读侧实现逐项一致，由 144 组黄金用例锁定（`tests/fixtures/related_one_hop_golden.json`）。
+  `MountedGarden.related` 自己做 owner / 挂载点 / 生命周期过滤，并把参考 Store 的
+  `superseded_by` 取代链当作新卡的 `supersedes` 链接。不做反向查找和多跳。
+  `one_hop` 的 `cap` 必须是非负整数（io 原实现不校验）。
 
 ### Changed
 
@@ -29,3 +37,12 @@
 ### Fixed
 
 - `MountedGarden.invoke_tool("memory_search")`（含 `tool.invoke` 与 DSH Adapter 注册的工具）以前复用 `context_for_turn`：挑卡策略里有 `RecentStage` 时，搜花园里没有的东西也会返回最近写的几张卡。现在走 `search`，无命中返回空文本；候选只读一次，结果与回填用同一份快照。
+- **Dream 提示词恢复卡片正文**。自 GardenComponent 顶层接口（6e8e9b6，08-29）起，整理提示词里每张卡只有
+  `- [id] 摘要`，模型做 thicken / merge 时看不到正文、只能照标题重写，旧正文随旧卡退休。
+  现在由 `prompts.dream.render_dream_cards` 带正文渲染（id / bucket / threads / occurred_at /
+  summary / retrieval_cues / content），`MaintenanceRequest` 新增 `cards_limit=60`、
+  `cards_budget_chars=60000`、`card_body_chars=5000`、`card_summary_chars=2000`。
+  总预算按整张卡累加；截断的卡标 `TRUNCATED`，提示词要求不改写它们。
+  trace 新增 `cards_rendered` / `cards_truncated` / `cards_omitted` / `truncated_card_ids`；
+  `known_ids` 自动并入实际渲染的卡。解析、重试和守卫不变。
+  **提示词文本有变化**（Step 1 措辞、新增 TRUNCATED 规则），依赖整份提示词快照的宿主需要更新快照。
