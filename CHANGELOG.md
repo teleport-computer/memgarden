@@ -32,7 +32,7 @@
 - `evals/baseline.json`（① recall.py 发布闸）按新打分重生成：recall 1.000 → 0.889，违反禁忌与零召回仍为 0，原因见 `evals/README.md`「基线变更记录」。
 - `observability` 认识 `below_gate`、`over_cap` 两个拒绝理由。
 - `MountedGarden.import_history` 改为跑在同一个 `ImportSession` 上（每个写卡批次前重读 Store，CAS 写回）。默认请求下续传指纹与此前逐字节一致，进行中的导入可以继续续传。
-- 导入批次的「已有记忆索引」改为按本批文字挑相关旧卡（60 个名额，四分之一留给重要度最高的卡），此前只取重要度前 60，大导入的后续批次看不到前面写的卡。相关性默认由 `importing.bm25_index_ranker` 给（`retrieval.rank` 关掉门槛，分词器跟组件的 `tokenizer=`），`MountedGarden.import_history` 与宿主驱动共用；宿主可注入 `index_ranker`。合成导入批次上（`evals/retrieval/import_index.py`，4 个话题 / 6000 字）该进索引的旧卡进了 0.775 → 0.944、整批都进 33% → 76%（jieba 0.967 / 86%），对比对象是 MG-8 初版的词面重叠。
+- 导入批次的「已有记忆索引」改为按本批文字挑相关旧卡（60 个名额，四分之一留给重要度最高的卡），此前只取重要度前 60，大导入的后续批次看不到前面写的卡。相关性默认由 `retrieval.rank` 给（关掉门槛，分词器跟组件的 `tokenizer=`；`importing` 里的默认挑卡器不是公开合同），`MountedGarden.import_history` 与宿主驱动共用；宿主可注入 `index_ranker`。合成导入批次上（`evals/retrieval/import_index.py`，4 个话题 / 6000 字）该进索引的旧卡进了 0.775 → 0.944、整批都进 33% → 76%（jieba 0.967 / 86%），对比对象是 MG-8 初版的词面重叠。
 - `MountedGarden` 的自动想起、主动搜索（含 `memory_search` 工具）和关联读取共用一个候选过滤（owner、挂载点收窄、生命周期）。想起和搜索因此也认外部 Store 直接写在卡上的 `status` / `lifecycle`：`archived` / `superseded` / `deleted` 或没见过的值不再进候选（此前只看 Store 的 `archived` / `superseded_by`，这种卡能被搜到、被想起，关联读取却把它当归档卡）。内置 Store 不受影响。
 - `MountedGarden.import_history` 不再经过 `capture_and_store`；monkeypatch 该方法来伪造导入回执的调用方需要改为注入模型。
 - manifest 的 `capabilities` 多出 `related`、`import_session` 两个键；`maintenance` 的两条 lane 都把 `maintenance.check` 算进去（方法一直存在，声明值不变）。
