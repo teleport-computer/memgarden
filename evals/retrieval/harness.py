@@ -156,8 +156,19 @@ def mg_bm25(query: str, cards: list[dict], k: int) -> list[str]:
     return retrieval.rank(query, cards, limit=k).ids
 
 
+def mg_select(query: str, cards: list[dict], k: int) -> list[str]:
+    """``memgarden.retrieval.select_context``：统一后的自动想起（同一把尺子 + 软配额，cap = k）。
+
+    卡片文本用 ``default_search_text``（和 mg-bm25 一样含 bucket / threads / cues），
+    只多带 ``roles`` —— 这样和 mg-bm25 的差异只来自软配额，不来自投影。
+    """
+    pool = [{**c, "roles": list(c.get("roles") or [])} for c in cards]
+    picked, _trace = retrieval.select_context(query, pool, cap=k)
+    return [str(c["id"]) for c in picked]
+
+
 BUILTIN: dict[str, Ranker] = {"mg-relevant": mg_relevant, "mg-scores": mg_scores,
-                              "mg-bm25": mg_bm25}
+                              "mg-bm25": mg_bm25, "mg-select": mg_select}
 
 
 def load_external(spec: str) -> Ranker:

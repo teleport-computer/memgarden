@@ -77,6 +77,14 @@ run(decider=my_decider)   # decider(buckets, fallbacks) -> {"locale", "basis"}
 
 这样内核和宿主守的是**同一条线**，不会各自跑偏。
 
+## 基线变更记录
+
+- **2026-09-15 ① recall.py**：`RelevanceStage` 默认打分从旧规则换成 `retrieval.rank`（BM25 + 覆盖率/强证据门槛）。
+  recall 1.000 → 0.889，相关性段违反禁忌 0 → 0，零召回 0 → 0，填充卡/查询 1.4 → 0.3。
+  掉的是 q03「我之前跟你说过什么工作上的事」的 c02：它过了门槛，但在相关性段 3 个名额里排第 4
+  （宽泛查询，前面是两张同样提到工作的卡）。填充卡减少来自门槛：旧的 `any_score=True` 分数 > 0 就要。
+  基线按新结果重生成；召回层面的完整对比见 `retrieval/README.md`。
+
 ## 改语料的纪律
 
 **eval 抓不到它该抓的 bug 时，问题在 eval，不在被测代码。**

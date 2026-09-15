@@ -1,10 +1,10 @@
 {
-  "recall": 1.0,
-  "relevance_precision": 0.177,
+  "recall": 0.889,
+  "relevance_precision": 0.2,
   "relevance_violations": 0,
   "zero_recall_queries": 0,
   "anchor_slots_per_query": 4.0,
-  "filler_per_query": 1.4,
+  "filler_per_query": 0.3,
   "queries": 10,
   "cards": 17,
   "per_query": [
@@ -22,7 +22,7 @@
         "c07",
         "c10"
       ],
-      "returned": 6
+      "returned": 5
     },
     {
       "qid": "q02",
@@ -44,10 +44,11 @@
       "qid": "q03",
       "query": "我之前跟你说过什么工作上的事",
       "recalled": [
-        "c01",
+        "c01"
+      ],
+      "missed": [
         "c02"
       ],
-      "missed": [],
       "violated_by_relevance": [],
       "anchored": [
         "E02",
@@ -71,7 +72,7 @@
         "c07",
         "c10"
       ],
-      "returned": 7
+      "returned": 6
     },
     {
       "qid": "q05",
@@ -87,7 +88,7 @@
         "c07",
         "c10"
       ],
-      "returned": 7
+      "returned": 4
     },
     {
       "qid": "q06",
@@ -115,7 +116,7 @@
         "c07",
         "c10"
       ],
-      "returned": 7
+      "returned": 4
     },
     {
       "qid": "q08",
@@ -147,7 +148,7 @@
         "c07",
         "c10"
       ],
-      "returned": 7
+      "returned": 5
     },
     {
       "qid": "q10",
@@ -163,7 +164,7 @@
         "c07",
         "c10"
       ],
-      "returned": 7
+      "returned": 5
     }
   ]
 }

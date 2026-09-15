@@ -39,6 +39,9 @@ _KNOWN_REASONS = frozenset({
     "below_min_score",
     "not_active",
     "duplicate",
+    # retrieval.select_context：被覆盖率/强证据闸挡下、合格但没座位
+    "below_gate",
+    "over_cap",
 })
 
 

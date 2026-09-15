@@ -185,14 +185,23 @@ class RecentStage:
 
 @dataclass(frozen=True)
 class RelevanceStage:
-    """按相关性挑 —— 用内核自带的打分。
+    """按相关性挑。
 
-    ⚠️ 阈值绑在这一段上，不是全局配置：它们是对**这套打分算法**校准的。
-    宿主换了打分实现（自己写一个 Stage），这些数字就没有意义了
-    （codex 2026-08-17 指出）。
+    ``scorer="bm25"``（默认）：用 :func:`memgarden.retrieval.rank` —— 和主动搜索、
+    ``retrieval.select_context`` **同一把尺子**，门槛是 rank 的覆盖率/强证据闸。
+    IDF 按这一段拿到的 ``remaining`` 算：Chain 前面的段挑走的卡不参与统计。
+
+    ``scorer="legacy"``：旧的 ``scoring.relevance`` 打分（deprecated，保留一个版本给
+    还没切换的宿主当回滚闸）。下面 ``strong_min`` / ``medium_min`` /
+    ``excluded_reasons`` / ``any_score`` 四个旋钮**只对 legacy 生效** —— 它们是对那套
+    算法校准的数字，换成 BM25 就没有意义了（codex 2026-08-17 指出过同一件事）。
     """
 
     limit: int = 3
+    #: ``"bm25"``（默认）或 ``"legacy"``。
+    scorer: str = "bm25"
+    #: bm25 用的分词器；None = ``retrieval.DefaultTokenizer``。
+    tokenizer: Any = None
     #: 强匹配的分数门槛
     strong_min: float = 0.0
     #: 中等匹配的分数门槛；低于 strong_min 的匹配要更高的证据要求
@@ -208,6 +217,16 @@ class RelevanceStage:
     any_score: bool = False
 
     def pick(self, remaining, query, *, budget) -> list[Pick]:
+        if self.scorer == "bm25":
+            from .retrieval import rank
+
+            result = rank(query, remaining, tokenizer=self.tokenizer,
+                          limit=min(self.limit, budget))
+            return [Pick(card_id=hit.id, stage="relevance", score=hit.score,
+                         reason="bm25_match") for hit in result.hits]
+        if self.scorer != "legacy":
+            raise ValueError(f"unknown scorer {self.scorer!r}; use 'bm25' or 'legacy'")
+
         from .scoring.relevance import memory_relevance_details
 
         scored = []
