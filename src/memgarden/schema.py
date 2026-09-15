@@ -222,6 +222,88 @@ def _search_result() -> dict:
     }
 
 
+def _related_result() -> dict:
+    """``records.related``：取回卡时的一跳邻居。只给一句话提示，不含正文。"""
+    return {
+        "type": "object",
+        "required": ["items"],
+        "properties": {
+            "items": {"type": "array", "items": {
+                "type": "object",
+                "required": ["id", "summary", "source_id", "relation", "status"],
+                "properties": {
+                    "id": _STR, "summary": _STR, "source_id": _STR,
+                    "relation": {"type": "string",
+                                 "enum": ["anchor", "supersedes", "thread"]},
+                    # 被取代的卡只沿显式链接出现，模型要知道那是历史版本。
+                    "status": {"type": "string",
+                               "enum": ["active", "superseded"]},
+                },
+                "additionalProperties": True,
+            }},
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
+def _import_session_state() -> dict:
+    """``history.import_begin/feed/commit/fail`` 的回复。判别键是 ``status``。
+
+    ⚠️ ``progress`` 在 ``two_pass`` 时含用户内容（候选事实与原话证据）：宿主要按
+    记忆正文的等级保存它，不要写进日志。
+    """
+    progress = {"$ref": "#/schemas/ImportProgress"}
+    batch = {
+        "type": "object",
+        "required": ["stage", "offset", "end", "idempotency_key"],
+        "properties": {
+            "stage": {"type": "string", "enum": ["cards", "candidates", "write"]},
+            "offset": {"type": "integer"}, "end": {"type": "integer"},
+            "idempotency_key": _STR,
+        },
+        "additionalProperties": True,
+    }
+    common = {"progress": progress, "estimate": {"type": "object"},
+              "committed": {"$ref": "#/schemas/OperationReceipt"}}
+    return {
+        "type": "object",
+        "required": ["status", "progress"],
+        "discriminator": {"propertyName": "status"},
+        "oneOf": [
+            {"title": "needs_model", "type": "object",
+             "required": ["status", "session_id", "next_prompt", "batch", "progress"],
+             "properties": {**common, "status": {"const": "needs_model"},
+                            "session_id": _STR, "next_prompt": _STR,
+                            "batch": batch, "retrying_after": _OPT_STR},
+             "additionalProperties": True},
+            {"title": "needs_commit", "type": "object",
+             "required": ["status", "session_id", "batch", "progress"],
+             "properties": {**common, "status": {"const": "needs_commit"},
+                            "session_id": _STR,
+                            "batch": {**batch,
+                                      "required": [*batch["required"],
+                                                   "mutations", "cards"],
+                                      "properties": {
+                                          **batch["properties"],
+                                          "mutations": {"type": "array", "items": {
+                                              "$ref": "#/schemas/Mutation"}},
+                                          "cards": {"type": "array",
+                                                    "items": {"type": "object"}}}}},
+             "additionalProperties": True},
+            {"title": "completed", "type": "object",
+             "required": ["status", "progress"],
+             "properties": {**common, "status": {"const": "completed"}},
+             "additionalProperties": True},
+            {"title": "failed", "type": "object",
+             "required": ["status", "progress", "error"],
+             "properties": {**common, "status": {"const": "failed"},
+                            "error": _STR},
+             "additionalProperties": True},
+        ],
+    }
+
+
 def _browse_item() -> dict:
     return {
         "type": "object",
@@ -429,9 +511,57 @@ def _maintenance_state() -> dict:
     }
 
 
+def _import_request_properties() -> dict:
+    """``history.import`` 与 ``history.import_begin`` 共用的导入语义字段。
+
+    两边必须同一份：续传指纹由这些字段算出来，漂了的话一边存下的进度
+    另一边续不上，而且报的是「语义不同」，看不出是 schema 漂了。
+    """
+    return {
+        "scope": _scope_ref(), "material": _STR, "locale": _STR,
+        "material_kind": _OPT_STR,
+        "max_cards": {"type": "integer", "minimum": 1, "default": 50},
+        "policy": _OPT_STR, "mount": _OPT_STR,
+        "ai_name": _OPT_STR, "user_name": _OPT_STR, "idempotency_key": _OPT_STR,
+        # 宿主预切的批次（给了就让 material 为空串）
+        "batches": {"type": "array", "items": {
+            "type": "object", "required": ["text"],
+            "properties": {
+                "text": _STR, "label": _OPT_STR,
+                "occurred_from": _OPT_STR, "occurred_to": _OPT_STR},
+            "additionalProperties": False}},
+        "strategy": {"type": "string", "enum": ["single_pass", "two_pass"],
+                     "default": "single_pass"},
+        "batch_chars": {"type": "integer", "minimum": 200},
+        "write_batch_candidates": {"type": "integer", "minimum": 1, "default": 40},
+        "max_total_cards": {"type": "integer", "minimum": 0},
+        "fallback_occurred_at": _OPT_STR,
+        # 断点续跑：把上次的 progress 原样传回来
+        "progress": _import_progress(),
+    }
+
+
+def _maintenance_request_properties() -> dict:
+    """``maintenance.run`` / ``maintenance.begin`` 的请求字段。
+
+    卡片渲染预算（MG-7）默认值与 :class:`memgarden.contracts.MaintenanceRequest`
+    一致；不传就用默认值，所以老调用方行为不变。
+    """
+    return {
+        "scope": _scope_ref(), "locale": _STR, "mount": _OPT_STR,
+        "ai_name": _OPT_STR, "user_name": _OPT_STR,
+        "recent_conversations": _OPT_STR, "idempotency_key": _OPT_STR,
+        "cards_limit": {"type": "integer", "minimum": 1, "default": 60},
+        "cards_budget_chars": {"type": "integer", "minimum": 1, "default": 60_000},
+        "card_body_chars": {"type": "integer", "minimum": 1, "default": 5_000},
+        "card_summary_chars": {"type": "integer", "minimum": 1, "default": 2_000},
+    }
+
+
 def method_schemas() -> dict[str, Any]:
     """每个 Service 方法的 request / response。"""
     receipt = {"$ref": "#/schemas/OperationReceipt"}
+    import_state = {"$ref": "#/schemas/ImportSessionState"}
     session_state = {"oneOf": [
         {
             "type": "object",
@@ -515,6 +645,19 @@ def method_schemas() -> dict[str, Any]:
                         "additionalProperties": True},
             "response": _ok_envelope({"$ref": "#/schemas/SearchResult"}),
         },
+        "records.related": {
+            "request": {"type": "object", "required": ["scope", "ids"],
+                        "properties": {"scope": _scope_ref(),
+                                       "ids": {"type": "array", "items": _STR},
+                                       "cap": {"type": "integer", "minimum": 0,
+                                               "default": 6},
+                                       "include_archived": {"type": "boolean",
+                                                            "default": False},
+                                       "include_superseded": {"type": "boolean",
+                                                              "default": False}},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"$ref": "#/schemas/RelatedResult"}),
+        },
         "maintenance.check": {
             "request": {"type": "object", "required": ["scope"],
                         "properties": {"scope": _scope_ref(),
@@ -531,23 +674,13 @@ def method_schemas() -> dict[str, Any]:
         },
         "maintenance.run": {
             "request": {"type": "object", "required": ["scope", "locale"],
-                        "properties": {"scope": _scope_ref(), "locale": _STR,
-                                       "mount": _OPT_STR,
-                                       "ai_name": _OPT_STR,
-                                       "user_name": _OPT_STR,
-                                       "recent_conversations": _OPT_STR,
-                                       "idempotency_key": _OPT_STR},
+                        "properties": _maintenance_request_properties(),
                         "additionalProperties": True},
             "response": _ok_envelope(receipt),
         },
         "maintenance.begin": {
             "request": {"type": "object", "required": ["scope", "locale"],
-                        "properties": {"scope": _scope_ref(), "locale": _STR,
-                                       "mount": _OPT_STR,
-                                       "ai_name": _OPT_STR,
-                                       "user_name": _OPT_STR,
-                                       "recent_conversations": _OPT_STR,
-                                       "idempotency_key": _OPT_STR},
+                        "properties": _maintenance_request_properties(),
                         "additionalProperties": True},
             "response": _ok_envelope(session_state),
         },
@@ -624,39 +757,62 @@ def method_schemas() -> dict[str, Any]:
         "history.import": {
             "request": {"type": "object",
                         "required": ["scope", "material", "locale"],
-                        "properties": {"scope": _scope_ref(), "material": _STR,
-                                       "locale": _STR,
-                                       "material_kind": _OPT_STR,
-                                       "max_cards": {"type": "integer",
-                                                     "minimum": 1,
-                                                     "default": 50},
-                                       "policy": _OPT_STR, "mount": _OPT_STR,
-                                       "ai_name": _OPT_STR,
-                                       "user_name": _OPT_STR,
-                                       "idempotency_key": _OPT_STR,
-                                       # 宿主预切的批次（给了就让 material 为空串）
-                                       "batches": {"type": "array", "items": {
-                                           "type": "object", "required": ["text"],
-                                           "properties": {
-                                               "text": _STR, "label": _OPT_STR,
-                                               "occurred_from": _OPT_STR,
-                                               "occurred_to": _OPT_STR},
-                                           "additionalProperties": False}},
-                                       "strategy": {"type": "string",
-                                                    "enum": ["single_pass", "two_pass"],
-                                                    "default": "single_pass"},
-                                       "batch_chars": {"type": "integer", "minimum": 200},
-                                       "write_batch_candidates": {"type": "integer",
-                                                                  "minimum": 1,
-                                                                  "default": 40},
-                                       "max_total_cards": {"type": "integer", "minimum": 0},
-                                       "fallback_occurred_at": _OPT_STR,
-                                       # 断点续跑：把上次的 progress 传回来
-                                       "progress": _import_progress(),
+                        "properties": {**_import_request_properties(),
                                        "max_batches": {"type": "integer",
                                                        "minimum": 1}},
                         "additionalProperties": True},
             "response": _ok_envelope(_import_progress()),
+        },
+        # ---- 宿主驱动的分批导入：宿主调模型，服务切批/问/解析/写库/推进进度 ----
+        "history.import_begin": {
+            "request": {"type": "object",
+                        "required": ["scope", "material", "locale"],
+                        "properties": {
+                            **_import_request_properties(),
+                            # service（默认）：服务写自己的 Store；
+                            # host：服务只判断，宿主写自己的库再 import_commit。
+                            "write_mode": {"type": "string",
+                                           "enum": ["service", "host"],
+                                           "default": "service"},
+                            # 只用于 host 模式：宿主库里这个 owner 已有、可见的卡。
+                            "existing_cards": {"type": "array",
+                                               "items": {"type": "object"}}},
+                        "additionalProperties": True},
+            "response": _ok_envelope(import_state),
+        },
+        "history.import_feed": {
+            "request": {"type": "object",
+                        "required": ["session_id", "reply"],
+                        "properties": {"session_id": _STR, "reply": _STR,
+                                       "truncated": {"type": "boolean",
+                                                     "default": False},
+                                       "finish_reason": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(import_state),
+        },
+        "history.import_commit": {
+            "request": {"type": "object",
+                        "required": ["session_id", "record_ids"],
+                        "properties": {"session_id": _STR,
+                                       # 与 needs_commit 的 batch.mutations 一一对应
+                                       "record_ids": {"type": "array",
+                                                      "items": _STR}},
+                        "additionalProperties": True},
+            "response": _ok_envelope(import_state),
+        },
+        "history.import_fail": {
+            "request": {"type": "object",
+                        "required": ["session_id", "error"],
+                        "properties": {"session_id": _STR,
+                                       "error": _NONEMPTY_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(import_state),
+        },
+        "history.import_cancel": {
+            "request": {"type": "object", "required": ["session_id"],
+                        "properties": {"session_id": _STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope(cancelled),
         },
         "records.delete": {
             "request": {"type": "object",
@@ -692,6 +848,7 @@ def schemas() -> dict[str, Any]:
         "OperationReceipt": _receipt(),
         "ContextResult": _context_result(),
         "SearchResult": _search_result(),
+        "RelatedResult": _related_result(),
         "BrowseItem": _browse_item(),
         "ExportResult": _export_result(),
         "BrowsePage": _page_result({
@@ -702,6 +859,7 @@ def schemas() -> dict[str, Any]:
         "ErrorEnvelope": _error_envelope(),
         "MaintenanceState": _maintenance_state(),
         "ImportProgress": _import_progress(),
+        "ImportSessionState": _import_session_state(),
     }
 
 
@@ -713,12 +871,14 @@ WIRE_OPERATIONS: tuple[str, ...] = (
     "manifest.get", "schema.get", "health.get",
     "capture.run", "capture.begin", "capture.feed", "capture.cancel",
     "context.get",
-    "records.search",
+    "records.search", "records.related",
     "maintenance.check", "maintenance.run", "maintenance.begin",
     "maintenance.feed", "maintenance.cancel",
     "records.browse", "records.export", "records.delete",
     "records.write", "records.promote", "records.migrate",
     "history.import",
+    "history.import_begin", "history.import_feed", "history.import_commit",
+    "history.import_fail", "history.import_cancel",
     "tool.list", "tool.invoke",
 )
 
@@ -732,9 +892,12 @@ _CAPABILITY_BACKING: dict[str, tuple[tuple[str, ...], ...]] = {
     #: 主动搜索（只返回真实命中）。模型工具 memory_search 走的是同一个实现，
     #: 但它只给文本；要 id / 分数 / 排序版本的宿主用 records.search。
     "search": (("records.search",),),
-    "maintenance": (("maintenance.run",),
-                    ("maintenance.begin", "maintenance.feed",
-                     "maintenance.cancel")),
+    #: 关联读取（一跳邻居）。owner / 挂载点 / 生命周期由服务按可信 scope 过滤。
+    "related": (("records.related",),),
+    #: check 是两条 lane 共用的调度入口：宿主靠它决定要不要排整理。
+    "maintenance": (("maintenance.check", "maintenance.run"),
+                    ("maintenance.check", "maintenance.begin",
+                     "maintenance.feed", "maintenance.cancel")),
     "model_tools": (("tool.list", "tool.invoke"),),
     "tools": (("tool.list", "tool.invoke"),),
     "browse": (("records.browse",),),
@@ -747,6 +910,11 @@ _CAPABILITY_BACKING: dict[str, tuple[tuple[str, ...], ...]] = {
     "promote": (("records.promote",),),
     "migrate": (("records.migrate",),),
     "history_import": (("history.import",),),
+    #: 宿主驱动的分批导入。不需要服务侧模型；commit/fail 是 lane 的一部分 ——
+    #: 缺了它们，host 写入模式的会话开始后永远推进不了。
+    "import_session": (("history.import_begin", "history.import_feed",
+                        "history.import_commit", "history.import_fail",
+                        "history.import_cancel"),),
 }
 
 #: 不由方法撑着的纯策略开关。**现在是空的** —— 曾经 history_import 在这里，
