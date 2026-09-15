@@ -119,6 +119,11 @@ CONTRACT_FIELDS = {
         "cards_limit": 60, "cards_budget_chars": 60_000,
         "card_body_chars": 5_000, "card_summary_chars": 2_000,
     },
+    # Capture 交现有卡（索引由组件挑、target 校验）。None = 旧行为。
+    ("memgarden.contracts", "CaptureRequest"): {
+        "cards": "", "naming_rule": None, "existing_cards": None,
+        "index_cards_limit": 60, "index_budget_chars": 16_000, "index_summary_chars": 400,
+    },
     # 分批导入（MG-8）。全部取默认值时导入语义与续传指纹不变。
     ("memgarden.contracts", "ImportRequest"): {
         "naming_rule": None, "identity": "", "batches": (), "strategy": "single_pass",

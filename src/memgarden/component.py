@@ -69,6 +69,7 @@ from .prompts.capture import (
     build_capture_semantic_retry_prompt,
     capture_semantic_retry_reasons,
     card_fails_semantic_check,
+    card_target_unknown,
     parse_capture_cards,
 )
 from .prompts.migrate import build_migrate_prompt, parse_migrated_cards
@@ -174,12 +175,46 @@ class _CapturePlan:
         self.retried = 0
         self.calls = 0
         self._stage = "first"
+        #: 宿主交了现有卡时，merge/supersede 只许指向其中一张。None = 不校验。
+        self.known_ids: frozenset[str] | None = None
+        #: 内容无关的索引观测量（候选几张、渲染进去几张、多少字）。
+        self.index_trace: dict = {}
 
         if not str(request.locale or "").strip():
             # 不给默认值是刻意的：默认成某种语言，等于把一套分类法硬塞给使用者，
             # 而他不会知道自己的库里为什么长出了中文桶。
             self.rejected = CaptureResult(error="locale_required")
             return
+
+        cards_text = request.cards
+        if request.existing_cards is not None:
+            existing = [dict(c) for c in request.existing_cards if isinstance(c, dict)]
+            # 校验用**全部**现有卡，不是渲染进索引的那几张：一张没挤进索引、但
+            # 模型从对话里看到了 id 的真卡，不该被当成编造的打回。
+            self.known_ids = frozenset(
+                rid for rid in (str(c.get("id") or "").strip() for c in existing) if rid
+            )
+            self.index_trace = {"index_candidates": len(self.known_ids)}
+            if not str(cards_text or "").strip():
+                # 与历史导入同一把尺子挑卡（相关的优先 + 四分之一名额给重要度），
+                # 保持挑出来的顺序渲染 —— 预算不够时从末尾截，留下最相关的。
+                from .importing import bm25_index_ranker, select_index_cards
+                from .rendering import render_card_index_budgeted
+
+                picked = select_index_cards(
+                    existing, request.window or "",
+                    limit=request.index_cards_limit,
+                    ranker=bm25_index_ranker(owner._tokenizer),
+                )
+                cards_text, shown = render_card_index_budgeted(
+                    picked,
+                    budget_chars=request.index_budget_chars,
+                    summary_chars=request.index_summary_chars,
+                )
+                self.index_trace.update({
+                    "index_cards": len(shown),
+                    "index_chars": len(cards_text),
+                })
 
         self.prompt = build_capture_prompt(
             ai_name=request.ai_name,
@@ -189,7 +224,7 @@ class _CapturePlan:
             threads=request.threads,
             identity=request.identity,
             window=request.window,
-            cards=request.cards,
+            cards=cards_text,
             policy=request.policy,
             locale=request.locale,
             material_kind=request.material_kind,
@@ -202,7 +237,8 @@ class _CapturePlan:
                 kind="prompt_built", purpose="capture", attempt=0,
                 detail={"prompt_chars": len(self.prompt),
                         "window_chars": len(self.request.window or ""),
-                        "locale": self.request.locale},
+                        "locale": self.request.locale,
+                        **self.index_trace},
                 prompt=self.prompt,
             ))
             return self.prompt
@@ -210,7 +246,7 @@ class _CapturePlan:
             return build_capture_retry_prompt(self.prompt, self.err or "")
         if self._stage == "semantic_retry":
             return build_capture_semantic_retry_prompt(
-                self.prompt, capture_semantic_retry_reasons(self.cards)
+                self.prompt, capture_semantic_retry_reasons(self.cards, self.known_ids)
             )
         if self._stage == "truncation_retry":
             # 换一版**更简短**的提示词 —— 原样重问多半还是会被截在同一个位置。
@@ -294,7 +330,7 @@ class _CapturePlan:
                 self._stage = "done"
             return
 
-        reasons = capture_semantic_retry_reasons(cards)
+        reasons = capture_semantic_retry_reasons(cards, self.known_ids)
         if reasons and self.retried < self.owner._max_retries:
             self._stage = "semantic_retry"
             self.owner._step(Step(
@@ -321,6 +357,11 @@ class _CapturePlan:
         # 一个不变量只在一条路径上成立,就等于不成立。
         #
         # 丢的是那几张,不是整轮 —— 同窗口的好卡必须活下来。
+        #
+        # 指向不存在的卡的 merge/supersede 同理（宿主交了现有卡才判得了）：
+        # 交出去，整批原子提交的宿主会连同窗口里的好卡一起拒掉。
+        # 两类分开报 —— 「没说覆盖哪张」和「说了一张不存在的」是两种模型失败，
+        # 宿主的指标要能分开看。
         kept = [c for c in self.cards if not card_fails_semantic_check(c)]
         dropped = len(self.cards) - len(kept)
         if dropped:
@@ -328,6 +369,14 @@ class _CapturePlan:
             self.owner._step(Step(
                 kind="dropped", purpose="capture", attempt=self.calls,
                 detail={"why": "semantic", "cards": dropped},
+            ))
+        kept = [c for c in self.cards if not card_target_unknown(c, self.known_ids)]
+        unknown = len(self.cards) - len(kept)
+        if unknown:
+            self.cards = kept
+            self.owner._step(Step(
+                kind="dropped", purpose="capture", attempt=self.calls,
+                detail={"why": "unknown_target", "cards": unknown},
             ))
         if self.request.max_cards is not None:
             cap = max(0, int(self.request.max_cards))
@@ -344,6 +393,10 @@ class _CapturePlan:
         else:
             cap_trace = {}
         trace = self.owner._trace(self.request, self.calls, cards=len(self.cards))
+        if self.index_trace:
+            trace = {**trace, **self.index_trace}
+            if unknown:
+                trace["dropped_unknown_target"] = unknown
         if self.request.max_cards is not None:
             trace = {**trace, "max_cards": max(0, int(self.request.max_cards)),
                      **cap_trace}

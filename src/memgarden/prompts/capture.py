@@ -389,8 +389,24 @@ def build_capture_semantic_retry_prompt(prompt: str, reasons: list[str]) -> str:
     )
 
 
-def card_fails_semantic_check(card: object) -> bool:
-    """这一张卡是不是「要覆盖旧卡但没说覆盖哪张」。
+def card_target_unknown(card: object, known_ids: "frozenset[str] | None") -> bool:
+    """这一张卡是不是「要覆盖一张宿主那里不存在的卡」。
+
+    ``known_ids`` 为 ``None`` = 宿主没交现有卡，判不了，一律不算。
+    缺 target_id 的卡不在这里算（那是 :func:`card_fails_semantic_check` 的另一半）。
+    """
+    if known_ids is None or not isinstance(card, dict):
+        return False
+    action = str(card.get("action") or "").strip().lower()
+    target = str(card.get("target_id") or "").strip()
+    return action in {"merge", "supersede"} and bool(target) and target not in known_ids
+
+
+def card_fails_semantic_check(
+    card: object, known_ids: "frozenset[str] | None" = None,
+) -> bool:
+    """这一张卡是不是「要覆盖旧卡但没说覆盖哪张」（或给了 ``known_ids`` 时，
+    说的那张并不存在）。
 
     单独拎出来是为了让宿主能**只丢这一张**，而不是整轮作废 —— 见
     ``capture_semantic_retry_reasons`` 的说明。
@@ -398,15 +414,22 @@ def card_fails_semantic_check(card: object) -> bool:
     if not isinstance(card, dict):
         return False
     action = str(card.get("action") or "").strip().lower()
-    return action in {"merge", "supersede"} and not str(card.get("target_id") or "").strip()
+    if action in {"merge", "supersede"} and not str(card.get("target_id") or "").strip():
+        return True
+    return card_target_unknown(card, known_ids)
 
 
-def capture_semantic_retry_reasons(cards: list[dict]) -> list[str]:
+def capture_semantic_retry_reasons(
+    cards: list[dict], known_ids: "frozenset[str] | None" = None,
+) -> list[str]:
     """Return content-free prompt feedback for locally provable bad actions.
 
-    Only a missing target is knowable before the durable commit.  A stale or
-    foreign target is deliberately left to the server-side ownership check;
-    guessing from a bounded prompt index could reject a valid older card.
+    A missing target is always knowable before the durable commit.  An unknown
+    target is knowable only when the host handed over its current cards
+    (``CaptureRequest.existing_cards`` → ``known_ids``): the check is against
+    that **whole** set, never the bounded prompt index, so a real older card
+    that did not fit the index is not rejected.  Without ``known_ids`` a stale
+    or foreign target is left to the host's ownership check, as before.
 
     ## 重问之后还是坏的，该怎么办
 
@@ -418,12 +441,18 @@ def capture_semantic_retry_reasons(cards: list[dict]) -> list[str]:
     但整轮作废是另一个极端：同一个窗口里另外三张好卡也一起没了，用户看到的是
     「这段对话我什么都没记住」，而且不报错。丢一张和丢一整轮，对用户的代价差很多。
     """
+    reasons: list[str] = []
     if any(card_fails_semantic_check(card) for card in cards or []):
-        return [
+        reasons.append(
             "你要求覆盖旧卡，但没有给 target_id；"
             "请从上方记忆索引复制确切 ID，或改成 action=add。"
-        ]
-    return []
+        )
+    if any(card_target_unknown(card, known_ids) for card in cards or []):
+        reasons.append(
+            "你给的 target_id 不是现有的卡；"
+            "请从上方记忆索引复制确切 ID，或改成 action=add。"
+        )
+    return reasons
 
 
 def build_capture_prompt(
