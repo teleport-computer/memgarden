@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
 from .contracts import (
     Actor,
@@ -79,6 +79,9 @@ from .text.card_text import build_truncation_retry_prompt
 from .selection import Chain
 from .text.card_text import is_retryable_parse_error
 from .text.leak_signals import GENERIC_SIGNALS, LeakSignals
+
+if TYPE_CHECKING:
+    from .importing import ImportSession
 
 
 @dataclass(frozen=True)
@@ -715,12 +718,40 @@ class GardenComponent:
             window=request.material,
             actor=request.actor, mount=request.mount, locale=request.locale,
             ai_name=request.ai_name, user_name=request.user_name,
+            naming_rule=request.naming_rule, identity=request.identity,
             policy=policy, material_kind=request.material_kind,
             source="history_import",
             max_cards=request.max_cards,
             idempotency_key=request.idempotency_key,
         ))
         return result
+
+    def import_session(
+        self,
+        request: ImportRequest,
+        *,
+        progress: Any = None,
+        existing_cards: Sequence[dict] | None = None,
+        owner_key: str = "",
+        index_ranker: Any = None,
+    ) -> "ImportSession":
+        """开一次由**宿主驱动**的分批历史导入。见 :mod:`memgarden.importing`。
+
+        内核决定怎么切批、每批问什么、怎么解析和去重、进度怎么推进；
+        模型调用和写库归宿主（key、加密、执行器、调度都在宿主那边）。
+
+        ``existing_cards``：宿主库里这个人**已有的、可见的**卡（明文，带 ``id``）。
+        ``owner_key``：绑定进续传指纹的主体标识（默认 ``actor.user_id``）——
+        同一份进度不能拿到另一个人的导入上续传。
+        ``index_ranker``：可选，``ranker(batch_text, cards) -> 卡 id 列表``，
+        用宿主自己的检索挑「已有记忆索引」。
+        """
+        from .importing import ImportSession
+
+        return ImportSession(
+            self, request, progress=progress, existing_cards=existing_cards,
+            binding=("", str(owner_key or request.actor.user_id or "")),
+            ranker=index_ranker)
 
     def write_one(self, request: CuratedWriteRequest) -> CaptureResult:
         """用户明说要记的一件事。

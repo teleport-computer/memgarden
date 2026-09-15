@@ -70,7 +70,7 @@ from .mounted import (
     Scope,
     StorageCapabilityError,
 )
-from .importing import ImportProgress
+from .importing import ImportBatch, ImportBatchResult, ImportProgress, ImportSession
 from .ports import ClockPort, ModelPort, SystemClock
 from .schema import ERROR_CODES, manifest, schemas
 from .service import Service
@@ -118,4 +118,11 @@ __all__ = [
     "ToolDefinition",
     "ToolResult",
     "SCHEMA_VERSION",
+]
+
+# -- 宿主驱动的分批历史导入（MG-8）。单独一块，方便和其它公开面分开审。 -- #
+__all__ += [
+    "ImportSession",
+    "ImportBatch",
+    "ImportBatchResult",
 ]

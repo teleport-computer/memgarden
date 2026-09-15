@@ -486,6 +486,14 @@ class Service:
                 ai_name=str(p.get("ai_name") or ""),
                 user_name=str(p.get("user_name") or ""),
                 idempotency_key=str(p.get("idempotency_key") or ""),
+                batches=tuple(p.get("batches") or ()),
+                strategy=str(p.get("strategy") or "single_pass"),
+                batch_chars=(int(p["batch_chars"])
+                             if p.get("batch_chars") is not None else None),
+                write_batch_candidates=int(p.get("write_batch_candidates") or 40),
+                max_total_cards=(int(p["max_total_cards"])
+                                 if p.get("max_total_cards") is not None else None),
+                fallback_occurred_at=str(p.get("fallback_occurred_at") or ""),
             ),
             progress=progress,
             max_batches=p.get("max_batches"),
