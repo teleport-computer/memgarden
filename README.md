@@ -110,9 +110,9 @@ uv run python examples/mount_in_ten_minutes.py
 | 能力 | 当前提供什么 |
 |---|---|
 | Capture | 对话筛选、新增或取代；格式修正和有限重试；生成可选检索提示词 |
-| 召回 | 上下文块与来源 ID；可插拔 SelectionPolicy；可选 relevant / hybrid 排序 |
+| 召回 | 上下文块与来源 ID；可插拔 SelectionPolicy；自动想起与主动搜索共用一个 BM25 排序器（分词器可注入）；可选 hybrid |
 | Maintenance / Dream | 是否需要整理的确定性检查；模型提出合并等建议；原子更新卡与账本 |
-| 明确保存与工具 | `write_one`、`memory_write`、`memory_search` |
+| 明确保存与搜索 | `write_one`、`search` / `records.search`（只返回真实命中，无命中为空）、模型工具 `memory_write` / `memory_search` |
 | History Import | 分批、游标续传、素材与语义指纹、失败可恢复；核心需要模型 |
 | 浏览、导出、删除 | 分页读取；导出含归档和取代历史；指定卡真删，不用归档冒充删除 |
 | Promote / Migrate | 经宿主授权移动可见范围；升级旧卡字段 |

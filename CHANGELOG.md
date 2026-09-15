@@ -21,3 +21,11 @@
 ### Deprecated
 
 - `memgarden.scoring.relevance`（含 `select_relevant_context_memories_with_trace`、`select_context_memories(_with_trace)`、`memory_relevance_details`）：保留一个版本、行为不变，自动想起请改用 `retrieval.select_context`。
+
+### Added（主动搜索）
+
+- `GardenComponent.search(SearchRequest) -> SearchResult`、`MountedGarden.search(scope, query, *, limit=20, mount=None)`、JSON Lines `records.search`（manifest `capabilities.search`）。只返回 `retrieval.rank` 过了门槛的命中，无命中为空，不经过挑卡策略；`SearchResult.ranking` 与自动想起 trace 的 `version` 相同。`GardenComponent` / `MountedGarden` 接受 `tokenizer=`。
+
+### Fixed
+
+- `MountedGarden.invoke_tool("memory_search")`（含 `tool.invoke` 与 DSH Adapter 注册的工具）以前复用 `context_for_turn`：挑卡策略里有 `RecentStage` 时，搜花园里没有的东西也会返回最近写的几张卡。现在走 `search`，无命中返回空文本；候选只读一次，结果与回填用同一份快照。

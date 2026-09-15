@@ -33,6 +33,7 @@ TOP_LEVEL = {
     "CuratedWriteRequest", "ExportRequest", "ExportResult", "PromoteRequest",
     "MigrateRequest", "MigrateResult", "BrowseItem", "Step",
     "ContextRequest", "ContextResult", "MaintenanceRequest", "MaintenanceResult",
+    "SearchRequest", "SearchResult",
     "ToolCall", "ToolDefinition", "ToolResult", "SCHEMA_VERSION",
 }
 
@@ -41,7 +42,8 @@ STABLE = {
         "SCHEMA_VERSION", "Mount", "DEFAULT_MOUNT", "Actor", "Step", "StepSink",
         "CaptureRequest", "CaptureResult", "ImportRequest", "CuratedWriteRequest",
         "ExportRequest", "ExportResult", "PromoteRequest", "MigrateRequest",
-        "MigrateResult", "ContextRequest", "ContextResult", "MaintenanceRequest",
+        "MigrateResult", "ContextRequest", "ContextResult", "SearchRequest",
+        "SearchResult", "MaintenanceRequest",
         "MaintenanceResult", "ToolDefinition", "ToolCall", "ToolResult",
         "BrowseItem", "to_browse_item",
     },

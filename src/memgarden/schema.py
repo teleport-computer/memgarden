@@ -198,6 +198,30 @@ def _context_result() -> dict:
     }
 
 
+def _search_result() -> dict:
+    return {
+        "type": "object",
+        "required": ["record_ids", "hits", "ranking"],
+        "properties": {
+            "record_ids": {"type": "array", "items": _STR},
+            "hits": {"type": "array", "items": {
+                "type": "object",
+                "required": ["id", "score", "matched", "coverage"],
+                "properties": {
+                    "id": _STR, "score": {"type": "number"},
+                    "matched": {"type": "array", "items": _STR},
+                    "coverage": {"type": "number"},
+                },
+                "additionalProperties": True,
+            }},
+            "ranking": _STR,
+            "trace": {"type": "object"},
+            "schema_version": {"type": "integer"},
+        },
+        "additionalProperties": True,
+    }
+
+
 def _browse_item() -> dict:
     return {
         "type": "object",
@@ -476,6 +500,15 @@ def method_schemas() -> dict[str, Any]:
             "response": _ok_envelope(
                 {"$ref": "#/schemas/ContextResult"}),
         },
+        "records.search": {
+            "request": {"type": "object", "required": ["scope", "query"],
+                        "properties": {"scope": _scope_ref(), "query": _STR,
+                                       "limit": {"type": "integer", "default": 20,
+                                                 "minimum": 0},
+                                       "mount": _OPT_STR},
+                        "additionalProperties": True},
+            "response": _ok_envelope({"$ref": "#/schemas/SearchResult"}),
+        },
         "maintenance.check": {
             "request": {"type": "object", "required": ["scope"],
                         "properties": {"scope": _scope_ref(),
@@ -635,6 +668,7 @@ def schemas() -> dict[str, Any]:
         "Scope": _scope(),
         "OperationReceipt": _receipt(),
         "ContextResult": _context_result(),
+        "SearchResult": _search_result(),
         "BrowseItem": _browse_item(),
         "ExportResult": _export_result(),
         "BrowsePage": _page_result({
@@ -656,6 +690,7 @@ WIRE_OPERATIONS: tuple[str, ...] = (
     "manifest.get", "schema.get", "health.get",
     "capture.run", "capture.begin", "capture.feed", "capture.cancel",
     "context.get",
+    "records.search",
     "maintenance.check", "maintenance.run", "maintenance.begin",
     "maintenance.feed", "maintenance.cancel",
     "records.browse", "records.export", "records.delete",
@@ -671,6 +706,9 @@ _CAPABILITY_BACKING: dict[str, tuple[tuple[str, ...], ...]] = {
     "capture": (("capture.run",),
                 ("capture.begin", "capture.feed", "capture.cancel")),
     "turn_context": (("context.get",),),
+    #: 主动搜索（只返回真实命中）。模型工具 memory_search 走的是同一个实现，
+    #: 但它只给文本；要 id / 分数 / 排序版本的宿主用 records.search。
+    "search": (("records.search",),),
     "maintenance": (("maintenance.run",),
                     ("maintenance.begin", "maintenance.feed",
                      "maintenance.cancel")),

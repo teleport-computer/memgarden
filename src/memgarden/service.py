@@ -165,6 +165,7 @@ class Service:
             "capture.feed": self._capture_feed,
             "capture.cancel": self._capture_cancel,
             "context.get": self._context,
+            "records.search": self._search,
             "maintenance.check": self._maintenance_check,
             "maintenance.run": self._maintenance_run,
             "maintenance.begin": self._maintenance_begin,
@@ -213,7 +214,7 @@ class Service:
         storage_capabilities = {
             "capture", "turn_context", "maintenance", "model_tools", "tools",
             "browse", "export", "delete", "curated_write", "promote", "migrate",
-            "history_import",
+            "history_import", "search",
         }
         try:
             store_caps = self.garden._store.capabilities()
@@ -497,6 +498,14 @@ class Service:
         return self.garden.context_for_turn(
             _scope_from(p), str(p.get("query") or ""),
             limit=int(p.get("limit") or 8),
+            mount=str(mount) if mount is not None else None)
+
+    def _search(self, p: dict) -> Any:
+        mount = p.get("mount")
+        limit = p.get("limit")
+        return self.garden.search(
+            _scope_from(p), str(p.get("query") or ""),
+            limit=20 if limit is None else int(limit),
             mount=str(mount) if mount is not None else None)
 
     def _maintenance_check(self, p: dict) -> Any:

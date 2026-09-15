@@ -56,6 +56,24 @@ uv run python examples/retrieval_runtime.py
 
 示例还检查另一个 owner 召回不到这些记忆。直接用自定义 Store 的宿主同样需要遵守权限和生命周期过滤。
 
+## 3a. 主动搜索
+
+用户或模型**明确要找**某件事时走搜索，不走自动想起：
+
+| | 自动想起（`context_for_turn` / `select_context`） | 主动搜索（`search` / `records.search` / `memory_search`） |
+|---|---|---|
+| 查询 | 宿主拼（例如最近几条消息） | 用户或模型给的一句话 |
+| 背景卡 | 挑卡策略可带（`RecentStage`、`RoleStage`） | **不带**，不经过 selection_policy |
+| 无命中 | 可以为空，也可以只有策略里的背景卡 | **空**；本版没有 `suggestions` 字段 |
+| 返回 | `record_ids` + `blocks` + trace | `record_ids` + `hits[{id, score, matched, coverage}]` + `ranking` + trace |
+
+- `GardenComponent.search(SearchRequest)`：候选由宿主给（已过权限与生命周期过滤），默认 `limit=20`。分词器在构造组件时注入：`GardenComponent(model=..., tokenizer=my_tokenizer)`；`MountedGarden(..., tokenizer=...)` 同样透传。
+- `MountedGarden.search(scope, query, *, limit=20, mount=None)`：候选按 Scope 从库里取，只含当前有效的卡；另一个 owner、未授权 mount、真删或被取代的卡都搜不到。
+- `memory_search` 工具（SDK 与 `tool.invoke`）走同一个 `search`，只返回命中卡的摘要文本，无命中时 `content` 为空串。
+- JSON Lines：`records.search`，manifest 声明 `capabilities.search`；Store 不支持 owner 分区时和其它读路径一起关闭。
+- `hits[].matched` 是命中的查询词，属于用户文本片段；`trace` 只有计数和版本。宿主把结果落日志前自行裁剪。
+- 两条路的 `ranking` / `trace.version` 相同即可确认是同一把尺子。不要要求两条路 top-k 相同：查询不同、候选池不同、自动想起还有配额。
+
 ## 4. Hybrid 的分工
 
 宿主负责 embedding 模型、投影文本、向量存储、更新/删除、权限和成本。Garden 只接收：
