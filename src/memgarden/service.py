@@ -1,4 +1,4 @@
-"""长驻服务 —— 一行一个 JSON 请求，走 stdio（sevenfloor 2026-09-02 §3.10）。
+"""长驻服务 —— 一行一个 JSON 请求，走 stdio。
 
     memgarden serve --storage sqlite:///path/to/memory.db
 
@@ -29,9 +29,11 @@
 
     capture.begin / feed / cancel
     maintenance.begin / feed / cancel
+    history.import_begin / import_feed / import_commit / import_fail / import_cancel
 
-两条 lane 都由服务生成 prompt、解析和写库，Runtime 只负责调用模型并把原始
-reply 与截断状态喂回来。
+这些 lane 都由服务生成 prompt、解析和写库，Runtime 只负责调用模型并把原始
+reply 与截断状态喂回来（导入另有 ``write_mode="host"``：服务只判断，宿主写
+自己的库后 ``import_commit``）。
 
 **错误一律是结构化 code**（见 :data:`memgarden.schema.ERROR_CODES`），调用方
 按 code 分支，不要去解析 message 那句人话 —— 那句会改，code 不会。
@@ -112,6 +114,66 @@ def _scope_from(params: dict) -> Scope:
     )
 
 
+#: wire 上可调的 Dream 渲染预算。不传就用 MaintenanceRequest 的默认值。
+_MAINTENANCE_BUDGETS = ("cards_limit", "cards_budget_chars", "card_body_chars",
+                        "card_summary_chars")
+
+
+def _maintenance_request(params: dict) -> MaintenanceRequest:
+    budgets = {name: int(params[name]) for name in _MAINTENANCE_BUDGETS
+               if params.get(name) is not None}
+    return MaintenanceRequest(
+        locale=str(params.get("locale") or ""),
+        mount=str(params.get("mount") or DEFAULT_MOUNT),
+        ai_name=str(params.get("ai_name") or ""),
+        user_name=str(params.get("user_name") or ""),
+        recent_conversations=str(params.get("recent_conversations") or ""),
+        idempotency_key=str(params.get("idempotency_key") or ""),
+        # 不传 = None = 内核默认称呼规则（和 SDK 一致）；空串也是宿主给的规则，原样用。
+        naming_rule=(str(params["naming_rule"])
+                     if params.get("naming_rule") is not None else None),
+        **budgets,
+    )
+
+
+def _import_request(p: dict) -> Any:
+    """``history.import`` 与 ``history.import_begin`` 共用：同一份请求 → 同一个续传指纹。"""
+    from .contracts import ImportRequest
+
+    return ImportRequest(
+        material=str(p.get("material") or ""),
+        mount=str(p.get("mount") or DEFAULT_MOUNT),
+        locale=str(p.get("locale") or ""),
+        material_kind=str(p.get("material_kind") or ""),
+        max_cards=int(p.get("max_cards") or 50),
+        policy=p.get("policy"),
+        ai_name=str(p.get("ai_name") or ""),
+        user_name=str(p.get("user_name") or ""),
+        idempotency_key=str(p.get("idempotency_key") or ""),
+        # 给了才进续传指纹（ImportSession 只在非 None 时收进去），老调用方指纹不变。
+        naming_rule=(str(p["naming_rule"]) if p.get("naming_rule") is not None else None),
+        batches=tuple(p.get("batches") or ()),
+        strategy=str(p.get("strategy") or "single_pass"),
+        batch_chars=(int(p["batch_chars"])
+                     if p.get("batch_chars") is not None else None),
+        write_batch_candidates=int(p.get("write_batch_candidates") or 40),
+        max_total_cards=(int(p["max_total_cards"])
+                         if p.get("max_total_cards") is not None else None),
+        fallback_occurred_at=str(p.get("fallback_occurred_at") or ""),
+        host_note=str(p.get("host_note") or ""),
+    )
+
+
+def _import_progress_from(p: dict) -> Any:
+    from .importing import ImportProgress
+
+    prior = p.get("progress") or None
+    if not isinstance(prior, dict):
+        return None
+    known = set(ImportProgress.__dataclass_fields__)
+    return ImportProgress(**{k: v for k, v in prior.items() if k in known})
+
+
 def _as_dict(obj: Any) -> Any:
     """把 dataclass / 元组变成能 JSON 化的东西。"""
     from dataclasses import asdict, is_dataclass
@@ -153,6 +215,8 @@ class Service:
         self._sessions: dict[str, dict] = {}
         #: 进行中的 host-driven 整理会话。和 capture 分开，避免类型串用。
         self._maintenance_sessions: dict[str, dict] = {}
+        #: 进行中的 host-driven 导入会话。见 _import_begin。
+        self._import_sessions: dict[str, dict] = {}
         self._methods: dict[str, Callable[[dict], Any]] = {
             # ---- Runtime 生命周期面 ----
             "manifest.get": lambda p: self._manifest(),
@@ -165,6 +229,8 @@ class Service:
             "capture.feed": self._capture_feed,
             "capture.cancel": self._capture_cancel,
             "context.get": self._context,
+            "records.search": self._search,
+            "records.related": self._related,
             "maintenance.check": self._maintenance_check,
             "maintenance.run": self._maintenance_run,
             "maintenance.begin": self._maintenance_begin,
@@ -177,6 +243,11 @@ class Service:
             "records.promote": self._promote,
             "records.migrate": self._migrate,
             "history.import": self._import,
+            "history.import_begin": self._import_begin,
+            "history.import_feed": self._import_feed,
+            "history.import_commit": self._import_commit,
+            "history.import_fail": self._import_fail,
+            "history.import_cancel": self._import_cancel,
             # ---- 模型工具面 ----
             "tool.list": lambda p: [_as_dict(t) for t in self.garden.tools()],
             "tool.invoke": self._invoke,
@@ -213,7 +284,7 @@ class Service:
         storage_capabilities = {
             "capture", "turn_context", "maintenance", "model_tools", "tools",
             "browse", "export", "delete", "curated_write", "promote", "migrate",
-            "history_import",
+            "history_import", "search", "related", "import_session",
         }
         try:
             store_caps = self.garden._store.capabilities()
@@ -233,9 +304,10 @@ class Service:
                 disabled.add("delete")
             if not getattr(store_caps, "supports_atomic_batch", False):
                 disabled.update({"capture", "maintenance", "migrate",
-                                 "history_import"})
+                                 "history_import", "import_session"})
             if not getattr(store_caps, "supports_supersede", False):
-                disabled.update({"capture", "maintenance", "history_import"})
+                disabled.update({"capture", "maintenance", "history_import",
+                                 "import_session"})
             if (not getattr(store_caps, "supports_maintenance_state", False)
                     or not getattr(
                         store_caps, "supports_monotonic_seed_generation", False)):
@@ -248,21 +320,26 @@ class Service:
 
     def _purge_expired_sessions(self) -> None:
         cutoff = self._clock() - self._session_ttl_seconds
-        for sessions in (self._sessions, self._maintenance_sessions):
+        for sessions in (self._sessions, self._maintenance_sessions,
+                         self._import_sessions):
             expired = [sid for sid, entry in sessions.items()
                        if float(entry.get("_touched_at", 0)) <= cutoff]
             for sid in expired:
                 sessions.pop(sid, None)
 
-    def _put_session(self, sessions: dict[str, dict], sid: str,
-                     entry: dict) -> None:
+    def _check_capacity(self, sessions: dict[str, dict], sid: str) -> None:
         self._purge_expired_sessions()
-        active = len(self._sessions) + len(self._maintenance_sessions)
+        active = (len(self._sessions) + len(self._maintenance_sessions)
+                  + len(self._import_sessions))
         if sid not in sessions and active >= self._max_active_sessions:
             raise ServiceError(
                 "session_capacity",
                 "host-driven 在途会话已达到容量上限；请取消旧会话或稍后重试",
             )
+
+    def _put_session(self, sessions: dict[str, dict], sid: str,
+                     entry: dict) -> None:
+        self._check_capacity(sessions, sid)
         sessions[sid] = {**entry, "_touched_at": self._clock()}
 
     def _get_session(self, sessions: dict[str, dict], sid: str) -> dict | None:
@@ -465,32 +542,257 @@ class Service:
         self._require_model()
         from dataclasses import asdict
 
-        from .contracts import ImportRequest
-        from .importing import ImportProgress
-
-        prior = p.get("progress") or None
-        progress = None
-        if isinstance(prior, dict):
-            known = set(ImportProgress.__dataclass_fields__)
-            progress = ImportProgress(
-                **{k: v for k, v in prior.items() if k in known})
         out = self.garden.import_history(
-            _scope_from(p),
-            ImportRequest(
-                material=str(p.get("material") or ""),
-                mount=str(p.get("mount") or DEFAULT_MOUNT),
-                locale=str(p.get("locale") or ""),
-                material_kind=str(p.get("material_kind") or ""),
-                max_cards=int(p.get("max_cards") or 50),
-                policy=p.get("policy"),
-                ai_name=str(p.get("ai_name") or ""),
-                user_name=str(p.get("user_name") or ""),
-                idempotency_key=str(p.get("idempotency_key") or ""),
-            ),
-            progress=progress,
-            max_batches=p.get("max_batches"),
+            _scope_from(p), _import_request(p),
+            progress=_import_progress_from(p), max_batches=p.get("max_batches"),
         )
         return {**asdict(out), "done": out.done, "percent": out.percent}
+
+    # ---- host-driven 分批导入：宿主调模型 ---------------------------- #
+    #
+    # 和 capture.begin/feed 同一个分工：**宿主调模型，Garden 决定怎么切批、
+    # 问什么、怎么解析、怎么去重、进度怎么推进。** 状态机就是
+    # :class:`memgarden.importing.ImportSession`，和 ``history.import``、
+    # SDK 的 ``import_session`` 同一份代码。
+    #
+    #     import_begin  → needs_model {session_id, next_prompt, batch, progress}
+    #     import_feed   → needs_model  还要再问（本批重问，或下一批）
+    #                     needs_commit 仅 host 写入模式：宿主写库后 import_commit
+    #                     completed    材料读完 / 整次上限已满
+    #                     failed       这一批失败，游标不动，会话结束
+    #
+    # ## 两种写入模式
+    #
+    #     service（默认）  服务把每批写进自己的 Store（重读 + CAS，冲突重读重算）
+    #     host             服务只给出 mutations；宿主写自己的库，把真实 id
+    #                      import_commit 回来，写失败 import_fail
+    #
+    # ## 进度是持久状态，会话不是
+    #
+    # 会话在进程内，服务重启或过期就没了。**每个回复都带最新 progress**，宿主
+    # 每次都要存下来；续传就是拿存下的 progress 重新 import_begin。已提交的批次
+    # 不再调模型；写回用的幂等键由批次内容和导入语义算出，重放不会写第二份。
+    #
+    # ## 崩在「写进去了、进度没存下来」之间
+    #
+    # 重跑这一批时模型回复会变（索引里多了上次写的卡），同一个幂等键带着不同内容：
+    #
+    #     service 模式  Store 报同键冲突 → 当作已写入，游标前进，skipped 记 already_applied
+    #     host 模式     宿主先按 batch.idempotency_key 查自己的写入记录；查到了就
+    #                   import_commit {already_applied: true, record_ids: 记录里的 id}
+    #                   （needs_model 时就可以，不必先喂模型；needs_commit 时同样可用）
+    #
+    # 服务自己读写失败、会话容量满这类中途出错，回复 status=failed 并**照样带最新 progress**
+    # （可能已经推进过）；宿主存下它，稍后用它重新 import_begin。
+    #
+    # ⚠️ ``two_pass`` 的 progress 含用户内容（候选事实与原话证据）。宿主按记忆
+    # 正文的等级保存，不写日志。服务自身不记录 progress、prompt 或 reply。
+
+    def _import_begin(self, p: dict) -> Any:
+        import uuid
+
+        scope = _scope_from(p)
+        mode = str(p.get("write_mode") or "service")
+        existing = p.get("existing_cards")
+        if existing is not None and mode != "host":
+            # service 模式的索引来自 Store；再收一份宿主给的卡会让两个事实源打架。
+            raise ServiceError(
+                "invalid_request",
+                "existing_cards 只用于 write_mode=host；service 模式的已有记忆由服务从 Store 读")
+        session = self.garden.import_session(
+            scope, _import_request(p), progress=_import_progress_from(p),
+            existing_cards=list(existing or ()) if mode == "host" else None)
+        sid = uuid.uuid4().hex
+        # 容量在推进任何进度之前查：满了就和别的 begin 一样报 session_capacity，进度没动过。
+        self._check_capacity(self._import_sessions, sid)
+        entry = {"session": session, "scope": scope, "mode": mode,
+                 "attempts": 0}
+        return self._import_next(sid, entry)
+
+    def _import_feed(self, p: dict) -> Any:
+        sid = str(p.get("session_id") or "")
+        entry = self._import_entry(sid)
+        batch = entry.get("batch")
+        if batch is None:
+            raise ServiceError(
+                "invalid_request",
+                "这个导入会话在等 import_commit / import_fail，不在等模型回复")
+        batch.feed(str(p.get("reply") or ""), truncated=bool(p.get("truncated")))
+        prompt = batch.next_prompt()
+        if prompt is not None:
+            return self._import_state(sid, entry, "needs_model", next_prompt=prompt)
+        return self._import_settle(sid, entry, batch.result())
+
+    def _import_commit(self, p: dict) -> Any:
+        sid = str(p.get("session_id") or "")
+        entry = self._import_entry(sid)
+        outcome = entry.get("pending")
+        record_ids = [str(x) for x in p.get("record_ids") or ()]
+        if entry["mode"] == "host" and p.get("already_applied"):
+            # 宿主的写入记录里已经有这个批次键：上次写进去了，只是进度没存。不看这次的
+            # mutations（和上次不同），只推进游标。needs_model / needs_commit 都可以。
+            batch = outcome if outcome is not None else entry.get("batch")
+            if batch is None:
+                raise ServiceError("invalid_request", "这个导入会话当前没有待提交的批次")
+            entry["session"].commit_applied(batch, record_ids=record_ids)
+            entry.update(pending=None, batch=None)
+            return self._import_next(sid, entry)
+        if entry["mode"] != "host" or outcome is None:
+            raise ServiceError(
+                "invalid_request",
+                "import_commit 只在 write_mode=host 且会话处于 needs_commit 时可用")
+        # record_ids 数量对不上时 ImportSession 抛 ValueError → invalid_request，
+        # 会话保持 needs_commit，宿主可以带正确的 id 重试。
+        entry["session"].commit(outcome, record_ids=record_ids)
+        entry["pending"] = None
+        return self._import_next(sid, entry)
+
+    def _import_fail(self, p: dict) -> Any:
+        """宿主放弃当前这一批：模型调用彻底失败，或 host 模式下写库失败。
+
+        记进 ``progress.failed``、游标不动、会话结束。之后用存下的 progress
+        重新 import_begin 就会重试这一批（成功后失败记录自动清掉）。
+        """
+        from .importing import ImportBatchResult
+
+        sid = str(p.get("session_id") or "")
+        entry = self._import_entry(sid)
+        outcome = entry.get("pending")
+        error = str(p.get("error") or "host_failed")
+        if outcome is None and entry.get("batch") is None:
+            # 会话手里没有批次（比如上一步取下一批时出错了）：没有哪一批可以记失败，
+            # 结束会话，进度原样带回。
+            self._import_sessions.pop(sid, None)
+            return self._import_state(sid, entry, "failed", error=error)
+        if outcome is None:
+            batch = entry["batch"]
+            outcome = ImportBatchResult(
+                stage=batch.stage, offset=batch.offset, end=batch.end,
+                idempotency_key=batch.idempotency_key)
+        entry["session"].fail(outcome, error)
+        self._import_sessions.pop(sid, None)
+        return self._import_state(sid, entry, "failed", error=error)
+
+    def _import_cancel(self, p: dict) -> Any:
+        """丢掉会话。**进度不变** —— 宿主手里最后一次存下的 progress 就是断点。"""
+        sid = str(p.get("session_id") or "")
+        return {"cancelled": self._pop_session(
+            self._import_sessions, sid) is not None}
+
+    def _import_entry(self, sid: str) -> dict:
+        entry = self._get_session(self._import_sessions, sid)
+        if entry is None:
+            raise ServiceError(
+                "unknown_session",
+                f"没有这个导入会话: {sid!r}"
+                "(可能是服务重启过或已结束；用最近存下的 progress 重新 history.import_begin)")
+        return entry
+
+    def _import_next(self, sid: str, entry: dict, *, committed: Any = None,
+                     retrying_after: str = "") -> Any:
+        """取下一批并发出提示词；没有批次了就结束会话。"""
+        session = entry["session"]
+        while True:
+            try:
+                if entry["mode"] == "service":
+                    batch, revision = self.garden.prepare_import_batch(
+                        entry["scope"], session)
+                else:
+                    batch, revision = session.next_batch(), None
+            except Exception as exc:  # noqa: BLE001
+                # 前面的批次可能已经提交、进度已经推进：直接抛成 internal_error 的话宿主
+                # 拿不到这份进度，续传会把已写的批次再跑一遍。结束会话，带着进度报失败。
+                self._import_sessions.pop(sid, None)
+                return self._import_state(
+                    sid, {**entry, "batch": None, "pending": None}, "failed",
+                    error=f"storage_failed:{type(exc).__name__}", committed=committed)
+            if batch is None:
+                session._consume_trailing()
+                self._import_sessions.pop(sid, None)
+                return self._import_state(sid, entry, "completed",
+                                          committed=committed)
+            entry.update(batch=batch, revision=revision, pending=None)
+            prompt = batch.next_prompt()
+            if prompt is not None:
+                try:
+                    self._put_session(self._import_sessions, sid, entry)
+                except ServiceError as exc:
+                    # 容量满了。前面串起来结算的批次已经推进了进度 —— 带着它报失败，
+                    # 别让宿主只拿到一个错误码、丢掉这段进度。
+                    return self._import_state(sid, {**entry, "batch": None}, "failed",
+                                              error=exc.code, committed=committed)
+                extra = {"retrying_after": retrying_after} if retrying_after else {}
+                return self._import_state(sid, entry, "needs_model",
+                                          next_prompt=prompt,
+                                          committed=committed, **extra)
+            # 这一批不用问模型（比如请求本身被拒）：直接结算，结果可能是失败。
+            state = self._import_settle(sid, entry, batch.result(),
+                                        chained=True)
+            if state is not None:
+                return state
+
+    def _import_settle(self, sid: str, entry: dict, outcome: Any, *,
+                       chained: bool = False) -> Any:
+        """一批的判断结束了：写回（或交给宿主写）、推进进度、决定下一步。
+
+        ``chained=True`` 时由 _import_next 调用：成功推进后返回 None，让它继续取批。
+        """
+        session = entry["session"]
+        if entry["mode"] == "host":
+            if not outcome.error and outcome.stage != "candidates" and outcome.mutations:
+                entry.update(batch=None, pending=outcome)
+                self._put_session(self._import_sessions, sid, entry)
+                return self._import_state(sid, entry, "needs_commit")
+            session.commit(outcome)
+            if outcome.error:
+                self._import_sessions.pop(sid, None)
+                return self._import_state(sid, entry, "failed", error=outcome.error)
+            return None if chained else self._import_next(sid, entry)
+
+        receipt = self.garden.store_import_batch(
+            entry["scope"], session, outcome,
+            expected_revision=entry.get("revision"))
+        if receipt.error == "revision_conflict":
+            attempts = int(entry.get("attempts") or 0)
+            if attempts < _MAX_CAPTURE_RETRIES:
+                # 重读重算，不是重放旧结果：别人刚写过的卡要进这一批的索引。
+                entry["attempts"] = attempts + 1
+                return self._import_next(sid, entry, retrying_after="conflict")
+            session.fail(outcome, receipt.error)
+        entry["attempts"] = 0
+        if receipt.error:
+            self._import_sessions.pop(sid, None)
+            return self._import_state(sid, entry, "failed", error=receipt.error,
+                                      committed=receipt)
+        if chained:
+            return None
+        return self._import_next(sid, entry, committed=receipt)
+
+    def _import_state(self, sid: str, entry: dict, status: str, *,
+                      committed: Any = None, **extra: Any) -> dict:
+        from dataclasses import asdict
+
+        session = entry["session"]
+        progress = session.progress
+        out: dict[str, Any] = {
+            "status": status,
+            "progress": {**asdict(progress), "done": progress.done,
+                         "percent": progress.percent},
+            "estimate": session.estimate(),
+        }
+        if status in ("needs_model", "needs_commit"):
+            out["session_id"] = sid
+            batch = entry.get("batch") if status == "needs_model" else entry["pending"]
+            out["batch"] = {"stage": batch.stage, "offset": batch.offset,
+                            "end": batch.end,
+                            "idempotency_key": batch.idempotency_key}
+            if status == "needs_commit":
+                out["batch"].update(mutations=list(batch.mutations),
+                                    cards=list(batch.cards))
+        if committed is not None:
+            out["committed"] = committed
+        out.update(extra)
+        return out
 
     def _context(self, p: dict) -> Any:
         mount = p.get("mount")
@@ -498,6 +800,27 @@ class Service:
             _scope_from(p), str(p.get("query") or ""),
             limit=int(p.get("limit") or 8),
             mount=str(mount) if mount is not None else None)
+
+    def _search(self, p: dict) -> Any:
+        mount = p.get("mount")
+        limit = p.get("limit")
+        return self.garden.search(
+            _scope_from(p), str(p.get("query") or ""),
+            limit=20 if limit is None else int(limit),
+            mount=str(mount) if mount is not None else None)
+
+    def _related(self, p: dict) -> Any:
+        """取回卡时的一跳邻居。
+
+        🔴 owner / 挂载点 / 生命周期一律按请求里的可信 scope 过滤：``ids`` 里
+        写别人的卡 id 只会得到空结果，不会证明那张卡存在。
+        """
+        items = self.garden.related(
+            _scope_from(p), list(p.get("ids") or ()),
+            cap=6 if p.get("cap") is None else int(p["cap"]),
+            include_archived=bool(p.get("include_archived")),
+            include_superseded=bool(p.get("include_superseded")))
+        return {"items": items}
 
     def _maintenance_check(self, p: dict) -> Any:
         mount = p.get("mount")
@@ -507,15 +830,7 @@ class Service:
     def _maintenance_run(self, p: dict) -> Any:
         self._require_model()
         return self.garden.run_and_store_maintenance(
-            _scope_from(p),
-            MaintenanceRequest(locale=str(p.get("locale") or ""),
-                               mount=str(p.get("mount") or DEFAULT_MOUNT),
-                               ai_name=str(p.get("ai_name") or ""),
-                               user_name=str(p.get("user_name") or ""),
-                               recent_conversations=str(
-                                   p.get("recent_conversations") or ""),
-                               idempotency_key=str(
-                                   p.get("idempotency_key") or "")))
+            _scope_from(p), _maintenance_request(p))
 
     # ---- host-driven 整理：服务决定语义，宿主调用自己的模型 ------------ #
 
@@ -523,14 +838,7 @@ class Service:
         import uuid
 
         scope = _scope_from(p)
-        request = MaintenanceRequest(
-            locale=str(p.get("locale") or ""),
-            mount=str(p.get("mount") or DEFAULT_MOUNT),
-            ai_name=str(p.get("ai_name") or ""),
-            user_name=str(p.get("user_name") or ""),
-            recent_conversations=str(p.get("recent_conversations") or ""),
-            idempotency_key=str(p.get("idempotency_key") or ""),
-        )
+        request = _maintenance_request(p)
         try:
             prepared, revision = self.garden.prepare_maintenance(scope, request)
         except MaintenanceStorageError as exc:

@@ -110,12 +110,15 @@ uv run python examples/mount_in_ten_minutes.py
 | 能力 | 当前提供什么 |
 |---|---|
 | Capture | 对话筛选、新增或取代；格式修正和有限重试；生成可选检索提示词 |
-| 召回 | 上下文块与来源 ID；可插拔 SelectionPolicy；可选 relevant / hybrid 排序 |
+| 召回 | 上下文块与来源 ID；可插拔 SelectionPolicy；自动想起与主动搜索共用一个 BM25 排序器（分词器可注入）；可选 hybrid |
 | Maintenance / Dream | 是否需要整理的确定性检查；模型提出合并等建议；原子更新卡与账本 |
-| 明确保存与工具 | `write_one`、`memory_write`、`memory_search` |
-| History Import | 分批、游标续传、素材与语义指纹、失败可恢复；核心需要模型 |
+| 明确保存与搜索 | `write_one`、`search` / `records.search`（只返回真实命中，无命中为空）、模型工具 `memory_write` / `memory_search` |
+| 关联读取 | 取回卡时给出一跳邻居（显式链接、同线索）：`related` / `records.related` |
+| History Import | 分批、游标续传、素材与语义指纹、失败可恢复；一次性导入需要服务侧模型，宿主驱动导入（`import_session` / `history.import_*`）由宿主调模型 |
 | 浏览、导出、删除 | 分页读取；导出含归档和取代历史；指定卡真删，不用归档冒充删除 |
 | Promote / Migrate | 经宿主授权移动可见范围；升级旧卡字段 |
+
+SDK、JSON Lines 与 DSH Adapter 接通的能力**并不相同**（例如 DSH Adapter 没接关联读取和导入）。逐项对照见[数据参考](docs/INTEGRATION-AND-DATA.md#各接入面接通了什么)，代码里用 `memgarden.surfaces.surface_capabilities()` 查询。
 
 **你的 Runtime 仍负责**身份认证、模型凭据与超时/取消/用量、调度、embedding、备份和全域数据删除。模型和 Store 都可替换，不表示这些宿主工作会消失。
 

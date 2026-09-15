@@ -1,0 +1,598 @@
+{
+ "default/search": {
+  "pairs": 72,
+  "table": {
+   "1:1": {
+    "floor": 1,
+    "size": 1,
+    "answer_found": 0.806,
+    "noise_returned": 0.006,
+    "trap_returned": 0.154,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:2": {
+    "floor": 1,
+    "size": 2,
+    "answer_found": 0.944,
+    "noise_returned": 0.087,
+    "trap_returned": 0.323,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:3": {
+    "floor": 1,
+    "size": 3,
+    "answer_found": 0.967,
+    "noise_returned": 0.104,
+    "trap_returned": 0.492,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:5": {
+    "floor": 1,
+    "size": 5,
+    "answer_found": 0.975,
+    "noise_returned": 0.209,
+    "trap_returned": 0.508,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:10": {
+    "floor": 1,
+    "size": 10,
+    "answer_found": 0.986,
+    "noise_returned": 0.27,
+    "trap_returned": 0.508,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:20": {
+    "floor": 1,
+    "size": 20,
+    "answer_found": 1.0,
+    "noise_returned": 0.417,
+    "trap_returned": 0.492,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:1": {
+    "floor": 20,
+    "size": 1,
+    "answer_found": 0.917,
+    "noise_returned": 0.009,
+    "trap_returned": 0.154,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:2": {
+    "floor": 20,
+    "size": 2,
+    "answer_found": 0.972,
+    "noise_returned": 0.093,
+    "trap_returned": 0.323,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:3": {
+    "floor": 20,
+    "size": 3,
+    "answer_found": 0.994,
+    "noise_returned": 0.104,
+    "trap_returned": 0.492,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:5": {
+    "floor": 20,
+    "size": 5,
+    "answer_found": 1.0,
+    "noise_returned": 0.209,
+    "trap_returned": 0.508,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:10": {
+    "floor": 20,
+    "size": 10,
+    "answer_found": 1.0,
+    "noise_returned": 0.27,
+    "trap_returned": 0.508,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:20": {
+    "floor": 20,
+    "size": 20,
+    "answer_found": 1.0,
+    "noise_returned": 0.417,
+    "trap_returned": 0.492,
+    "n": {
+     "answer": 360,
+     "noise": 345,
+     "trap": 65
+    }
+   }
+  }
+ },
+ "default/recall": {
+  "pairs": 73,
+  "table": {
+   "1:1": {
+    "floor": 1,
+    "size": 1,
+    "answer_found": 0.959,
+    "noise_returned": 0.061,
+    "trap_returned": 0.538,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:2": {
+    "floor": 1,
+    "size": 2,
+    "answer_found": 0.986,
+    "noise_returned": 0.238,
+    "trap_returned": 0.862,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:3": {
+    "floor": 1,
+    "size": 3,
+    "answer_found": 1.0,
+    "noise_returned": 0.31,
+    "trap_returned": 0.908,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:5": {
+    "floor": 1,
+    "size": 5,
+    "answer_found": 1.0,
+    "noise_returned": 0.429,
+    "trap_returned": 0.923,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:10": {
+    "floor": 1,
+    "size": 10,
+    "answer_found": 1.0,
+    "noise_returned": 0.583,
+    "trap_returned": 0.954,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:20": {
+    "floor": 1,
+    "size": 20,
+    "answer_found": 1.0,
+    "noise_returned": 0.67,
+    "trap_returned": 0.954,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:1": {
+    "floor": 20,
+    "size": 1,
+    "answer_found": 0.986,
+    "noise_returned": 0.061,
+    "trap_returned": 0.538,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:2": {
+    "floor": 20,
+    "size": 2,
+    "answer_found": 0.986,
+    "noise_returned": 0.243,
+    "trap_returned": 0.862,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:3": {
+    "floor": 20,
+    "size": 3,
+    "answer_found": 1.0,
+    "noise_returned": 0.313,
+    "trap_returned": 0.908,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:5": {
+    "floor": 20,
+    "size": 5,
+    "answer_found": 1.0,
+    "noise_returned": 0.429,
+    "trap_returned": 0.923,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:10": {
+    "floor": 20,
+    "size": 10,
+    "answer_found": 1.0,
+    "noise_returned": 0.583,
+    "trap_returned": 0.954,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:20": {
+    "floor": 20,
+    "size": 20,
+    "answer_found": 1.0,
+    "noise_returned": 0.67,
+    "trap_returned": 0.954,
+    "n": {
+     "answer": 365,
+     "noise": 345,
+     "trap": 65
+    }
+   }
+  }
+ },
+ "cjk-words/search": {
+  "pairs": 59,
+  "table": {
+   "1:1": {
+    "floor": 1,
+    "size": 1,
+    "answer_found": 0.508,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:2": {
+    "floor": 1,
+    "size": 2,
+    "answer_found": 0.915,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:3": {
+    "floor": 1,
+    "size": 3,
+    "answer_found": 0.922,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:5": {
+    "floor": 1,
+    "size": 5,
+    "answer_found": 0.963,
+    "noise_returned": 0.009,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:10": {
+    "floor": 1,
+    "size": 10,
+    "answer_found": 0.966,
+    "noise_returned": 0.026,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:20": {
+    "floor": 1,
+    "size": 20,
+    "answer_found": 0.997,
+    "noise_returned": 0.043,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:1": {
+    "floor": 20,
+    "size": 1,
+    "answer_found": 0.814,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:2": {
+    "floor": 20,
+    "size": 2,
+    "answer_found": 0.949,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:3": {
+    "floor": 20,
+    "size": 3,
+    "answer_found": 0.956,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:5": {
+    "floor": 20,
+    "size": 5,
+    "answer_found": 0.98,
+    "noise_returned": 0.009,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:10": {
+    "floor": 20,
+    "size": 10,
+    "answer_found": 0.983,
+    "noise_returned": 0.032,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:20": {
+    "floor": 20,
+    "size": 20,
+    "answer_found": 0.997,
+    "noise_returned": 0.043,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 295,
+     "noise": 345,
+     "trap": 65
+    }
+   }
+  }
+ },
+ "cjk-words/recall": {
+  "pairs": 70,
+  "table": {
+   "1:1": {
+    "floor": 1,
+    "size": 1,
+    "answer_found": 0.8,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:2": {
+    "floor": 1,
+    "size": 2,
+    "answer_found": 0.94,
+    "noise_returned": 0.026,
+    "trap_returned": 0.462,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:3": {
+    "floor": 1,
+    "size": 3,
+    "answer_found": 0.957,
+    "noise_returned": 0.043,
+    "trap_returned": 0.538,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:5": {
+    "floor": 1,
+    "size": 5,
+    "answer_found": 0.969,
+    "noise_returned": 0.107,
+    "trap_returned": 0.615,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:10": {
+    "floor": 1,
+    "size": 10,
+    "answer_found": 0.991,
+    "noise_returned": 0.194,
+    "trap_returned": 0.615,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "1:20": {
+    "floor": 1,
+    "size": 20,
+    "answer_found": 0.994,
+    "noise_returned": 0.31,
+    "trap_returned": 0.615,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:1": {
+    "floor": 20,
+    "size": 1,
+    "answer_found": 0.843,
+    "noise_returned": 0.0,
+    "trap_returned": 0.0,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:2": {
+    "floor": 20,
+    "size": 2,
+    "answer_found": 0.94,
+    "noise_returned": 0.026,
+    "trap_returned": 0.462,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:3": {
+    "floor": 20,
+    "size": 3,
+    "answer_found": 0.957,
+    "noise_returned": 0.046,
+    "trap_returned": 0.538,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:5": {
+    "floor": 20,
+    "size": 5,
+    "answer_found": 0.969,
+    "noise_returned": 0.107,
+    "trap_returned": 0.615,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:10": {
+    "floor": 20,
+    "size": 10,
+    "answer_found": 0.991,
+    "noise_returned": 0.194,
+    "trap_returned": 0.615,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   },
+   "20:20": {
+    "floor": 20,
+    "size": 20,
+    "answer_found": 0.994,
+    "noise_returned": 0.31,
+    "trap_returned": 0.615,
+    "n": {
+     "answer": 350,
+     "noise": 345,
+     "trap": 65
+    }
+   }
+  }
+ }
+}

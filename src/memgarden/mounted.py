@@ -5,7 +5,7 @@
     GardenComponent   只判断，不碰存储。内核可被独立测试、可被替换的前提。
     MountedGarden     把 StoragePort 接上，负责 load → 判断 → 原子写回 → 回执。
 
-为什么要有这一层（sevenfloor 2026-09-02 §3.1）：只有 ``GardenComponent`` 的话，
+为什么要有这一层：只有 ``GardenComponent`` 的话，
 **每个接入方都得自己编排** tenant、actor、allowed mounts、load、生命周期过滤、
 mutation 执行、CAS、幂等键、整理账本、工具搜索、失败后重读重算。那不叫插件，
 叫零件——而且这些语义写错了不会报错，只会悄悄丢记忆。
@@ -19,8 +19,9 @@ mutation 执行、CAS、幂等键、整理账本、工具搜索、失败后重�
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Sequence
 
+from . import timestamps
 from .component import GardenComponent
 from .contracts import (
     Actor,
@@ -28,6 +29,8 @@ from .contracts import (
     ContextRequest,
     ContextResult,
     MaintenanceRequest,
+    SearchRequest,
+    SearchResult,
     ToolCall,
     ToolResult,
 )
@@ -251,6 +254,11 @@ class MountedGarden:
             cards=request.cards or render_card_index(cards),
             buckets=request.buckets or render_buckets(cards),
             threads=request.threads or render_threads(cards),
+            # Store 是事实源：merge/supersede 的 target_id 只许指向这次快照里的卡。
+            # 宿主另给的 existing_cards 一律换成快照 —— 两份来源会让「索引里看到的」和
+            # 「校验认的」对不上；CAS 冲突重算时这里重新读，校验名单跟着新快照走。
+            # 模型编出来的 id 由组件重问、仍不对只丢那一张，同窗口的好卡照常落库。
+            existing_cards=cards,
         )
         return prepared, snapshot.revision
 
@@ -296,14 +304,7 @@ class MountedGarden:
         以前要调用方先把候选准备好，于是每个接入方都要重写一遍：查库、
         生命周期过滤、mount 过滤、权限过滤、投影、回填。现在归这里。
         """
-        # 宿主可以把这一轮**收窄**到某一个挂载点。收窄同样要过权限检查 ——
-        # 悄悄忽略一个不认识的 mount，宿主会以为自己限制住了，实际读的是全部。
-        if mount is not None:
-            scope.check(mount)
-        mounts = (mount,) if mount is not None else scope.mounts()
-        candidates = [c for c in self._readable_cards(scope)
-                      if mount is None
-                      or str(c.get("mount") or DEFAULT_MOUNT) == mount]
+        mounts, candidates = self._scoped_cards(scope, mount=mount)
         return self.component.build_context(ContextRequest(
             query=query,
             actor=scope.actor,
@@ -311,6 +312,95 @@ class MountedGarden:
             candidates=candidates,
             limit=limit,
         ))
+
+    # -- 主动搜索 -------------------------------------------------------- #
+
+    def search(
+        self,
+        scope: Scope,
+        query: str,
+        *,
+        limit: int = 20,
+        mount: str | None = None,
+    ) -> SearchResult:
+        """按查询找真实命中的卡 —— 候选同样自己从库里取、按 Scope 过滤。
+
+        **不走 selection_policy**：策略里可能有 RecentStage 这类不看查询的段，
+        自动想起用它打底没问题，主动搜索混进来就是答非所问。无命中返回空。
+
+        权限和生命周期过滤与 :meth:`context_for_turn`、:meth:`related` 是同一个
+        :meth:`_scoped_cards`：只看当前有效的卡（归档、被取代的不参与；真删的卡
+        Store 里已经没有）。
+        """
+        mounts, candidates = self._scoped_cards(scope, mount=mount)
+        return self.component.search(SearchRequest(
+            query=query,
+            actor=scope.actor,
+            mounts=tuple(mounts),
+            candidates=candidates,
+            limit=limit,
+        ))
+
+    # -- 关联读取 -------------------------------------------------------- #
+
+    def related(
+        self,
+        scope: Scope,
+        ids: Any,
+        *,
+        cap: int = 6,
+        include_archived: bool = False,
+        include_superseded: bool = False,
+    ) -> list[dict]:
+        """取回 ``ids`` 这几张卡时顺带给出的一跳邻居 —— **候选自己从库里取**。
+
+        语义见 :func:`memgarden.related.one_hop`。这里负责的是它要求宿主做的
+        那一半：只读 ``scope`` 的 owner 与挂载点；硬删的卡不在库里，自然读不到；
+        生命周期翻译成规范 ``status``（被取代 → ``superseded``，普通归档 →
+        ``archived``），于是归档卡永不出现、被取代的卡只沿显式链接出现。
+
+        参考 Store 执行 supersede 时只在**旧卡**上写 ``superseded_by``。为了让
+        「这张新卡取代了哪几张」这条正向关系在内置 Store 上也成立，源卡的
+        ``supersedes`` 会并入「``superseded_by`` 指向源卡」的那些卡。反方向
+        （从旧卡找取代它的新卡）不做。
+
+        ``ids`` 里读不到的卡（别人的、硬删的、不在允许挂载点的）静默忽略 ——
+        它们本来就不该被证明存在。源卡默认只取 active；取回历史卡时用
+        ``include_archived`` / ``include_superseded`` 放开，和浏览的开关同义。
+        """
+        from .related import links, one_hop
+
+        if isinstance(ids, str) or not isinstance(ids, (list, tuple)):
+            raise ValueError("ids must be a list of record ids")
+        wanted = [str(i).strip() for i in ids if str(i or "").strip()]
+        if not wanted:
+            return []
+        _mounts, cards = self._scoped_cards(
+            scope, statuses=("active", "superseded", "archived"), annotate=True)
+        allowed = {"active"}
+        if include_archived:
+            allowed.add("archived")
+        if include_superseded:
+            allowed.add("superseded")
+        by_id = {str(c.get("id") or ""): c for c in cards}
+        sources = []
+        for rid in dict.fromkeys(wanted):
+            card = by_id.get(rid)
+            if card is None or card["status"] not in allowed:
+                continue
+            replaced = sorted(
+                str(c.get("id")) for c in cards
+                if str(c.get("superseded_by") or "").strip() == rid
+                and isinstance(c.get("id"), str))
+            if replaced:
+                explicit = links(card.get("supersedes"))
+                card = {**card, "supersedes": explicit + [
+                    r for r in replaced if r not in explicit]}
+            sources.append(card)
+        if not sources:
+            return []
+        # 不认识的生命周期值不猜成 active —— fail closed，_scoped_cards 已经把它们挡在外面。
+        return one_hop(sources, cards, cap=cap)
 
     # -- 整理 ------------------------------------------------------------ #
 
@@ -336,6 +426,16 @@ class MountedGarden:
             if not c.get("archived") and not c.get("superseded_by")
             and str(c.get("lifecycle") or "active") == "active"
         ]
+        # Dream 按 ``cards`` 的顺序渲染、预算满了就停（默认 60 张）。Store 读出来的顺序
+        # 不保证任何东西（SQLite 的 SELECT 没有 ORDER BY，实际是插入顺序），于是卡一多，
+        # 提示词里永远是最老的 60 张 —— 刚写进来、正是它们触发了这次整理的新卡模型看不到，
+        # 水位线和签名却照样推进，这批新卡再也不会被整理。
+        #
+        # 取**新的在前**（created_at 倒序，同时刻按 id 升序）：触发整理的正是水位线之后的
+        # 新卡，按时间取不需要知道「哪些是新的」（真删会让计数和具体卡对不上）。代价是
+        # 超出预算的老卡这次看不到 —— 预算本来就只能装下一部分，宁可让新卡和最近的邻居同框。
+        active.sort(key=lambda c: str(c.get("id") or ""))
+        active.sort(key=lambda c: timestamps.sort_key(c.get("created_at")), reverse=True)
         ledger = self.maintenance_ledger(scope, mount=mount)
         generations = getattr(snapshot, "seed_generations", {}) or {}
         seed_rows = sum(
@@ -503,7 +603,8 @@ class MountedGarden:
 
     # -- 历史导入 ---------------------------------------------------------- #
 
-    #: 一批多少字。够模型一次读完，也够小到中断时不心疼。
+    #: 一批多少字。**只读的兼容别名**：导入会话不读它，子类改写这个属性不改变批次大小。
+    #: 默认值在 ``importing.IMPORT_BATCH_CHARS``；要换批次大小传 ``ImportRequest.batch_chars``。
     IMPORT_BATCH_CHARS = 6000
 
     def import_history(self, scope: Scope, request: Any, *,
@@ -514,6 +615,11 @@ class MountedGarden:
         ``max_batches`` 限制这一次最多跑几批 —— 宿主可以跑一小段就把进度
         交还给用户（显示百分比），下次接着来。
 
+        切批、续传校验、提示词、解析、去重、上限都在
+        :class:`memgarden.importing.ImportSession` 里，和宿主驱动的
+        ``GardenComponent.import_session`` 是同一份。这里只多做两件事：
+        每批写卡前**重新读一次库**（跨批去重的依据），以及带 CAS 写回。
+
         ## 为什么必须串行
 
         第 N 批做判断时，前 N-1 批写进去的卡就在它的「已有记忆索引」里，
@@ -521,124 +627,142 @@ class MountedGarden:
         状态。并行跑的话每批看到的都是导入前的旧状态，同一件事在不同批里
         各写一张，谁也不知道。
         """
-        from .contracts import CaptureRequest
-        from .importing import ImportProgress, batch_key, split_material
-
-        import hashlib
-        import json
-
-        material = str(getattr(request, "material", "") or "")
-        mount = scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT)
-        policy = getattr(request, "policy", None) or "history_import"
-        batch_card_limit = max(
-            1, int(getattr(request, "max_cards", 50) or 50))
-        source_digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        fingerprint_payload = [
-            "history-import-v1", source_digest, scope.tenant_id, scope.owner(),
-            mount, str(getattr(request, "locale", "") or ""), policy,
-            str(getattr(request, "material_kind", "") or ""),
-            str(getattr(request, "ai_name", "") or ""),
-            str(getattr(request, "user_name", "") or ""),
-            str(getattr(request, "idempotency_key", "") or ""),
-            batch_card_limit, self.IMPORT_BATCH_CHARS,
-        ]
-        import_fingerprint = hashlib.sha256(json.dumps(
-            fingerprint_payload, ensure_ascii=False,
-            separators=(",", ":")).encode("utf-8")).hexdigest()
-        prog = progress or ImportProgress(total=len(material),
-                                          source_digest=source_digest,
-                                          import_fingerprint=import_fingerprint)
-        if prog.cursor < 0 or prog.cursor > len(material):
-            raise ValueError("history import progress.cursor 超出材料范围")
-        if prog.source_digest and prog.source_digest != source_digest:
-            raise ValueError(
-                "history import progress 属于另一份材料；请从新进度开始导入")
-        if not prog.source_digest and prog.cursor:
-            raise ValueError(
-                "旧 history import progress 没有 source_digest，无法证明它属于"
-                "当前材料；请从头重启（稳定 batch 幂等键会防止重复落卡）")
-        if prog.import_fingerprint and prog.import_fingerprint != import_fingerprint:
-            raise ValueError(
-                "history import progress 的 scope/mount/locale/policy/来源/幂等/批次规则"
-                "与当前请求不同；不能安全续传")
-        if not prog.import_fingerprint and prog.cursor:
-            raise ValueError(
-                "旧 history import progress 没有 import_fingerprint，无法验证"
-                "当前导入语义；请从头重启")
-        prog.source_digest = source_digest
-        prog.import_fingerprint = import_fingerprint
-        prog.total = len(material)
-        # 同一正文换 mount/policy 也是另一条导入，幂等键必须绑定完整语义。
-        key_prefix = str(getattr(request, "idempotency_key", "") or "import")
-        base_key = f"{key_prefix}:{import_fingerprint[:16]}"
-
-        all_batches = split_material(
-            material, batch_chars=self.IMPORT_BATCH_CHARS)
-        # cursor 是不可信的持久输入，只接受本实现曾经返回过的位置。任意落在
-        # 某批中间的 cursor 会静默跳过该批前半段；落在空白洞里则可能永远卡住。
-        valid_cursors = {0, len(material)}
-        valid_cursors.update(off + len(chunk) for off, chunk in all_batches)
-        if prog.cursor not in valid_cursors:
-            raise ValueError(
-                "history import progress.cursor 不是合法批次边界；请使用服务"
-                "上次原样返回的 progress")
-        batches = [(off, chunk) for off, chunk in all_batches
-                   if off >= prog.cursor]
+        session = self.import_session(scope, request, progress=progress)
         if max_batches is not None and int(max_batches) < 1:
             raise ValueError("max_batches 必须至少为 1")
-        if max_batches:
-            batches = batches[:max_batches]
 
-        # 全空白输入不会生成 batch，但它已经被完整消费；cursor 必须走到末尾，
-        # 否则 progress.done 永远为 False，宿主会无限重试。
-        if not material.strip():
-            if material and not prog.skipped:
-                prog.skipped.append({"offset": 0, "reason": "blank_material"})
-            prog.failed.clear()
-            prog.cursor = len(material)
-            return prog
-
-        for offset, chunk in batches:
-            # 正在重试这一批时先移除它的旧失败记录。成功后 failed 应为空；
-            # 旧实现只 append，导致一次临时失败后即使续传成功也永远 done=False。
-            prog.failed[:] = [f for f in prog.failed
-                              if int(f.get("offset", -1)) != offset]
-            receipt = self.capture_and_store(scope, CaptureRequest(
-                window=chunk,
-                mount=mount,
-                locale=getattr(request, "locale", "") or "",
-                ai_name=getattr(request, "ai_name", "") or "",
-                user_name=getattr(request, "user_name", "") or "",
-                policy=policy,
-                material_kind=str(getattr(request, "material_kind", "") or ""),
-                source="history_import",
-                max_cards=batch_card_limit,
-                idempotency_key=batch_key(base_key, offset=offset, chunk=chunk),
-            ))
-            if receipt.error:
-                # 🔴 失败就**停在这里**，游标不动。继续往下跑的话，后面几批
-                # 看不到这一批本该写进去的卡，会把同一件事再记一遍；
-                # 而游标推过去了，这一批永远不会被重试。
-                prog.failed.append({"offset": offset, "error": receipt.error})
+        ran = 0
+        while max_batches is None or ran < int(max_batches):
+            # 只看游标处还有没有批次，不在这里取批：取批会按旧索引白挑一遍卡，
+            # prepare_import_batch 重读库后还要再挑一次。整次上限满了由它记下来。
+            session._consume_trailing()
+            if session._expected() is None:
                 break
-            prog.cursor = offset + len(chunk)
-            prog.batches_done += 1
-            if receipt.written:
-                prog.cards_written += len(receipt.record_ids)
-            else:
-                # 空结果**不是失败** —— 某一批确实没什么可记是正常的，
-                # 游标照常推进。但要记下来，否则「导入完什么都没有」时
-                # 分不清是材料没内容还是我们漏读了。
-                prog.skipped.append({"offset": offset,
-                                     "reason": receipt.reason or "empty"})
-        # split_material 故意不把纯空白批次送给模型。最后一批有效内容之后若
-        # 还有尾随空白，需要把它也标成已消费；否则下一次没有 batch 可跑，
-        # cursor 却永远小于 total。
-        if not prog.failed and not any(
-            off >= prog.cursor for off, _chunk in all_batches
-        ):
-            prog.cursor = len(material)
-        return prog
+            ran += 1
+            if self._import_one_batch(scope, session):
+                # 🔴 失败就**停在这里**，游标不动（原因见 ImportSession._advance）。
+                break
+        session._consume_trailing()
+        return session.progress
+
+    def import_session(self, scope: Scope, request: Any, *,
+                       progress: Any = None,
+                       existing_cards: Sequence[dict] | None = None):
+        """挂了 Store 的分批导入会话：**宿主调模型，这里写 Store**。
+
+        和 :meth:`import_history` 是同一个构造（actor / mount 取自可信 Scope，
+        续传指纹绑定 tenant + owner），所以两边存下的进度可以互相续传。
+        逐批用 :meth:`prepare_import_batch` 取批、宿主喂模型回复、
+        :meth:`store_import_batch` 写回并推进进度。
+
+        ``existing_cards`` 只给「宿主自己写库」的用法（wire 的 host 写入模式）：
+        那时 Store 不是事实源，索引由宿主给、由 ``session.commit`` 登记。
+        """
+        from .contracts import ImportRequest
+        from .importing import ImportSession
+
+        mount = scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT)
+        if not isinstance(request, ImportRequest):
+            request = ImportRequest(**{
+                name: getattr(request, name)
+                for name in ImportRequest.__dataclass_fields__
+                if hasattr(request, name)
+            })
+        # actor 只能来自可信 Scope。
+        request = replace(request, actor=scope.actor, mount=mount)
+        # 续传指纹绑定 tenant + owner（默认请求下与此前版本逐字节一致，老进度能续传）。
+        return ImportSession(self.component, request, progress=progress,
+                             existing_cards=existing_cards,
+                             binding=(scope.tenant_id, scope.owner()))
+
+    def prepare_import_batch(self, scope: Scope, session: Any) -> tuple[Any, Any]:
+        """游标处的下一批，以及写回时要带的快照版本。
+
+        写卡批次先**重读 Store** 并替换会话的已有记忆索引 —— 前面批次写进去的卡
+        要出现在这一批的提示词里（跨批去重靠它）。候选批次不读库，版本为 None。
+        返回 ``(None, None)`` = 没有可跑的批次了。
+        """
+        session._consume_trailing()
+        expected = session._expected()
+        if expected is None or expected[0] == "candidates":
+            # 不写卡的批次（或没有批次）不读库。直接取批 —— 先取一次再带着库里的卡取第二次
+            # 会白算一遍索引挑卡（每批一次 BM25）。
+            return session.next_batch(), None
+        mount = scope.check(getattr(session.request, "mount", None) or DEFAULT_MOUNT)
+        snapshot = self._snapshot(scope)
+        cards = [c for c in self._visible(scope, snapshot.cards)
+                 if str(c.get("mount") or DEFAULT_MOUNT) == mount]
+        return session.next_batch(existing_cards=cards), snapshot.revision
+
+    def store_import_batch(self, scope: Scope, session: Any, outcome: Any, *,
+                           expected_revision: Any = None) -> OperationReceipt:
+        """把一批判断结果写回 Store 并推进进度。
+
+        - 判断失败（``outcome.error``）：记进 ``progress.failed``，游标不动；
+        - 候选批次、没什么可记：不写库，游标前进；
+        - 写库失败：``session.fail``，游标不动；
+        - ``idempotency_conflict``：同一个批次键之前已经写进去过（崩在写库之后、存进度
+          之前，续传时模型回复又变了）—— 当作已写入，``session.commit_applied``，游标前进，
+          ``skipped`` 记 ``already_applied``，回执 ``reason="already_applied"``、不带 error；
+        - ``revision_conflict``：**进度不动、也不记失败** —— 调用方重新
+          :meth:`prepare_import_batch` 重读重算（重算次数由调用方封顶），
+          放弃时自己调 ``session.fail(outcome, "revision_conflict")``。
+        """
+        trace = dict(getattr(outcome, "trace", {}) or {})
+        if outcome.error:
+            session._advance(outcome, [], register=False)
+            return OperationReceipt(error=outcome.error, trace=trace)
+        if outcome.stage == "candidates" or not outcome.mutations:
+            session._advance(outcome, [], register=False)
+            return OperationReceipt(
+                reason=("candidates_recorded" if outcome.stage == "candidates"
+                        else "nothing_worth_keeping"), trace=trace)
+        mount = scope.check(getattr(session.request, "mount", None) or DEFAULT_MOUNT)
+        receipt = self._apply(
+            scope, mount, outcome.mutations,
+            idempotency_key=outcome.idempotency_key,
+            trace=trace, expected_revision=expected_revision,
+        )
+        if receipt.error == "revision_conflict":
+            return receipt
+        if receipt.error == "idempotency_conflict":
+            # 批次键 = 导入语义 + 批次位置 + 这批材料的摘要，不含模型回复。同键不同内容只会是
+            # 「上次写进去了、进度没存下来」：再写一份是重复，报失败则游标永远卡在这一批。
+            session.commit_applied(outcome)
+            return OperationReceipt(reason="already_applied", trace={
+                **trace, "idempotency_conflict": True})
+        if receipt.error:
+            session.fail(outcome, receipt.error)
+        elif not receipt.written:
+            session._advance(replace(outcome, mutations=[]), [], register=False)
+        else:
+            session._advance(outcome, list(receipt.record_ids), register=False)
+        return receipt
+
+    def _import_one_batch(self, scope: Scope, session: Any) -> bool:
+        """跑游标处的一批并写回。返回 True = 这批失败了。"""
+        from .component import _is_truncated
+
+        purpose = {"candidates": "import_candidates"}
+        for attempt in range(self.MAX_RECOMPUTE):
+            batch, revision = self.prepare_import_batch(scope, session)
+            if batch is None:
+                return False
+            while (ask := batch.next_prompt()) is not None:
+                reply = self.component._model.complete(
+                    ask, purpose=purpose.get(batch.stage, "capture"))
+                batch.feed(reply, truncated=_is_truncated(reply))
+            outcome = batch.result()
+            receipt = self.store_import_batch(
+                scope, session, outcome, expected_revision=revision)
+            if receipt.error == "revision_conflict":
+                if attempt + 1 < self.MAX_RECOMPUTE:
+                    # 重读重算，不是重放旧结果（见 _capture_with_cas）。
+                    continue
+                session.fail(outcome, receipt.error)
+                return True
+            return bool(receipt.error)
+        return False
 
     # -- 用户明说要记 ------------------------------------------------------- #
 
@@ -777,8 +901,14 @@ class MountedGarden:
             query = str((call.arguments or {}).get("query") or "").strip()
             if not query:
                 return ToolResult(ok=False, error="query_required")
-            found = self.context_for_turn(scope, query, limit=8)
-            by_id = {str(c.get("id") or ""): c for c in self._readable_cards(scope)}
+            # 走 search，不走 context_for_turn：后者按挑卡策略执行，策略里的
+            # RecentStage 会把「最近写的几张」混进搜索结果（2026-09-15 修）。
+            # 候选只读一次：结果和回填用同一份快照，不会出现「搜到了、回填时卡已不在」。
+            _mounts, cards = self._scoped_cards(scope)
+            found = self.component.search(SearchRequest(
+                query=query, actor=scope.actor, mounts=tuple(scope.mounts()),
+                candidates=cards, limit=8))
+            by_id = {str(c.get("id") or ""): c for c in cards}
             lines = []
             for rid in found.record_ids:
                 card = by_id.get(rid) or {}
@@ -944,6 +1074,40 @@ class MountedGarden:
                 out.add(name)
         return out
 
+    def _scoped_cards(
+        self, scope: Scope, *, mount: str | None = None,
+        statuses: Sequence[str] = ("active",), annotate: bool = False,
+    ) -> tuple[tuple[str, ...], list[dict]]:
+        """想起、搜索、关联读取共用的候选：**owner + 挂载点 + 生命周期**一次过完。
+
+        三条读路以前各写一遍（前两条一模一样，关联读取另有一套生命周期翻译），
+        漏一处的表现是某一条路读到归档卡或别的挂载点的卡 —— 不会报错。
+
+        - ``mount``：宿主把这次读**收窄**到某一个挂载点。收窄同样要过权限检查 ——
+          悄悄忽略一个不认识的 mount，宿主会以为自己限制住了，实际读的是全部。
+        - ``statuses``：允许的规范生命周期（见 :func:`_lifecycle_status`）。
+          不认识的值一律不当候选（fail closed）。
+        - ``annotate``：给返回的卡副本写上规范 ``status``（:mod:`memgarden.related` 要读它）；
+          想起和搜索不写，候选原样交给组件。
+
+        返回 ``(这次读涉及的挂载点, 卡)``。
+        """
+        if mount is not None:
+            scope.check(mount)
+        mounts = (mount,) if mount is not None else tuple(scope.mounts())
+        allowed = frozenset(statuses)
+        retired = bool(allowed & {"archived", "superseded"})
+        cards = []
+        for card in self._readable_cards(scope, include_archived=retired,
+                                         include_superseded="superseded" in allowed):
+            if mount is not None and str(card.get("mount") or DEFAULT_MOUNT) != mount:
+                continue
+            status = _lifecycle_status(card)
+            if status not in allowed:
+                continue
+            cards.append({**card, "status": status} if annotate else card)
+        return mounts, cards
+
     def _readable_cards(
         self, scope: Scope, *, include_archived: bool = False,
         include_superseded: bool = False,
@@ -1089,6 +1253,27 @@ class MountedGarden:
                     if r.get("id"))
         return OperationReceipt(written=True, record_ids=ids,
                                 revision=str(applied.revision), trace=trace)
+
+
+def _lifecycle_status(card: dict) -> str:
+    """把卡上的生命周期标记翻译成规范 ``status``：active / superseded / archived / deleted / unknown。
+
+    认参考 Store 写的 ``archived`` / ``superseded_by``，也认外部 Store 直接写的
+    ``status`` / ``lifecycle``。被取代优先于归档：参考 Store 的 supersede 会同时写
+    ``archived`` 和 ``superseded_by``，那张卡是「历史版本」，不是「收起来了」。
+    """
+    status = str(card.get("status") or card.get("lifecycle") or "").strip().lower()
+    if status == "deleted" or card.get("deleted") is True:
+        status = "deleted"
+    elif status == "superseded" or str(card.get("superseded_by") or "").strip():
+        status = "superseded"
+    elif status == "archived" or card.get("archived") is True:
+        status = "archived"
+    elif status in {"", "active"}:
+        status = "active"
+    else:
+        status = "unknown"
+    return status
 
 
 def _digest_key(scope: Scope, mutations: list[dict]) -> str:

@@ -20,6 +20,13 @@ function reply(id, result) {
   process.stdout.write(JSON.stringify({ id, ok: true, result }) + '\n')
 }
 
+// `memgarden tools`：Adapter 在 apply() 里同步取工具定义。默认和下面
+// tool.list 的回答一致（空）；给 MEMGARDEN_FAKE_CLI_TOOLS 可模拟两者漂移。
+if (process.argv[2] === 'tools') {
+  process.stdout.write((process.env.MEMGARDEN_FAKE_CLI_TOOLS || '[]') + '\n')
+  process.exit(0)
+}
+
 const rl = readline.createInterface({ input: process.stdin })
 rl.on('line', (line) => {
   const request = JSON.parse(line)

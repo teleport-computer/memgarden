@@ -224,3 +224,8 @@ def common_buckets_guidance(locale: str) -> str:
         + " Do not create near-duplicates of an existing bucket.\n"
         + MEMORY_CARD_LENGTH_RULE_V1
     ).strip()
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["COMMON_BUCKETS_V1", "COMMON_BUCKETS_GUIDANCE_V1", "MEMORY_WRITE_GUIDANCE_V1", "MEMORY_WRITE_RULES_V1", "BUCKET_SETS", "UnknownBucketLocaleError", "bucket_list", "common_buckets_guidance", "normalize_bucket_language"]

@@ -381,9 +381,7 @@ def test_direct_model_methods_report_model_not_configured(method, params):
 
 
 def test_history_import_resume_binds_names_that_enter_the_prompt():
-    garden = MountedGarden(model=None, store=InMemoryStore())
-    garden.capture_and_store = lambda scope, request: OperationReceipt(  # type: ignore[method-assign]
-        reason="nothing_worth_keeping")
+    garden = MountedGarden(model=_ReplyModel('{"cards": []}'), store=InMemoryStore())
     request = ImportRequest(
         material="第一段\n第二段", locale="zh-Hans", ai_name="小花",
         user_name="小明")
@@ -397,9 +395,7 @@ def test_history_import_resume_binds_names_that_enter_the_prompt():
 
 
 def test_history_import_resume_binds_the_store_idempotency_prefix():
-    garden = MountedGarden(model=None, store=InMemoryStore())
-    garden.capture_and_store = lambda scope, request: OperationReceipt(  # type: ignore[method-assign]
-        reason="nothing_worth_keeping")
+    garden = MountedGarden(model=_ReplyModel('{"cards": []}'), store=InMemoryStore())
     request = ImportRequest(material="一段历史", locale="zh-Hans",
                             idempotency_key="import-1")
     complete = garden.import_history(SCOPE, request)

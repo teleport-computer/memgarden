@@ -33,6 +33,41 @@ def render_card_index(cards: list[dict], *, limit: int = DEFAULT_CARD_LIMIT) -> 
     return "\n".join(rows)
 
 
+def render_card_index_budgeted(
+    cards: list[dict], *, budget_chars: int, summary_chars: int,
+) -> tuple[str, list[str]]:
+    """同 :func:`render_card_index` 的行形状，但**保持给定顺序**并受字数预算约束。
+
+    落卡的索引是「按这段对话挑出来、相关的排前面」的，再按重要度重排就把
+    相关性丢了；预算不够时从末尾截，留下的是最相关的那些。
+
+    每行必须是一行：摘要里的换行会让模型把后半截当成另一张卡、抄出不存在的 id。
+    返回 ``(文本, 实际渲染进去的 id)`` —— 宿主和观测都要知道模型到底看见了哪几张。
+    """
+    budget = max(0, int(budget_chars))
+    clip = max(1, int(summary_chars))
+    rows: list[str] = []
+    ids: list[str] = []
+    used = 0
+    for card in cards:
+        rid = str(card.get("id") or "").strip()
+        summary = " ".join(str(card.get("summary") or "").split())
+        if not rid or not summary:
+            continue
+        if len(summary) > clip:
+            summary = summary[: max(0, clip - 1)] + "…"
+        bucket = " ".join(str(card.get("bucket") or "").split())
+        prefix = f"[{bucket}] " if bucket else ""
+        row = f"- {rid}: {prefix}{summary}"
+        cost = len(row) + (1 if rows else 0)
+        if used + cost > budget:
+            break
+        rows.append(row)
+        ids.append(rid)
+        used += cost
+    return "\n".join(rows), ids
+
+
 def render_buckets(cards: list[dict]) -> str:
     """已有桶名，一行。让模型复用而不是每次新造一个近义词。"""
     seen: list[str] = []

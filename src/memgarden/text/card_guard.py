@@ -103,3 +103,8 @@ def default_bucket_for_text(text) -> str:
     ``未分类`` 不在其中(codex plan_review 抓到:英文卡拿到 ``未分类`` 不会被转成
     ``Uncategorized``),所以默认值必须在这里按卡片语言直接给对。空文本 → 中文默认。"""
     return "Uncategorized" if (str(text or "").strip() and not _text_is_chinese(text)) else "未分类"
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["guard_enabled", "hard_field_pollution_reason", "field_pollution_reason", "bucket_pollution_reason", "default_bucket_for_text"]

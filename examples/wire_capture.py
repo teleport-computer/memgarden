@@ -91,6 +91,37 @@ def main():
             context = client.call("context.get", scope=scope, query="spicy food")
             assert context["record_ids"] and context["blocks"]
             print("JSON Lines: handshake -> begin/feed -> stored -> exported -> recalled: PASS")
+
+            # Batched history import driven by YOUR model loop (no service model).
+            assert manifest["capabilities"]["import_session"] is True
+            state = client.call("history.import_begin", scope=scope, locale="en",
+                                material="2024-03: moved to Lisbon for the new job.\n",
+                                idempotency_key="import-1")
+            progress = state["progress"]
+            while state["status"] == "needs_model":
+                # Persist state['progress'] after every reply: resume = import_begin
+                # with it. In two_pass it holds user content -- store it like memory
+                # text, never log it.
+                reply = json.dumps({"cards": [
+                    {"action": "add", "summary": "Moved to Lisbon for work",
+                     "content": "Moved to Lisbon in March 2024 for a new job.",
+                     "threads": ["relocation"], "importance_level": 3},
+                    {"action": "add", "summary": "Flat hunting near the Lisbon office",
+                     "content": "Looked for a flat within walking distance of work.",
+                     "threads": ["relocation"], "importance_level": 2},
+                ]})
+                state = client.call("history.import_feed", session_id=state["session_id"],
+                                    reply=reply, truncated=False)
+                progress = state["progress"]
+            assert state["status"] == "completed" and progress["done"], state
+            moved, flat = state["committed"]["record_ids"]
+
+            # One-hop related read: owner/mount/lifecycle come from the trusted scope.
+            related = client.call("records.related", scope=scope, ids=[moved])
+            assert [(i["id"], i["relation"]) for i in related["items"]] == [(flat, "thread")]
+            other = {"tenant_id": "demo", "memory_owner_id": "someone-else"}
+            assert client.call("records.related", scope=other, ids=[moved])["items"] == []
+            print("JSON Lines: import_begin/feed -> stored -> related read: PASS")
         finally:
             client.close()
 

@@ -87,7 +87,18 @@ This is the candidate stage — turning them into cards and deduplicating happen
 
 HISTORY_IMPORT_FILTER_RUBRIC = """Do not extract small talk, passing moods, jokes, unconfirmed guesses, or one-off events."""
 
-_RUBRIC_HISTORY_IMPORT = HISTORY_IMPORT_OPENING_RUBRIC + "\n" + HISTORY_IMPORT_FILTER_RUBRIC
+#: 单段式（直接写卡）用的开场。
+#:
+#: ⚠️ 不能复用上面那段 OPENING：它是两段式「抽候选」那一步的措辞（宿主 io 的
+#: fact_map 也原样引用它），里面写着「这是候选阶段，写卡和去重在后面」。
+#: 单段式没有「后面」—— 这一次回复就是最终的卡。此前 history_import 档直接拼了
+#: 那段，于是模型被告知「先抽候选、别管去重」，下面的模板却要它输出带 action /
+#: target_id 的完整卡。自相矛盾的指令不报错，只会让去重变差。
+HISTORY_IMPORT_CARD_OPENING_RUBRIC = """You are reading ONE STRETCH of material from this person's past.
+Take in the durable facts worth keeping long term — about this person and about your relationship — and write them as cards now.
+Check the existing memory index below first: something already remembered should be merged into its card, not written again."""
+
+_RUBRIC_HISTORY_IMPORT = HISTORY_IMPORT_CARD_OPENING_RUBRIC + "\n" + HISTORY_IMPORT_FILTER_RUBRIC
 
 #: curated_archive 由候选筛选与写卡两段规则组成，本模块是唯一来源。
 KEEP_ALL_MAP_SUFFIX = """★ This chunk is an archive this person CURATED BY HAND for long-term keeping — it is not a chat log.
@@ -289,3 +300,8 @@ def get_policy(name: str | None) -> CapturePolicy:
         raise UnknownPolicyError(
             f"未知的落卡档位 {key!r}；可用的是：{', '.join(sorted(POLICIES))}"
         ) from None
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["CapturePolicy", "CONVERSATION_CAPTURE", "HISTORY_IMPORT", "CURATED_ARCHIVE", "POLICIES", "DEFAULT_POLICY", "UnknownPolicyError", "get_policy", "language_rule", "RESTRAINT_RULE_QUOTE", "HISTORY_IMPORT_OPENING_RUBRIC", "HISTORY_IMPORT_FILTER_RUBRIC", "KEEP_ALL_MAP_SUFFIX", "KEEP_ALL_WRITE_SUFFIX"]

@@ -117,6 +117,23 @@ class CaptureRequest:
     identity: str = ""
     #: 已有卡片的索引，渲染好的。模型要 supersede 时从这里挑 target_id。
     cards: str = ""
+    #: 这个人**现有的、宿主确认可见的**卡（明文，至少 ``id`` + ``summary``；
+    #: ``bucket`` / ``importance`` 有就用）。``None``（默认）= 宿主不提供，
+    #: 行为与之前逐字相同。给了（空列表也算）时：
+    #:
+    #: 1. ``cards`` 为空 → 组件按这段对话挑旧卡进索引（与历史导入同一把尺子：
+    #:    ``retrieval.rank`` 挑相关的，留四分之一名额给重要度最高的），相关的排前面，
+    #:    受下面三个预算约束。``cards`` 非空时仍原样用宿主渲染的那份。
+    #: 2. merge/supersede 的 ``target_id`` 必须是这批卡里的一张 —— 不是就当作
+    #:    本地可证的语义错误重问一次，仍不是就只丢那一张。
+    #:
+    #: 为什么交整批而不是渲染好的串：只有这样组件才知道哪些 id 是真的。模型抄错
+    #: 一个 id，在「整批原子提交」的宿主里会让同一窗口里的好卡一起被拒。
+    existing_cards: list[dict] | None = None
+    #: 索引最多带几张 / 总字数 / 每张摘要字数。只在组件自己渲染索引时生效。
+    index_cards_limit: int = 60
+    index_budget_chars: int = 16_000
+    index_summary_chars: int = 400
 
     ai_name: str = ""
     user_name: str = ""
@@ -132,6 +149,11 @@ class CaptureRequest:
     source: str = "conversation_capture"
     #: 本批最终允许写出的卡数；None 表示使用 policy 自身规则。
     max_cards: int | None = None
+    #: 宿主给写卡这一步的补充指引，原样放进提示词（``[Host guidance]`` 段，
+    #: 在材料之后、输出格式之前）。内核不解读它：写什么、用什么语言由宿主负责
+    #: （比如「这个花园现在有多少张卡、这类材料一般该落多少张」）。
+    #: 空串（默认）= 不渲染这一段，提示词与没有这个字段时逐字节相同。
+    host_note: str = ""
 
     #: 幂等键。同一批对话重放时防止写两遍；宿主自己保证它对同一批输入稳定。
     idempotency_key: str = ""
@@ -218,6 +240,37 @@ class ImportRequest:
     user_name: str = ""
     idempotency_key: str = ""
     schema_version: int = SCHEMA_VERSION
+
+    # -- 以下字段服务于分批导入（``import_session`` / ``MountedGarden.import_history``）。
+    #    全部取默认值时，导入语义、提示词和续传指纹与加这些字段之前一致。
+
+    #: 称呼规则和关系描述，原样进提示词（与 ``CaptureRequest`` 同名字段同义）。
+    naming_rule: str | None = None
+    identity: str = ""
+    #: 宿主**预先切好**的批次，和 ``material`` 二选一。每项是 dict：
+    #: ``{"text": 必填, "label"?: 这段是什么, "occurred_from"?: ISO, "occurred_to"?: ISO}``。
+    #: 宿主知道消息边界和时间戳（按消息切、带重叠），内核只按字数切会切在半句话上。
+    #: 重叠部分导致的重复由跨批去重处理。
+    batches: tuple = ()
+    #: ``single_pass``（每批直接写卡）或 ``two_pass``（每批抽候选，最后统一写卡）。
+    strategy: str = "single_pass"
+    #: 按 ``material`` 切批时一批多少字。None = 默认 6000。
+    batch_chars: int | None = None
+    #: 两段式写卡阶段一次交给模型多少条候选。
+    write_batch_candidates: int = 40
+    #: 整次导入最多写出多少张卡（add + supersede 都算）。None = 不限。
+    #: ``max_cards`` 只限单批 —— 一份三年的记录分成几百批，单批上限拦不住总量。
+    max_total_cards: int | None = None
+    #: 卡没有 ``occurred_at`` 时用这个日期兜底（宿主明确给的，比如关系开始的那天）。
+    #: 内核自己**绝不**推测日期；不给就留空。
+    fallback_occurred_at: str = ""
+    #: 宿主给**写卡阶段**的补充指引，语义同 ``CaptureRequest.host_note``：
+    #: ``single_pass`` 进每批的写卡提示词，``two_pass`` 只进写卡批次（抽候选那一步不带）。
+    #: 空串（默认）= 提示词逐字节不变。
+    #:
+    #: **不进续传指纹、不影响幂等键**：它是给模型的参考，不改变批次怎么切、进度怎么推进。
+    #: 宿主可以在续传时换一份（比如「花园现有张数」随导入变化），已存的进度照常续。
+    host_note: str = ""
 
 
 @dataclass
@@ -401,6 +454,10 @@ class MaintenanceRequest:
     locale: str = ""
     ai_name: str = ""
     user_name: str = ""
+    #: 怎么称呼这个人的规则，语义同 ``CaptureRequest.naming_rule``：``None``（默认）
+    #: 用 :func:`memgarden.naming.naming_rule` 按 ``user_name`` + ``locale`` 生成；
+    #: 宿主给的串原样进 Dream 提示词，必须已经是目标 locale 的写法。
+    naming_rule: str | None = None
     #: 最近的对话，渲染好的。整理时用来判断哪些记忆已经过时。
     recent_conversations: str = ""
     #: 喂进提示词的那批卡的 id。
@@ -411,6 +468,18 @@ class MaintenanceRequest:
     #:
     #: 留空则不做这项检查 —— 但只要你喂了卡进去，就该把它们的 id 也给出来。
     known_ids: tuple[str, ...] = ()
+
+    #: 渲染进提示词的卡片预算。卡片按 ``cards`` 的顺序、带正文渲染：
+    #: 最多 ``cards_limit`` 张，卡片区总字符不超过 ``cards_budget_chars``
+    #: （按整张卡累加，放不下就停）；单卡正文超过 ``card_body_chars`` 或摘要
+    #: 超过 ``card_summary_chars`` 时截断并标 TRUNCATED，提示词禁止改写这种卡。
+    #: 默认值见 :mod:`memgarden.prompts.dream`（60 张 / 60000 字 / 正文 5000 / 摘要 2000）。
+    #: 实际渲染了哪些、截断了哪些记在 trace 的 ``cards_rendered`` /
+    #: ``cards_truncated`` / ``truncated_card_ids``；``known_ids`` 会自动并入实际渲染的卡。
+    cards_limit: int = 60
+    cards_budget_chars: int = 60_000
+    card_body_chars: int = 5_000
+    card_summary_chars: int = 2_000
 
     #: 只看要不要整理、不真的整理。宿主的调度器用它决定要不要排这个活。
     dry_run: bool = False
@@ -434,6 +503,38 @@ class MaintenanceResult:
     schema_version: int = SCHEMA_VERSION
 
 
+@dataclass
+class SearchRequest:
+    """「用户/模型明确要找这件事」。和 :class:`ContextRequest` 分开是刻意的。
+
+    自动想起可以有背景打底（最近卡、转折点），主动搜索不行：用户明说要找
+    某件事时，拿「最近写的几张」凑数等于答非所问。
+    """
+
+    query: str = ""
+    actor: Actor = field(default_factory=Actor)
+    mounts: tuple[Mount, ...] = (DEFAULT_MOUNT,)
+    #: 候选卡片，宿主已做完生命周期与权限过滤（同 ContextRequest）。
+    candidates: list[dict] = field(default_factory=list)
+    limit: int = 20
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass
+class SearchResult:
+    """真实命中，按相关性排好。**无命中就是空**，没有补位、没有建议。"""
+
+    record_ids: list[str] = field(default_factory=list)
+    #: 与 record_ids 同序：``{id, score, matched, coverage}``。
+    #: ``matched`` 是命中的查询词，属于用户文本片段，宿主落日志前自己裁剪。
+    hits: list[dict] = field(default_factory=list)
+    #: 排序器版本（``retrieval.RankResult.version``）。自动想起的 trace 里是同一个值。
+    ranking: str = ""
+    #: 内容无关：候选数、命中数、被门槛挡下的数量。
+    trace: dict = field(default_factory=dict)
+    schema_version: int = SCHEMA_VERSION
+
+
 # --------------------------------------------------------------------------- #
 # 展示投影 —— 给 Runtime 的通用记忆列表用
 # --------------------------------------------------------------------------- #
@@ -453,7 +554,7 @@ class BrowseItem:
     一个空页面，那看起来像数据丢了。
 
     ⚠️ 这是**展示协议**，不是要求 Garden 删掉 bucket/thread。
-    Garden 原生展示照常用它们（sevenfloor §10）。
+    Garden 原生展示照常用它们。
     """
 
     record_ref: str          # 必需：稳定 id，宿主据此回填内容
@@ -528,6 +629,7 @@ __all__ = [
     "ExportRequest", "ExportResult", "PromoteRequest",
     "MigrateRequest", "MigrateResult",
     "ContextRequest", "ContextResult",
+    "SearchRequest", "SearchResult",
     "MaintenanceRequest", "MaintenanceResult",
     "ToolDefinition", "ToolCall", "ToolResult",
     "BrowseItem", "to_browse_item",

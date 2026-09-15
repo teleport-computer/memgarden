@@ -101,10 +101,12 @@ uv run python examples/retrieval_runtime.py
 
 **DeepSeek Harness:** the [bundled Adapter](adapters/dsh-memgarden/README.md) wires recall, turn-end Capture, Maintenance, tools, and outbox recovery. Configure a compatible DSH/provider, stable owner, database, and persistent state directory. Re-run `memgarden install-dsh` after package upgrades to refresh the copied plugin.
 
-## Retrieval is opt-in
+## Retrieval
 
-- `SelectionPolicy` plugs into `MountedGarden`; low-level relevant/hybrid functions do not automatically replace it.
-- `retrieval_cues` are stored hints, not additional evidence. Include them in your `search_text` or embedding projection to use them for retrieval.
+- Automatic recall (`retrieval.select_context`, default `RelevanceStage`) and active search (`search`, `records.search`, the `memory_search` tool) share one BM25 ranker with an injectable tokenizer; both report the same ranking version. Search returns real matches only and is empty on no hit.
+- One-hop related read (`related`, `records.related`) and host-driven batched history import (`import_session`, `history.import_begin/feed/commit/fail/cancel`) are available on the SDK and JSON Lines. The DSH Adapter wires only capture, per-turn recall, maintenance and the model tools; `memgarden.surfaces.surface_capabilities()` reports what each surface actually wires.
+- `SelectionPolicy` plugs into `MountedGarden`; hybrid functions do not automatically replace it.
+- `retrieval_cues` are stored hints, not additional evidence. The default search text includes them; hosts with their own `search_text` or embedding projection include them there.
 - Stored `Card.role` is singular; selection uses `roles: list[str]`. The [policy example](examples/retrieval_runtime.py) explicitly projects between them without rewriting storage.
 - Hybrid combines host-supplied vectors and lexical scores with weighted RRF. The host owns embeddings, model/projection versions, authorization, lifecycle, and a calibrated cosine threshold. Garden neither generates nor stores vectors.
 - Five-level model importance maps back to the existing 0–1 `importance` field; it is not a second persistent scale.

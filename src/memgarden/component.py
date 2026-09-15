@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .contracts import (
     Actor,
@@ -50,6 +50,8 @@ from .contracts import (
     ContextResult,
     MaintenanceRequest,
     MaintenanceResult,
+    SearchRequest,
+    SearchResult,
     ToolCall,
     ToolDefinition,
     ToolResult,
@@ -67,11 +69,13 @@ from .prompts.capture import (
     build_capture_semantic_retry_prompt,
     capture_semantic_retry_reasons,
     card_fails_semantic_check,
+    card_target_unknown,
     parse_capture_cards,
 )
 from .prompts.migrate import build_migrate_prompt, parse_migrated_cards
 from .prompts.dream import (
     build_dream_prompt,
+    render_dream_cards,
     build_dream_retry_prompt,
     parse_dream_consolidations,
 )
@@ -79,6 +83,9 @@ from .text.card_text import build_truncation_retry_prompt
 from .selection import Chain
 from .text.card_text import is_retryable_parse_error
 from .text.leak_signals import GENERIC_SIGNALS, LeakSignals
+
+if TYPE_CHECKING:
+    from .importing import ImportSession
 
 
 @dataclass(frozen=True)
@@ -112,6 +119,8 @@ class GardenCapabilities:
     #: 硬用那把偏保守的尺子去读用户交出的三年记录，表现是「导入成功但几乎
     #: 没记住什么」，用户和宿主都查不出原因。宁可明说不支持。
     history_import: bool = True
+    #: 主动搜索：只返回真实命中，无命中为空（``search`` / ``records.search``）。
+    search: bool = True
     #: 逻辑可见范围。第一阶段只保证 agent-private —— 声明清楚，
     #: 别让宿主以为写进 shared 会生效。
     mounts: tuple[str, ...] = ("agent-private",)
@@ -166,12 +175,49 @@ class _CapturePlan:
         self.retried = 0
         self.calls = 0
         self._stage = "first"
+        #: 宿主交了现有卡时，merge/supersede 只许指向其中一张。None = 不校验。
+        self.known_ids: frozenset[str] | None = None
+        #: 内容无关的索引观测量（候选几张、渲染进去几张、多少字）。
+        self.index_trace: dict = {}
 
         if not str(request.locale or "").strip():
             # 不给默认值是刻意的：默认成某种语言，等于把一套分类法硬塞给使用者，
             # 而他不会知道自己的库里为什么长出了中文桶。
             self.rejected = CaptureResult(error="locale_required")
             return
+
+        cards_text = request.cards
+        if request.existing_cards is not None:
+            existing = [dict(c) for c in request.existing_cards if isinstance(c, Mapping)]
+            # 校验用**全部**现有卡，不是渲染进索引的那几张：一张没挤进索引、但
+            # 模型从对话里看到了 id 的真卡，不该被当成编造的打回。
+            self.known_ids = frozenset(
+                rid for rid in (str(c.get("id") or "").strip() for c in existing) if rid
+            )
+            self.index_trace = {"index_candidates": len(self.known_ids)}
+            if not str(cards_text or "").strip():
+                # 与历史导入同一把尺子挑卡（相关的优先 + 四分之一名额给重要度），
+                # 保持挑出来的顺序渲染 —— 预算不够时从末尾截，留下最相关的。
+                from .importing import bm25_index_ranker, select_index_cards
+                from .rendering import render_card_index_budgeted
+
+                # always_rank：卡数没超过张数上限时也按相关性排 —— 字数预算照样可能从末尾截，
+                # 不排的话截掉的是宿主列表末尾的卡，而不是最不相关的。
+                picked = select_index_cards(
+                    existing, request.window or "",
+                    limit=request.index_cards_limit,
+                    ranker=bm25_index_ranker(owner._tokenizer),
+                    always_rank=True,
+                )
+                cards_text, shown = render_card_index_budgeted(
+                    picked,
+                    budget_chars=request.index_budget_chars,
+                    summary_chars=request.index_summary_chars,
+                )
+                self.index_trace.update({
+                    "index_cards": len(shown),
+                    "index_chars": len(cards_text),
+                })
 
         self.prompt = build_capture_prompt(
             ai_name=request.ai_name,
@@ -181,10 +227,11 @@ class _CapturePlan:
             threads=request.threads,
             identity=request.identity,
             window=request.window,
-            cards=request.cards,
+            cards=cards_text,
             policy=request.policy,
             locale=request.locale,
             material_kind=request.material_kind,
+            host_note=str(getattr(request, "host_note", "") or ""),
         )
 
     def next_prompt(self) -> str | None:
@@ -194,7 +241,8 @@ class _CapturePlan:
                 kind="prompt_built", purpose="capture", attempt=0,
                 detail={"prompt_chars": len(self.prompt),
                         "window_chars": len(self.request.window or ""),
-                        "locale": self.request.locale},
+                        "locale": self.request.locale,
+                        **self.index_trace},
                 prompt=self.prompt,
             ))
             return self.prompt
@@ -202,7 +250,7 @@ class _CapturePlan:
             return build_capture_retry_prompt(self.prompt, self.err or "")
         if self._stage == "semantic_retry":
             return build_capture_semantic_retry_prompt(
-                self.prompt, capture_semantic_retry_reasons(self.cards)
+                self.prompt, capture_semantic_retry_reasons(self.cards, self.known_ids)
             )
         if self._stage == "truncation_retry":
             # 换一版**更简短**的提示词 —— 原样重问多半还是会被截在同一个位置。
@@ -286,7 +334,7 @@ class _CapturePlan:
                 self._stage = "done"
             return
 
-        reasons = capture_semantic_retry_reasons(cards)
+        reasons = capture_semantic_retry_reasons(cards, self.known_ids)
         if reasons and self.retried < self.owner._max_retries:
             self._stage = "semantic_retry"
             self.owner._step(Step(
@@ -313,6 +361,11 @@ class _CapturePlan:
         # 一个不变量只在一条路径上成立,就等于不成立。
         #
         # 丢的是那几张,不是整轮 —— 同窗口的好卡必须活下来。
+        #
+        # 指向不存在的卡的 merge/supersede 同理（宿主交了现有卡才判得了）：
+        # 交出去，整批原子提交的宿主会连同窗口里的好卡一起拒掉。
+        # 两类分开报 —— 「没说覆盖哪张」和「说了一张不存在的」是两种模型失败，
+        # 宿主的指标要能分开看。
         kept = [c for c in self.cards if not card_fails_semantic_check(c)]
         dropped = len(self.cards) - len(kept)
         if dropped:
@@ -320,6 +373,14 @@ class _CapturePlan:
             self.owner._step(Step(
                 kind="dropped", purpose="capture", attempt=self.calls,
                 detail={"why": "semantic", "cards": dropped},
+            ))
+        kept = [c for c in self.cards if not card_target_unknown(c, self.known_ids)]
+        unknown = len(self.cards) - len(kept)
+        if unknown:
+            self.cards = kept
+            self.owner._step(Step(
+                kind="dropped", purpose="capture", attempt=self.calls,
+                detail={"why": "unknown_target", "cards": unknown},
             ))
         if self.request.max_cards is not None:
             cap = max(0, int(self.request.max_cards))
@@ -336,6 +397,10 @@ class _CapturePlan:
         else:
             cap_trace = {}
         trace = self.owner._trace(self.request, self.calls, cards=len(self.cards))
+        if self.index_trace:
+            trace = {**trace, **self.index_trace}
+            if unknown:
+                trace["dropped_unknown_target"] = unknown
         if self.request.max_cards is not None:
             trace = {**trace, "max_cards": max(0, int(self.request.max_cards)),
                      **cap_trace}
@@ -365,6 +430,8 @@ class _MaintenancePlan:
         self.request = request
         self.rejected: MaintenanceResult | None = None
         self.prompt = ""
+        self.rendered = None
+        self.known_ids: frozenset[str] = frozenset(request.known_ids)
         self.consolidations: list[dict] = []
         self.err: str | None = None
         self.retried = 0
@@ -395,21 +462,43 @@ class _MaintenancePlan:
             )
             return
 
-        rendered = "\n".join(
-            f"- [{c.get('id')}] {c.get('summary','')}" for c in request.cards
+        # 带正文渲染，单卡和总量都有上限。只给标题时 thicken/merge 会在看不到
+        # 正文的情况下重写整张卡（io 2026-08-04 修过，08-29 搬进组件时退回了
+        # 只渲染标题）。
+        self.rendered = render_dream_cards(
+            request.cards,
+            max_cards=request.cards_limit,
+            summary_chars=request.card_summary_chars,
+            body_chars=request.card_body_chars,
+            total_chars=request.cards_budget_chars,
         )
+        # 墓碑卡守卫至少覆盖模型真正见过的卡；宿主另给的 id 一并保留。
+        self.known_ids = frozenset(request.known_ids) | frozenset(
+            self.rendered.rendered_ids)
         self.prompt = build_dream_prompt(
             ai_name=request.ai_name, user_name=request.user_name,
-            cards=rendered, recent_conversations=request.recent_conversations,
+            naming_rule=request.naming_rule,
+            cards=("\n" + self.rendered.text) if self.rendered.text else "",
+            recent_conversations=request.recent_conversations,
             locale=request.locale,
         )
+
+    def _render_trace(self) -> dict:
+        r = self.rendered
+        if r is None:
+            return {}
+        return {"cards_rendered": len(r.rendered_ids),
+                "cards_truncated": len(r.truncated_ids),
+                "cards_omitted": r.omitted,
+                "truncated_card_ids": list(r.truncated_ids)}
 
     def next_prompt(self) -> str | None:
         if self._stage == "first":
             self.owner._step(Step(
                 kind="prompt_built", purpose="dream", attempt=0,
                 detail={"prompt_chars": len(self.prompt),
-                        "cards": len(self.request.cards)},
+                        "cards": len(self.request.cards),
+                        **self._render_trace()},
                 prompt=self.prompt,
             ))
             return self.prompt
@@ -440,7 +529,7 @@ class _MaintenancePlan:
         strict = self._stage == "first"
         cons, _questions, err = parse_dream_consolidations(
             text, strict=strict, signals=self.owner._signals,
-            known_ids=frozenset(self.request.known_ids),
+            known_ids=self.known_ids,
         )
         self.consolidations, self.err = cons, err
         if self._stage == "format_retry":
@@ -455,11 +544,44 @@ class _MaintenancePlan:
             return
         self._stage = "done"
 
+    def _drop_unsafe_targets(self) -> dict:
+        """丢掉指向截断卡、或指向没渲染进提示词的卡的整理建议。
+
+        提示词要求模型不改写 TRUNCATED 的卡 —— 但那只是请求。模型照样把它放进
+        ``card_ids`` 的话，这张卡会被一张只根据前 N 个字写出来的新卡取代，后半截正文
+        随旧卡退休。没渲染进去的卡模型根本没见过正文，同理。所以在出口硬拦：
+        **只丢这一条建议**，同一次整理里别的建议照收。``mutations`` 和 ``consolidations``
+        同步过滤（宿主用哪一个都一样）。
+        """
+        r = self.rendered
+        if r is None or not self.consolidations:
+            return {}
+        rendered, truncated = frozenset(r.rendered_ids), frozenset(r.truncated_ids)
+        kept, to_truncated, to_unrendered = [], 0, 0
+        for row in self.consolidations:
+            ids = {str(i) for i in row.get("card_ids") or ()}
+            if ids & truncated:
+                to_truncated += 1
+            elif ids - rendered:
+                to_unrendered += 1
+            else:
+                kept.append(row)
+        if not (to_truncated or to_unrendered):
+            return {}
+        self.consolidations = kept
+        self.owner._step(Step(kind="dropped", purpose="dream", attempt=self.calls,
+                              detail={"why": "unsafe_target", "truncated": to_truncated,
+                                      "unrendered": to_unrendered}))
+        return {"dropped_truncated_targets": to_truncated,
+                "dropped_unrendered_targets": to_unrendered}
+
     def finish(self) -> MaintenanceResult:
+        dropped = {} if self.err else self._drop_unsafe_targets()
         trace = {"reason": self.verdict.reason, "new_cards": self.verdict.new_cards,
                  "consolidations": len(self.consolidations),
                  "signature": self.snapshot.signature,
-                 "seed_card_count": self.snapshot.seed_card_count}
+                 "seed_card_count": self.snapshot.seed_card_count,
+                 **self._render_trace(), **dropped}
         self.owner._step(Step(kind="done", purpose="dream", attempt=self.calls,
                               detail={"consolidations": len(self.consolidations),
                                       "retried": self.retried, "error": self.err}))
@@ -566,6 +688,7 @@ class GardenComponent:
         min_new_cards_for_maintenance: int = 10,
         max_capture_retries: int = 1,
         on_step=None,
+        tokenizer=None,
     ) -> None:
         #: 每一步都回调一次。宿主用它记轨迹 —— 不给就什么都不记。
         #: 收进组件的编排不能让宿主的可观测性净退步，这是那条的落点。
@@ -576,6 +699,8 @@ class GardenComponent:
         self._clock = clock or SystemClock()
         self._min_new_cards = min_new_cards_for_maintenance
         self._max_retries = max(0, max_capture_retries)
+        #: 搜索用的分词器（``retrieval.Tokenizer``）。None = 零依赖默认分词器。
+        self._tokenizer = tokenizer
 
     def _step(self, step: Step) -> None:
         """汇报一步。回调抛异常不许影响主流程 —— 记轨迹失败不该让落卡失败。"""
@@ -715,12 +840,45 @@ class GardenComponent:
             window=request.material,
             actor=request.actor, mount=request.mount, locale=request.locale,
             ai_name=request.ai_name, user_name=request.user_name,
+            naming_rule=request.naming_rule, identity=request.identity,
             policy=policy, material_kind=request.material_kind,
             source="history_import",
             max_cards=request.max_cards,
             idempotency_key=request.idempotency_key,
         ))
         return result
+
+    def import_session(
+        self,
+        request: ImportRequest,
+        *,
+        progress: Any = None,
+        existing_cards: Sequence[dict] | None = None,
+        owner_key: str = "",
+        index_ranker: Any = None,
+        tenant: str = "",
+    ) -> "ImportSession":
+        """开一次由**宿主驱动**的分批历史导入。见 :mod:`memgarden.importing`。
+
+        内核决定怎么切批、每批问什么、怎么解析和去重、进度怎么推进；
+        模型调用和写库归宿主（key、加密、执行器、调度都在宿主那边）。
+
+        ``existing_cards``：宿主库里这个人**已有的、可见的**卡（明文，带 ``id``）。
+        ``owner_key``：绑定进续传指纹的主体标识（默认 ``actor.user_id``）——
+        同一份进度不能拿到另一个人的导入上续传。
+        ``tenant``：多租户宿主的租户标识，同样进指纹（同一个 owner_key 在两个租户下的进度
+        不能互相续传）。默认空串，指纹与不传时逐字节相同，老进度照常续传。
+        与 ``MountedGarden.import_session`` 绑的是同一对 ``(tenant, owner)``。
+        ``index_ranker``：可选，``ranker(batch_text, cards) -> 卡 id 列表``，
+        用宿主自己的检索挑「已有记忆索引」。不给就用 ``retrieval.rank``
+        （关掉门槛，分词器用本组件的 ``tokenizer``），见 :func:`memgarden.importing.bm25_index_ranker`。
+        """
+        from .importing import ImportSession
+
+        return ImportSession(
+            self, request, progress=progress, existing_cards=existing_cards,
+            binding=(str(tenant or ""), str(owner_key or request.actor.user_id or "")),
+            ranker=index_ranker)
 
     def write_one(self, request: CuratedWriteRequest) -> CaptureResult:
         """用户明说要记的一件事。
@@ -913,6 +1071,32 @@ class GardenComponent:
             },
         )
 
+    # -- 主动搜索 -------------------------------------------------------- #
+
+    def search(self, request: SearchRequest) -> SearchResult:
+        """按查询找真实命中的卡。
+
+        和 :meth:`build_context` **不是一回事**：那条可以按策略带背景卡（最近、转折点），
+        这条只返回 ``retrieval.rank`` 过了门槛的命中。无命中返回空 —— 不补最近卡，
+        不给「你可能想找」。排序器与自动想起的 ``retrieval.select_context`` 是同一个，
+        ``ranking`` 就是它的版本号。
+
+        候选由宿主给，生命周期和权限过滤在宿主那边做完（同 build_context）。
+        """
+        from .retrieval import rank
+
+        # limit=None 当默认值（20）处理：wire 的 null、宿主从可选配置透传的 None 都不该炸成 TypeError。
+        limit = SearchRequest.limit if request.limit is None else max(0, int(request.limit))
+        # 没有 id 的卡由 rank 丢掉 —— 结果里不会出现空 id（回填不了，也引用不了）。
+        result = rank(request.query, request.candidates, tokenizer=self._tokenizer, limit=limit)
+        return SearchResult(
+            record_ids=result.ids,
+            hits=[{"id": h.id, "score": h.score, "matched": list(h.matched),
+                   "coverage": h.coverage} for h in result.hits],
+            ranking=result.version,
+            trace=dict(result.trace),
+        )
+
     # -- 整理 ------------------------------------------------------------ #
 
     def run_maintenance(self, request: MaintenanceRequest) -> MaintenanceResult:
@@ -980,7 +1164,8 @@ class GardenComponent:
                 }],
             )
         if call.name == "memory_search":
-            # 搜索要读库，而库在宿主手里 —— 内核给不出结果，只能明说。
+            # 搜索要读库，而库在宿主手里 —— 这个入口没有候选，给不出结果，只能明说。
+            # 宿主自己取候选时调 :meth:`search`；接了存储的用 MountedGarden.invoke_tool。
             return ToolResult(ok=False, error="search_requires_host_store")
         return ToolResult(ok=False, error=f"unknown_tool:{call.name}")
 

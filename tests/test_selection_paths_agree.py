@@ -51,7 +51,10 @@ def _chain() -> Chain:
     return Chain(stages=(
         RoleStage("turning_point", limit=3, order_by="occurred_at"),
         RecentStage(limit=2, order_by="created_at"),
-        RelevanceStage(limit=3, any_score=True),
+        # 这条测试比的是 legacy 打分的两种组装；RelevanceStage 默认已换成 bm25，
+        # 必须显式指定 legacy 才是在比同一个打分器。bm25 那条的一致性见
+        # test_retrieval_select_context.py。
+        RelevanceStage(limit=3, any_score=True, scorer="legacy"),
     ))
 
 

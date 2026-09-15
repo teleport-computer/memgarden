@@ -2,6 +2,12 @@
 context_memories selection — pure helpers, no native deps.
 ============================================================
 
+.. deprecated:: Unreleased
+   自动想起改用 :func:`memgarden.retrieval.select_context`（和主动搜索同一个 BM25
+   排序器）；``selection.RelevanceStage`` 默认也已切到 ``scorer="bm25"``。
+   本模块保留一个版本、行为不变，给还没切换的宿主当回滚闸，之后删除。
+   它不在 ``memgarden.STABLE_MODULES`` 里。
+
 纯函数，不依赖任何加解密栈 —— 所以可以直接单测。宿主在自己那边引用它。
 
 Default resident/MCP selection keeps the historical behavior:

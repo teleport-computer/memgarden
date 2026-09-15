@@ -89,3 +89,8 @@ def blast_radius_exceeded(retiring_count: int, active_count: int) -> bool:
     if active <= 0:
         return False
     return retiring > active * _fuse_ratio()
+
+
+#: 稳定公开合同（见 docs/INTEGRATION-AND-DATA.md「稳定公开模块」）。
+#: 删改这里的名字会让宿主的 import 失效，tests/test_public_api_surface.py 会红。
+__all__ = ["known_id_in_text", "result_id_leak", "blast_radius_exceeded"]

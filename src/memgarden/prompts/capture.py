@@ -15,6 +15,7 @@ from ..text.card_text import (
     card_text_rejection,
     extract_json_block,
     format_error,
+    quote_repair_candidates,
     repair_unescaped_quotes,
     sanitize_card_labels,
 )
@@ -58,7 +59,7 @@ _CAPTURE_PROMPT_TEMPLATE = """{framing}
 [Existing memory index (merge/supersede may only copy an exact target_id from here)]{cards}
 [Your relationship]{identity}
 [{window_label}]{window}
-{cap_note}
+{cap_note}{host_note}
 [Output] Output JSON only, nothing else. If nothing is worth remembering, output {{"cards": []}}.
 {{
   "cards": [
@@ -196,6 +197,14 @@ def _cap_note(policy: CapturePolicy) -> str:
     return ""
 
 
+def _host_note(note: str) -> str:
+    """宿主补充指引。空 = 空串，模板逐字节不变（conversation_capture 的 golden 守着）。"""
+    text = str(note or "").strip()
+    if not text:
+        return ""
+    return f"\n[Host guidance]\n{text}\n"
+
+
 def _clamp01(value) -> float:
     try:
         f = float(value)
@@ -226,6 +235,9 @@ def _capture_metadata(row: dict, policy: CapturePolicy) -> tuple[dict, str | Non
             return {}, "is_sensitive_must_be_a_boolean"
         metadata["is_sensitive"] = row["is_sensitive"]
     return metadata, None
+
+
+_UNPARSED = object()
 
 
 def parse_capture_cards(
@@ -264,13 +276,22 @@ def parse_capture_cards(
         # 🔴 先按原样试，失败了才修 —— 修复只跑在出错路径上，
         # 正常回复一个字节都不会被碰到。
         #
-        # 唯一要修的形态：模型引用用户原话时，把双引号写进字符串却没转义
-        # （见 repair_unescaped_quotes）。2026-09-12 prod 上这一种坏法
+        # 唯一要修的形态：模型引用用户原话时，把双引号写进对象成员的值里却没转义
+        # （见 repair_unescaped_quotes；有歧义的形态如漏冒号、数组里漏逗号/错分隔符
+        # 它会原样返回，这里照旧报 json_decode_error）。2026-09-12 prod 上这一种坏法
         # 让 58 个用户连续两天一条记忆都没记进去 —— 因为落卡失败不推进游标，
         # 同一条消息被反复重放，而重放同样的输入必然同样失败。
-        try:
-            doc = json.loads(repair_unescaped_quotes(block))
-        except (ValueError, TypeError):
+        #
+        # 候选块：值里既有裸引号又有 ``}`` 时，旧切法会在那个 ``}`` 处把块切断；
+        # 认字符串的切法给出的完整块排在前面（见 quote_repair_candidates）。
+        doc = _UNPARSED
+        for candidate in quote_repair_candidates(raw):
+            try:
+                doc = json.loads(repair_unescaped_quotes(candidate))
+                break
+            except (ValueError, TypeError):
+                continue
+        if doc is _UNPARSED:
             return [], f"json_decode_error:{type(first).__name__}"
     if not isinstance(doc, dict):
         return [], "not_an_object"
@@ -376,8 +397,24 @@ def build_capture_semantic_retry_prompt(prompt: str, reasons: list[str]) -> str:
     )
 
 
-def card_fails_semantic_check(card: object) -> bool:
-    """这一张卡是不是「要覆盖旧卡但没说覆盖哪张」。
+def card_target_unknown(card: object, known_ids: "frozenset[str] | None") -> bool:
+    """这一张卡是不是「要覆盖一张宿主那里不存在的卡」。
+
+    ``known_ids`` 为 ``None`` = 宿主没交现有卡，判不了，一律不算。
+    缺 target_id 的卡不在这里算（那是 :func:`card_fails_semantic_check` 的另一半）。
+    """
+    if known_ids is None or not isinstance(card, dict):
+        return False
+    action = str(card.get("action") or "").strip().lower()
+    target = str(card.get("target_id") or "").strip()
+    return action in {"merge", "supersede"} and bool(target) and target not in known_ids
+
+
+def card_fails_semantic_check(
+    card: object, known_ids: "frozenset[str] | None" = None,
+) -> bool:
+    """这一张卡是不是「要覆盖旧卡但没说覆盖哪张」（或给了 ``known_ids`` 时，
+    说的那张并不存在）。
 
     单独拎出来是为了让宿主能**只丢这一张**，而不是整轮作废 —— 见
     ``capture_semantic_retry_reasons`` 的说明。
@@ -385,15 +422,22 @@ def card_fails_semantic_check(card: object) -> bool:
     if not isinstance(card, dict):
         return False
     action = str(card.get("action") or "").strip().lower()
-    return action in {"merge", "supersede"} and not str(card.get("target_id") or "").strip()
+    if action in {"merge", "supersede"} and not str(card.get("target_id") or "").strip():
+        return True
+    return card_target_unknown(card, known_ids)
 
 
-def capture_semantic_retry_reasons(cards: list[dict]) -> list[str]:
+def capture_semantic_retry_reasons(
+    cards: list[dict], known_ids: "frozenset[str] | None" = None,
+) -> list[str]:
     """Return content-free prompt feedback for locally provable bad actions.
 
-    Only a missing target is knowable before the durable commit.  A stale or
-    foreign target is deliberately left to the server-side ownership check;
-    guessing from a bounded prompt index could reject a valid older card.
+    A missing target is always knowable before the durable commit.  An unknown
+    target is knowable only when the host handed over its current cards
+    (``CaptureRequest.existing_cards`` → ``known_ids``): the check is against
+    that **whole** set, never the bounded prompt index, so a real older card
+    that did not fit the index is not rejected.  Without ``known_ids`` a stale
+    or foreign target is left to the host's ownership check, as before.
 
     ## 重问之后还是坏的，该怎么办
 
@@ -405,12 +449,18 @@ def capture_semantic_retry_reasons(cards: list[dict]) -> list[str]:
     但整轮作废是另一个极端：同一个窗口里另外三张好卡也一起没了，用户看到的是
     「这段对话我什么都没记住」，而且不报错。丢一张和丢一整轮，对用户的代价差很多。
     """
+    reasons: list[str] = []
     if any(card_fails_semantic_check(card) for card in cards or []):
-        return [
+        reasons.append(
             "你要求覆盖旧卡，但没有给 target_id；"
             "请从上方记忆索引复制确切 ID，或改成 action=add。"
-        ]
-    return []
+        )
+    if any(card_target_unknown(card, known_ids) for card in cards or []):
+        reasons.append(
+            "你给的 target_id 不是现有的卡；"
+            "请从上方记忆索引复制确切 ID，或改成 action=add。"
+        )
+    return reasons
 
 
 def build_capture_prompt(
@@ -426,6 +476,7 @@ def build_capture_prompt(
     policy: CapturePolicy | str | None = None,
     locale: str,
     material_kind: str = "",
+    host_note: str = "",
 ) -> str:
     """Render the 落卡 prompt with this session's context injected.
 
@@ -438,6 +489,9 @@ def build_capture_prompt(
     internal unknown-name marker is rendered as a natural referent rather than
     leaking into the platform prompt.
     The io-side compat shell (``memory/capture_prompt_v1.py``) does that.
+
+    ``host_note`` 是宿主给写卡这一步的补充指引，非空时原样渲染成 ``[Host guidance]``
+    一段（材料之后、``[Output]`` 之前）；空串时模板逐字节不变。
 
     ``policy`` 决定用哪把「什么值得记」的尺子（见 ``memgarden.policies``）。
     留空 = 日常聊天档，其 rubric 与本模板原先内联的那段逐字相同，
@@ -483,6 +537,7 @@ def build_capture_prompt(
         occurred_at_field=_occurred_at_field(resolved),
         window_label=_window_label(resolved),
         cap_note=_cap_note(resolved),
+        host_note=_host_note(host_note),
         ai_name=resolved_ai,
         user_name=resolved_user,
         naming_rule=naming_rule,

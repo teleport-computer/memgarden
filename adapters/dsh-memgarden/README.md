@@ -53,7 +53,7 @@ memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans
 |---|---|
 | 每次模型调用前 | `agent/pre-step` waterfall，先保留其他插件处理结果，再查询并注入记忆 |
 | 一轮结束 | `agent/turn-stopping`，记录待办，执行 Capture，再检查是否需要 Maintenance |
-| 模型主动查/写 | 注册 `memgarden_memory_search` / `memgarden_memory_write`，经可信 Scope 调用服务 |
+| 模型主动查/写 | `apply()` 返回前用同一个 `memgarden tools` 同步注册 `memgarden_memory_search` / `memgarden_memory_write`（DSH 在 pre-step 之前就快照工具列表，晚注册的工具首个请求里没有），握手后用 `tool.list` 对账；经可信 Scope 调用服务 |
 | 重启 | 从 outbox 重放未完成 Capture，沿用业务幂等键 |
 
 轮末 hook 等待其 Promise 完成，因此记忆处理会增加 turn 收尾时间。自动召回和 Capture 不依赖模型主动调用工具。
@@ -65,7 +65,7 @@ capture.begin     → DSH llm.stream → capture.feed
 maintenance.begin → DSH llm.stream → maintenance.feed
 ```
 
-服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。History Import / Migrate 当前没有对应的宿主驱动 lane，因此该默认服务会在 manifest 关闭这两项。它们并非自动 turn hook，不能因核心接口存在就宣称 DSH 已具备管理入口。
+服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。该默认服务的 manifest 会关闭需要服务侧模型的 `history_import`（一次性）与 `migrate`。服务虽然提供宿主驱动的 `history.import_*`、`records.related`、`records.search` 等方法，**这个 Adapter 没有接它们**：DSH 上接通的只有轮末 Capture、每轮召回、Maintenance 和模型工具（主动搜索与写卡经 `memgarden_memory_search` / `memgarden_memory_write`）。各接入面的能力表见[数据参考](../../docs/INTEGRATION-AND-DATA.md#各接入面接通了什么)，`tests/test_surfaces.py` 核对这张表与插件实际发出的请求一致。
 
 ## 窗口预算与恢复
 
@@ -166,7 +166,7 @@ uv run --project /absolute/path/to/deepseek-harness/python/sdk \
 脚本中 A/B/E 不再使用原先可假通过的判断：
 
 - A 组同时要求 Adapter 日志有非空召回，全新会话回答准确使用“胃疼”这个独特细节，且该轮没有主动调 `memory_search`，以区分自动注入。
-- B 组同时要求 DSH `tool/call` 事件和含唯一标记的 `source=model_tool` 持久卡，自动 Capture 不能冒充。
+- B 组同时要求 DSH `tool/call` 事件和含唯一标记的 `source=model_tool` 持久卡，自动 Capture 不能冒充。失败诊断里的 `write_tool_offered_per_request` 记录每个模型请求是否带了该工具，用来区分「模型没选工具」和「请求里根本没有工具」。
 - E 组同时要求回执 `written=true, error=-`、持久的 Maintenance 账本、`memory_dream` 新卡和旧卡的 `superseded_by` 链。
 
 离线 pytest 只证明这些判据能拒绝已知假阳性；真正的 provider、插件事件和模型输出仍必须由完整验收脚本实测。
@@ -181,6 +181,7 @@ uv run --project /absolute/path/to/deepseek-harness/python/sdk \
 
 - 模型消息使用分片数组；流式桥须传播文本及截断状态。
 - pre-step 保留 waterfall 链；turn-stopping 返回收尾 Promise。
+- 工具必须在 `apply()` 同步返回前注册：DSH 组装请求时先收集工具再跑 pre-step，SDK initialize 也不等插件的异步 apply。同步取定义失败时日志会写「同步取工具定义失败」，此时首轮可能看不到工具。
 - Capture 窗口按 session/turn 隔离，幂等身份覆盖 tenant/owner/session/turn。
 - 处理子进程启动、stderr、退出和超时；缺少记忆时向宿主报告降级。
 - 升级 DSH 后同时跑离线回归与真实验收；旧 alpha 的结果不代表新版本兼容。

@@ -16,7 +16,8 @@
 from __future__ import annotations
 
 import json
-
+from dataclasses import dataclass
+from typing import Any, Mapping, Sequence
 
 from ..text import card_guard
 from ..guards import dream_gates
@@ -42,7 +43,7 @@ _DREAM_PROMPT_TEMPLATE = """You are {ai_name}, {user_name}'s companion. It is a 
 You are looking back over everything you remember about this person, the way a mind tidies its memories during sleep — making it cleaner and more coherent.
 
 [Step 1: build the whole picture, do not touch anything yet]
-Read through your existing cards (buckets, threads, each summary) and form an overall picture of "what I currently remember about this person". Write nothing in this step; just see the current state clearly.
+Read through your existing cards (buckets, threads, each summary and its body) and form an overall picture of "what I currently remember about this person". Write nothing in this step; just see the current state clearly.
 
 [Step 2: look back over the last few days of conversation, but do not read it all]
 In the raw conversation that has piled up, look only for these high-value things (do not read it word by word):
@@ -68,6 +69,7 @@ In the raw conversation that has piled up, look only for these high-value things
 · How to refer to them: {naming_rule}{referent_rule}
   While tidying old cards, rewrite any system label or placeholder that refers to this person according to the rule above. A pronoun already in an old card that reads correctly stays as it is. A placeholder in a card that refers to YOU (the AI) is this person's way of addressing you — leave it alone.
 · Every field of `result` carries the content of the NEW card after merging or thickening — never write bookkeeping notes like "superseded by X", and never put a card id inside a field. Retiring the old card is done by the system; you do not explain it in the content.
+· A card marked TRUNCATED shows only the first part of its body. Never put a TRUNCATED card in card_ids: merging, thickening or superseding it retires the full card, and the part you cannot see would be lost. You may still read it as context for other cards.
 · If there is nothing to tidy, do nothing (empty consolidations). That is normal.
 · Reassess each proposed result with importance_level 1-5: 1 incidental detail, 2 useful fact, 3 recurring preference/habit, 4 relationship/feeling/boundary, 5 core commitment/turning point. The host maps these to 0.2/0.4/0.6/0.8/1.0. Do not inflate all cards. retrieval_cues are only navigation hints, not evidence or new facts.
 · The `...` in the output example below is only a placeholder. Every field you write must carry real content — summary is one true sentence, content is a full body of prose; no field may be `...`, a bracketed instruction, or an empty string. Better to return nothing at all (empty consolidations) than to hand back a placeholder: this person will read these cards.
@@ -109,7 +111,10 @@ def build_dream_prompt(
 ) -> str:
     """Render the Dream prompt with the current card map + recent conversations.
 
-    Callers pass already-rendered strings (handler decides formatting/truncation).
+    Callers pass already-rendered strings. ``GardenComponent`` renders ``cards``
+    with :func:`render_dream_cards` (bodies included, per-card and total caps,
+    truncation marked); a host that calls this function directly should do the
+    same — a titles-only card list makes thicken/merge rewrite bodies it never saw.
 
     ``user_name`` must already be sanitized and ``naming_rule`` already
     assembled by the caller — the kernel never imports ``identity``. The
@@ -138,6 +143,137 @@ def build_dream_prompt(
             if str(locale or "").strip() == "en" else "（这几天没有新对话）"
         ),
         common_buckets=common_buckets_guidance(locale),
+    )
+
+
+#: 一次 Dream 最多渲染几张卡、卡片区总共多少字符。60 张 × 平均 1000 字的卡片区
+#: 在常见 128k 上下文模型里仍给提示词其余部分和回复留出充足余量。
+DEFAULT_DREAM_CARDS_LIMIT = 60
+DEFAULT_DREAM_CARDS_BUDGET_CHARS = 60_000
+#: 单卡正文上限。常见写入端对单卡正文的上限在这个量级，按这个上限写出的卡
+#: 永远完整呈现；只有正文更长的数据才会被截断并标出。再低就会把正常的
+#: 厚卡标成「不能动」，Dream 对它们失效；再高则一张超长导入卡能吃掉大半预算。
+DEFAULT_DREAM_CARD_BODY_CHARS = 5_000
+#: 单卡摘要上限。取 Dream 解析器自己给 summary 的上限，Dream 写出的摘要都放得下。
+DEFAULT_DREAM_CARD_SUMMARY_CHARS = 2_000
+
+_TRUNCATED = "TRUNCATED"
+
+
+@dataclass(frozen=True)
+class RenderedDreamCards:
+    """渲染进 Dream 提示词的卡片区，以及到底放进去了哪些卡。"""
+
+    text: str
+    #: 实际渲染进去的卡 id，按渲染顺序。只有这些卡是模型见过的。
+    rendered_ids: tuple[str, ...]
+    #: 其中正文或摘要被截断的卡 id —— 提示词要求模型不要改写它们。
+    truncated_ids: tuple[str, ...]
+    #: 没渲染的卡数：没有 id、没有任何文本、超出张数或总预算。
+    omitted: int
+
+
+def _positive_int(name: str, value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{name} must be a positive int")
+    return value
+
+
+def _one_line(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _clip(text: str, limit: int) -> tuple[str, bool]:
+    return (text, False) if len(text) <= limit else (text[:limit], True)
+
+
+def render_dream_cards(
+    cards: Sequence[Mapping[str, Any]],
+    *,
+    max_cards: int = DEFAULT_DREAM_CARDS_LIMIT,
+    summary_chars: int = DEFAULT_DREAM_CARD_SUMMARY_CHARS,
+    body_chars: int = DEFAULT_DREAM_CARD_BODY_CHARS,
+    total_chars: int = DEFAULT_DREAM_CARDS_BUDGET_CHARS,
+) -> RenderedDreamCards:
+    """把候选卡渲染成 Dream 提示词里的卡片区 —— **带正文**。
+
+    只给标题的话，thicken/merge 会在看不到正文的情况下把整张卡重写掉，
+    旧正文随旧卡一起退休（宿主 io 在 2026-08-04 修过这件事）。
+
+    - 按 ``cards`` 的顺序渲染：宿主把最想整理的卡放前面。
+    - 单卡正文超过 ``body_chars``、摘要超过 ``summary_chars`` 时截断，
+      并在卡头和正文处写明 ``TRUNCATED``；提示词禁止把这种卡放进 ``card_ids``。
+    - 总预算按**整张卡**累加：放不下下一整张就停，不会把一张卡切成半截，
+      也不跳过去塞后面更短的卡（那会系统性地偏向短卡）。
+    - 没有 id 的卡（模型无法引用）和既没摘要也没正文的卡不渲染。
+    """
+    max_cards = _positive_int("max_cards", max_cards)
+    summary_chars = _positive_int("summary_chars", summary_chars)
+    body_chars = _positive_int("body_chars", body_chars)
+    total_chars = _positive_int("total_chars", total_chars)
+
+    blocks: list[str] = []
+    rendered: list[str] = []
+    truncated: list[str] = []
+    used = 0
+    for card in cards:
+        if len(rendered) >= max_cards:
+            break
+        if not isinstance(card, Mapping):
+            continue
+        mid = _one_line(card.get("id"))
+        summary_full = _one_line(card.get("summary"))
+        body_full = str(card.get("content") or "").strip()
+        if not mid or not (summary_full or body_full):
+            continue
+        summary, cut_summary = _clip(summary_full, summary_chars)
+        body, cut_body = _clip(body_full, body_chars)
+        head = [f"- id={mid}"]
+        bucket = _one_line(card.get("bucket"))
+        if bucket:
+            head.append(f"bucket={bucket}")
+        threads = [t for t in (_one_line(x) for x in card.get("threads") or []
+                               if isinstance(x, str)) if t] if isinstance(
+            card.get("threads"), list) else []
+        if threads:
+            head.append("threads=" + ", ".join(threads))
+        occurred = _one_line(card.get("occurred_at"))
+        if occurred:
+            head.append(f"occurred_at={occurred}")
+        if cut_summary or cut_body:
+            head.append(_TRUNCATED)
+        lines = [" | ".join(head)]
+        if summary:
+            lines.append(f"  summary: {summary}" + (f" [{_TRUNCATED}]" if cut_summary else ""))
+        cues = [c for c in (_one_line(x) for x in card.get("retrieval_cues") or []
+                            if isinstance(x, str)) if c] if isinstance(
+            card.get("retrieval_cues"), list) else []
+        if cues:
+            lines.append("  retrieval_cues: " + "; ".join(cues))
+        if body:
+            label = "  content:"
+            if cut_body:
+                label = (f"  content ({_TRUNCATED}: showing the first {len(body)} of "
+                         f"{len(body_full)} characters):")
+            lines.append(label)
+            lines.extend("    " + line.rstrip() if line.strip() else ""
+                         for line in body.splitlines())
+            if cut_body:
+                lines.append(f"    [{_TRUNCATED}]")
+        block = "\n".join(lines)
+        added = len(block) + (1 if blocks else 0)
+        if used + added > total_chars:
+            break
+        blocks.append(block)
+        rendered.append(mid)
+        if cut_summary or cut_body:
+            truncated.append(mid)
+        used += added
+    return RenderedDreamCards(
+        text="\n".join(blocks),
+        rendered_ids=tuple(rendered),
+        truncated_ids=tuple(truncated),
+        omitted=len(cards) - len(rendered),
     )
 
 
@@ -175,7 +311,7 @@ def parse_dream_consolidations(
     卡 id 泄漏闸(2026-08-05 2026-08-05 墓碑卡事故 墓碑卡事故):``known_ids`` 传入当前花园的
     卡 id 集合(就是喂进 prompt 的那批),result 硬字段里出现任何一个 → 该行按
     内容闸同路打回重问 —— 「已被 <卡id> 取代——原文」这类输出是模型把整理注记
-    当成了内容本身,零误伤的强证据。同一次复盘(Seven 定的产品哲学:只拦
+    当成了内容本身,零误伤的强证据。同一次复盘(产品取舍:只拦
     「明显不对」,绝不判内容质量)拆掉了语义审查员和 15% 增量栅栏;本闸与
     card_text 的墓碑短语闸是替代 —— 确定性、跑在出口、对模型不可见。
     """
