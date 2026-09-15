@@ -713,12 +713,22 @@ export function apply(ctx, config) {
         tools.map((x) => 'memgarden_' + x.name).join(', ') + '\n')
   }
 
+  // 取定义和注册分开报错：注册失败（比如 DSH 里已有同名工具）时日志写成「取定义失败」，
+  // 排查的人会去查服务可执行文件，而问题在宿主的工具表里。
+  let syncTools = null
   try {
-    const sync = readToolsSync(config.bin)
-    registerTools(sync, 'apply 内同步')
+    syncTools = readToolsSync(config.bin)
   } catch (e) {
     log('[memgarden] 同步取工具定义失败，退回握手后注册（首个模型请求可能没有 ' +
         'memgarden 工具）: ' + e.message + '\n')
+  }
+  if (syncTools) {
+    try {
+      registerTools(syncTools, 'apply 内同步')
+    } catch (e) {
+      log('[memgarden] 同步取到了工具定义，但向 DSH 注册失败（首个模型请求可能没有 ' +
+          'memgarden 工具，握手后重试）: ' + e.message + '\n')
+    }
   }
 
   void ready.then(async () => {

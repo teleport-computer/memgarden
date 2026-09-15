@@ -5,7 +5,7 @@
 Garden 有两种接法：``MountedGarden`` + 合规 Store（内置 SqliteStore 是参考实现），
 或者像 io 那样用 ``GardenComponent`` 做判断、写入走宿主自己的执行器。两条路各有
 测试，但「内置 Store 通过了幂等 / 删除 / CAS」**不能**当成「宿主那条路也满足」
-（Seven 2026-09-14 §4.5）。这里把共同的业务语义写成**可运行的场景**，宿主实现一个
+—— 宿主的执行器、事务边界和读路径都是自己的。这里把共同的业务语义写成**可运行的场景**，宿主实现一个
 小适配器（:class:`Host`）就能在自己真实的写读路径上跑一遍。
 
 ## 场景只断言业务语义，不断言实现
@@ -120,7 +120,18 @@ class Host(Protocol):
         ...
 
     def observe(self, owner: str) -> Any:
-        """拿一个并发控制凭据（revision 等）。宿主不用凭据做冲突检测时返回 ``None``。"""
+        """拿一个并发控制凭据（revision 等）。宿主不用凭据做冲突检测时返回 ``None``。
+
+        返回 ``None`` 是允许的，但下面这几条条款**要求**基于凭据的冲突检测，这样的宿主
+        会在这几条上失败，需要按条款声明 :class:`Deviation`（通常 ``by_design``）：
+        ``supersede.concurrent_same_target/second_conflict``、
+        ``supersede.concurrent_same_target/chain_points_to_winner``、
+        ``supersede.concurrent_same_target/one_active_successor``、
+        ``conflict.stale_patch/stale_edit_refused``、
+        ``conflict.stale_patch/first_edit_survives``。
+        拒绝时回 ``conflict`` 或 ``not_found``（目标已不是当前卡）都算拒绝，与
+        ``conflict.supersede_after_delete`` 一致；改内容的旧凭据只认 ``conflict``（目标还在）。
+        """
         ...
 
     def tick(self) -> None:
@@ -198,8 +209,11 @@ class Checks:
 
     def __init__(self) -> None:
         self.failures: list[ClauseFailure] = []
+        #: 真正判过的条款（通过或失败）。致命失败或适配器抛错之后的条款没跑过。
+        self.ran: set[str] = set()
 
     def check(self, ok: bool, clause: str, evidence: Any = "", *, fatal: bool = False) -> bool:
+        self.ran.add(clause)
         if not ok:
             self.failures.append(ClauseFailure(clause, _short(evidence)))
             if fatal:
@@ -438,8 +452,10 @@ def _supersede_concurrent(host: Host, c: Checks) -> None:
     first = host.supersede("alice", [t], card("kitracewin", source=src), based_on=seen)
     second = host.supersede("alice", [t], card("kitracelose", source=src), based_on=seen)
     c.check(first.ok, "supersede.concurrent_same_target/first_ok", first, fatal=True)
-    c.check(not second.ok and second.error == "conflict", "supersede.concurrent_same_target/second_conflict",
-            second)
+    # 第二次取代的目标已经被取代：回 conflict（凭据过期）或 not_found（目标已不是当前卡）
+    # 都是拒绝，和 supersede_after_delete 同一个口径。
+    c.check(not second.ok and second.error in {"conflict", "not_found"},
+            "supersede.concurrent_same_target/second_conflict", second)
     view = host.inspect("alice", t) or {}
     c.check(view.get("superseded_by") == first.record_ids[0],
             "supersede.concurrent_same_target/chain_points_to_winner", view.get("superseded_by"))
@@ -796,7 +812,10 @@ def run_scenario(scenario: Scenario, host: Host,
                 if _clause_scenario(k) == scenario.id}
     failed = {f.clause for f in checks.failures}
     unexpected = sorted(failed - set(declared))
-    stale = sorted(set(declared) - failed)
+    # 只有**跑过且通过**的条款才算过期声明。前面一条致命失败（或适配器抛错）之后没跑到的
+    # 条款无从判断，不能因为「没失败」就判它过期 —— 那会让一份正确的声明清单在别的条款
+    # 出问题时一起变红，逼宿主删掉仍然成立的声明。
+    stale = sorted((set(declared) - failed) & checks.ran)
     problems = tuple([f"undeclared failure: {c}" for c in unexpected]
                      + [f"stale deviation (clause now passes): {c}" for c in stale])
     used = tuple(sorted((k, v) for k, v in declared.items() if k in failed))

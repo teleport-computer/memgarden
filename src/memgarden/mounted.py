@@ -5,7 +5,7 @@
     GardenComponent   只判断，不碰存储。内核可被独立测试、可被替换的前提。
     MountedGarden     把 StoragePort 接上，负责 load → 判断 → 原子写回 → 回执。
 
-为什么要有这一层（sevenfloor 2026-09-02 §3.1）：只有 ``GardenComponent`` 的话，
+为什么要有这一层：只有 ``GardenComponent`` 的话，
 **每个接入方都得自己编排** tenant、actor、allowed mounts、load、生命周期过滤、
 mutation 执行、CAS、幂等键、整理账本、工具搜索、失败后重读重算。那不叫插件，
 叫零件——而且这些语义写错了不会报错，只会悄悄丢记忆。

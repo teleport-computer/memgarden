@@ -517,6 +517,31 @@ async function runningServiceWinsWhenToolDefinitionsDrift() {
   rmSync(dir, { recursive: true, force: true })
 }
 
+async function registrationFailureIsNotReportedAsFetchFailure() {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-dup-'))
+  const debugLog = path.join(dir, 'debug.log')
+  process.env.MEMGARDEN_DEBUG_LOG = debugLog
+  process.env.MEMGARDEN_FAKE_CLI_TOOLS = JSON.stringify([
+    { name: 'memory_write', description: 'fake', parameters: { type: 'object' } },
+  ])
+  const ctx = {
+    ...fakeContext(),
+    tools: { register(t) { throw new Error('duplicate tool name: ' + t.name) } },
+  }
+  const { apply } = await loadPlugin()
+  apply(ctx, {
+    bin: SERVICE, storage: 'ignored', tenant: 'tenant-dup',
+    memoryOwner: 'owner-dup', stateDir: path.join(dir, 'state'),
+  })
+  const text = readFileSync(debugLog, 'utf8')
+  assert.ok(text.includes('向 DSH 注册失败') && text.includes('duplicate tool name'), text)
+  assert.ok(!text.includes('同步取工具定义失败'), '取到了定义就不许报成取定义失败')
+  await ctx.hooks.get('dispose')()
+  delete process.env.MEMGARDEN_FAKE_CLI_TOOLS
+  delete process.env.MEMGARDEN_DEBUG_LOG
+  rmSync(dir, { recursive: true, force: true })
+}
+
 async function brokenServiceBinaryStillLetsHostStart() {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-bad-'))
   const debugLog = path.join(dir, 'debug.log')
@@ -541,6 +566,7 @@ await disposeRightAfterFailedSpawnDoesNotSignalHostGroup()
 await toolsAreRegisteredBeforeApplyReturns()
 await runningServiceWinsWhenToolDefinitionsDrift()
 await brokenServiceBinaryStillLetsHostStart()
+await registrationFailureIsNotReportedAsFetchFailure()
 await successfulTurnGoesThroughAdapter()
 await recoveryKeepsFailedReceipt()
 await actualServiceAlsoClosesTheHostDrivenLoop()

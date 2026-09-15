@@ -1,4 +1,4 @@
-"""长驻服务 —— 一行一个 JSON 请求，走 stdio（sevenfloor 2026-09-02 §3.10）。
+"""长驻服务 —— 一行一个 JSON 请求，走 stdio。
 
     memgarden serve --storage sqlite:///path/to/memory.db
 
@@ -129,6 +129,9 @@ def _maintenance_request(params: dict) -> MaintenanceRequest:
         user_name=str(params.get("user_name") or ""),
         recent_conversations=str(params.get("recent_conversations") or ""),
         idempotency_key=str(params.get("idempotency_key") or ""),
+        # 不传 = None = 内核默认称呼规则（和 SDK 一致）；空串也是宿主给的规则，原样用。
+        naming_rule=(str(params["naming_rule"])
+                     if params.get("naming_rule") is not None else None),
         **budgets,
     )
 
@@ -147,6 +150,8 @@ def _import_request(p: dict) -> Any:
         ai_name=str(p.get("ai_name") or ""),
         user_name=str(p.get("user_name") or ""),
         idempotency_key=str(p.get("idempotency_key") or ""),
+        # 给了才进续传指纹（ImportSession 只在非 None 时收进去），老调用方指纹不变。
+        naming_rule=(str(p["naming_rule"]) if p.get("naming_rule") is not None else None),
         batches=tuple(p.get("batches") or ()),
         strategy=str(p.get("strategy") or "single_pass"),
         batch_chars=(int(p["batch_chars"])

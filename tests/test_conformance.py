@@ -218,3 +218,35 @@ def test_results_table_names_every_scenario(factory):
     table = kit.results_table(kit.run_all(factory), host="reference")
     for sid in kit.scenario_ids():
         assert f"| {sid} | pass |" in table
+
+
+def test_declarations_after_a_fatal_failure_are_not_judged_stale(factory):
+    """致命条款失败后，后面没跑到的条款的声明不算过期（发布前复审）。"""
+    class NoArchive(ReferenceHost):
+        def archive(self, owner, record_id, *, reason=""):
+            return Outcome(ok=False, error="unsupported")
+
+    declared = {
+        "archive.retires/ok": Deviation("by_design", "no archive"),
+        "archive.retires/status": Deviation("by_design", "no archive"),
+        "archive.retires/history_visible": Deviation("by_design", "no archive"),
+    }
+    [result] = kit.run_all(lambda: factory(NoArchive), deviations=declared, only={"archive.retires"})
+    assert result.problems == ()
+    assert result.status == "deviation"
+    # 真跑过、真通过的条款，声明仍然判过期。
+    passing = {"archive.retires/add": Deviation("bug", "stale")}
+    [result] = kit.run_all(factory, deviations=passing, only={"archive.retires"})
+    assert result.problems == ("stale deviation (clause now passes): archive.retires/add",)
+
+
+def test_second_supersede_may_refuse_with_not_found_like_supersede_after_delete(factory):
+    class NotFoundForRetiredTarget(ReferenceHost):
+        def supersede(self, owner, target_ids, card, *, based_on=None):
+            if any((self.inspect(owner, t) or {}).get("status") == "superseded" for t in target_ids):
+                return Outcome(ok=False, error="not_found")
+            return super().supersede(owner, target_ids, card, based_on=based_on)
+
+    [result] = kit.run_all(lambda: factory(NotFoundForRetiredTarget),
+                           only={"supersede.concurrent_same_target"})
+    assert result.status == "pass", result

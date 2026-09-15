@@ -2,18 +2,18 @@
 
 ## 为什么是 BM25、为什么分词器是插口
 
-宿主 io 线上跑着两套排序：自动想起用内核的相关性打分（``scoring.relevance``），
-主动搜索用 io 自己的 BM25 + jieba。同一个问题两条路给出不同答案，trace 里也对不上。
+之前自动想起用内核的相关性打分（``scoring.relevance``），主动搜索在宿主那边另跑一套
+BM25。同一个问题两条路给出不同答案，trace 里也对不上。
 ``evals/retrieval`` 的基线显示 BM25 的召回全面更好（recall@5 0.90 vs 0.67），
 编号、短查询、线程类尤其明显，所以统一到 BM25。
 
-数学逐行移植自 io ``backend/memory_bm25.py``（Robertson IDF 取 ``log1p``、查询里
-重复的 token 只算一次、同分按 ``occurred_at`` 新的在前再按 id）。**给同一个分词器，
-分数与排序逐项相同** —— ``tests/test_retrieval_rank.py`` 用一份照抄的参考实现对拍。
+数学是标准 BM25（Robertson IDF 取 ``log1p``、查询里重复的 token 只算一次、同分按
+``occurred_at`` 新的在前再按 id），与一个已在线上运行的宿主实现逐项一致 ——
+``tests/test_retrieval_rank.py`` 用一份冻结的参考实现对拍，给同一个分词器分数逐位相同。
 
 分词是唯一依赖语言资源的一步。内核只依赖标准库，所以分词器由宿主注入
-（io 注入 jieba）；不注入时用 :class:`DefaultTokenizer`：整段 ASCII 标识符 +
-CJK 单字与相邻二字。它不承诺和 jieba 等价，质量以 ``evals/retrieval`` 的数字为准。
+（例如注入 jieba）；不注入时用 :class:`DefaultTokenizer`：整段 ASCII 标识符、
+按 Unicode 字母切的词、CJK 单字与相邻二字。它不承诺和 jieba 等价，质量以 ``evals/retrieval`` 的数字为准。
 
 ## 缓存只活在一次调用里
 
