@@ -73,7 +73,7 @@ from .mounted import (
     Scope,
     StorageCapabilityError,
 )
-from .importing import ImportProgress
+from .importing import ImportBatch, ImportBatchResult, ImportProgress, ImportSession
 from .ports import ClockPort, ModelPort, SystemClock
 from .schema import ERROR_CODES, manifest, schemas
 from .service import Service
@@ -127,6 +127,9 @@ __all__ = [
     "CaptureResult",
     "ImportRequest",
     "ImportProgress",
+    "ImportSession",
+    "ImportBatch",
+    "ImportBatchResult",
     "CuratedWriteRequest",
     "ExportRequest",
     "ExportResult",

@@ -15,6 +15,7 @@
 | 宿主驱动整理 | `maintenance.begin/feed/cancel` | 与 Capture 使用相同的模型往返方式 |
 | 用户明确保存 | `write_one` / `records.write` | 不再套自动 Capture 的价值筛选 |
 | 历史材料导入 | `import_history` / `history.import` | 持久保存原材料和 `ImportProgress`，失败后以相同语义续传 |
+| 宿主驱动导入 | `GardenComponent.import_session`（仅 SDK） | 逐批 `next_batch` → 宿主调模型 `feed` → `result` → 宿主写库 → `commit(record_ids)`，保存返回的进度 |
 | 读取与导出 | `browse`、`export` / `records.browse/export` | 持续读取 `next_cursor`，直到为空 |
 | 用户删除 | `delete_record` / `records.delete` | 提供请求身份并检查删除回执 |
 | 改变可见范围 | `promote` / `records.promote` | 宿主先授权，不能把模型给的 `authorized` 当作权限证据 |
@@ -35,7 +36,7 @@ Dream（整理）提示词里的卡片**带正文**：按 `MaintenanceRequest.ca
 
 解析对模型输出的容错范围是有限的：Capture/Dream/Migrate 从回复中取第一个完整 JSON 对象，允许前后有说明文字、Markdown 代码围栏或推理块；合法 JSON 字符串里的 `{` `}` 不影响取块。只有 Capture 在直接解析失败后会尝试补转义裸引号，并按 JSON 结构判断：只修**对象成员的值**里的引号，例如 `她说"好的"然后走了`、`他报价"1000"块`、`He said "ok" and left`、`他说"好"、"行"`，以及引语在值末尾的 `"他只说了"算了""`；键名和数组元素（如 `threads`）里的裸引号一概不修。值里的引号后面紧跟 `,` `}` `]` `:`（如 `她说"好的", 然后`）与字段结束无法区分，也修不了。只要结构上还有别的错，整份不修：漏冒号（`"is_sensitive" True,`，无论后面跟的是什么）、数组元素之间写错分隔符（`["a"， "b"]`、`["a"、"b"]`、`["a” "b"]`、`["a" "b"]`）、成员或对象之间写错分隔符、缺/多逗号、截断。这些情况都报 `json_decode_error`（Capture 与 Maintenance 会按现有重试预算重问），修复不会把它们猜成另一种意思落库。值里既有裸引号又有 `}`（`"她说"好"然后看 } 这个符号"`）时，Capture 会用完整对象去修；Dream/Migrate 不做引号修复，这类回复对它们仍是 `json_decode_error`。已知局限（会按字面解析而不是报错）：值里的引号后面恰好是 `,` 且残文又拼成合法 JSON（`"她说"好的","content":"…"`）；值末尾多敲一个引号（`"好的""` 读成 `好的"`）；值里的引号后面紧跟 `}` 且对象恰好在这里闭合（`{"content":"a "b" }"}` 读成 `a "b`）。
 
-`capture.run`、`maintenance.run`、`history.import`、`records.migrate` 需要服务侧配置模型。前两项另有 begin/feed 路径；后两项当前没有。因此默认 DSH 无模型服务的 `history_import`、`migrate` 为 false，这是明确的接入边界。
+`capture.run`、`maintenance.run`、`history.import`、`records.migrate` 需要服务侧配置模型。前两项另有 begin/feed 路径；后两项在 wire 上当前没有（历史导入的宿主驱动形状目前只有 SDK 的 `import_session`）。因此默认 DSH 无模型服务的 `history_import`、`migrate` 为 false，这是明确的接入边界。
 
 独立 `memgarden manifest` 是静态声明；连接后的 `manifest.get` 才按实际模型和 Store 给出能力。`manifest.storage.capabilities`、`degradations`、`user_notices` 用于识别缺失条件，不是外部 Store 已经通过测试的证明。
 
@@ -218,7 +219,13 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 
 ## 7. 导入、分页和规模
 
-History Import 的 cursor 是原材料的字符偏移。`source_digest` 绑定材料；`import_fingerprint` 还绑定 scope、mount、locale、policy、材料类型、称呼、导入幂等键及批次规则。失败不推进该批 cursor；单批成功可续传；更改导入语义必须从头开始。`max_batches` 限制一次调用工作量，`max_cards` 限制单批输出，不限制总导入量。
+History Import 的 cursor 是原材料的字符偏移（宿主预切 `batches` 时是各批文字长度的累计）。`source_digest` 绑定材料；`import_fingerprint` 还绑定 scope（宿主驱动时为 `owner_key`，默认 `actor.user_id`）、mount、locale、policy、材料类型、称呼、导入幂等键及批次规则；`strategy`、`max_total_cards`、`fallback_occurred_at`、`naming_rule`、`identity`、预切批次只在偏离默认值时进指纹，所以默认请求的旧进度仍能续传。失败不推进该批 cursor；单批成功可续传；更改导入语义必须从头开始。`max_batches` 限制一次调用工作量，`max_cards` 限制单批输出，`max_total_cards` 限制整次导入写出的卡数（add 与 supersede 都算；满了之后剩余批次不再调模型，并在 `skipped` 里记 `max_total_cards`）。
+
+`MountedGarden.import_history` 和 `GardenComponent.import_session` 走同一个 `ImportSession`：切批、提示词、解析与重问、跨批去重、上限和进度推进是同一份代码。区别只在谁调模型、谁写库，以及索引从哪来——前者每个写卡批次前重读 Store，后者用宿主开会话时给的 `existing_cards`，并在每次 `commit(outcome, record_ids=...)` 时把刚写的卡（带宿主的真实 id）登记进后面批次的索引。`record_ids` 必须与 `mutations` 一一对应；写库失败用 `fail(outcome, error)` 记录，游标不动。
+
+「已有记忆索引」按这一批文字的词面重叠挑相关旧卡（最多 60 张，其中四分之一留给重要度最高的卡），不再只取重要度前 60；宿主可传 `index_ranker(batch_text, cards) -> ids` 换成自己的检索。桶名只做确定性收敛（大小写/空白一致并到已有写法，`中文/English` 通用桶对按 locale 取一半），近义词不猜。`fallback_occurred_at` 只填没有日期的卡，内核不推测日期。
+
+`strategy="two_pass"`：每批先抽「候选事实 + 原话证据」（不写卡），材料读完后按 `write_batch_candidates`（默认 40）分组，用同一个 Capture 提示词写卡、去重、归桶。候选按字面归一后跨批去重（同义改写交给写卡模型），总数上限 4000，超出记进 `skipped`。⚠️ 两段式的 `ImportProgress.candidates` 含用户内容，宿主要按记忆正文的等级保存进度。两种形状哪个默认更好尚无结论，默认仍是 `single_pass`。
 
 浏览/导出默认每页 100、最多 1000 条，按字符串 ID 排序；继续传 `next_cursor`。cursor 对应卡消失时从头返回，调用方可能收到重复项。导出每页 `items.counts` 是该页统计，外层 `total` 是该次查询总量，不能把第一页当全量。
 

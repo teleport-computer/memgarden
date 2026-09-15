@@ -193,18 +193,29 @@ def test_maintenance_fails_closed_when_the_store_has_no_ledger_contract():
     assert run.error == "storage_failed:maintenance_state"
 
 
+class _NothingToKeep:
+    """导入的每一批都判「没什么可记」。只测游标/续传，不测判断。"""
+
+    def complete(self, prompt: str, *, purpose: str = "") -> str:
+        return '{"cards": []}'
+
+
 def test_history_import_retry_clears_the_old_failure_and_finishes():
-    garden = MountedGarden(model=_MustNotCallModel(), store=InMemoryStore())
     calls = 0
 
-    def capture(scope, request):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            return OperationReceipt(error="temporary")
-        return OperationReceipt(written=True, record_ids=("m_1",))
+    class _FlakyThenCard:
+        def complete(self, prompt: str, *, purpose: str = "") -> str:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                # 非空散文不是可重问的格式错误：这一批直接失败，游标不动。
+                return "模型这次跑偏了，没有给 JSON"
+            return json.dumps({"cards": [{
+                "action": "add", "bucket": "偏好与边界", "threads": [],
+                "summary": "一段历史", "content": "这是一段有实质内容的历史。",
+            }]}, ensure_ascii=False)
 
-    garden.capture_and_store = capture  # type: ignore[method-assign]
+    garden = MountedGarden(model=_FlakyThenCard(), store=InMemoryStore())
     request = ImportRequest(material="一段历史", locale="zh-Hans")
     first = garden.import_history(SCOPE, request)
     assert not first.done and first.failed
@@ -264,9 +275,7 @@ def test_history_import_blank_material_finishes_and_changed_material_is_rejected
 
 
 def test_history_import_consumes_trailing_blank_batches_and_rejects_bad_cursor():
-    garden = MountedGarden(model=_MustNotCallModel(), store=InMemoryStore())
-    garden.capture_and_store = lambda scope, request: OperationReceipt(  # type: ignore[method-assign]
-        reason="nothing_worth_keeping")
+    garden = MountedGarden(model=_NothingToKeep(), store=InMemoryStore())
     material = "A\n" + " " * 7000
     progress = garden.import_history(
         SCOPE, ImportRequest(material=material, locale="zh-Hans"),

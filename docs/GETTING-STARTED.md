@@ -92,6 +92,7 @@ if receipt.error:
 | 检查是否该整理 | `check_maintenance(scope)` | 不调模型；同时检查 `.error` |
 | 执行整理 | `run_and_store_maintenance(scope, MaintenanceRequest(locale="en"))` | Runtime 安排运行时机；Garden 提交卡片与账本，检查返回 `.error` |
 | 导入旧材料 | `import_history(...)` | 原始材料和 `ImportProgress` 由宿主持久保存；变更材料/策略不能沿用旧进度 |
+| 自己调模型、自己写库的导入 | `component.import_session(request, progress=..., existing_cards=...)` | 每批 `next_batch` → 调模型 `feed` → `result` → 写库 → `commit(outcome, record_ids=ids)`；见 `memgarden.importing` 模块说明 |
 | 浏览 / 导出 | `browse(...)` / `export(...)` | 循环读 `next_cursor`；导出与列表投影不是同一形状 |
 | 删除 | `delete_record(...)` | 指定卡真删；原材料、备份和向量缓存清理由宿主协调 |
 

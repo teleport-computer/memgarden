@@ -30,6 +30,7 @@ TOP_LEVEL = {
     "GardenCapabilities", "CaptureSession", "MaintenanceSession",
     "ModelPort", "ClockPort", "SystemClock", "Actor",
     "CaptureRequest", "CaptureResult", "ImportRequest", "ImportProgress",
+    "ImportSession", "ImportBatch", "ImportBatchResult",
     "CuratedWriteRequest", "ExportRequest", "ExportResult", "PromoteRequest",
     "MigrateRequest", "MigrateResult", "BrowseItem", "Step",
     "ContextRequest", "ContextResult", "MaintenanceRequest", "MaintenanceResult",

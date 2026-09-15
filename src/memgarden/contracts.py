@@ -219,6 +219,30 @@ class ImportRequest:
     idempotency_key: str = ""
     schema_version: int = SCHEMA_VERSION
 
+    # -- 以下字段服务于分批导入（``import_session`` / ``MountedGarden.import_history``）。
+    #    全部取默认值时，导入语义、提示词和续传指纹与加这些字段之前一致。
+
+    #: 称呼规则和关系描述，原样进提示词（与 ``CaptureRequest`` 同名字段同义）。
+    naming_rule: str | None = None
+    identity: str = ""
+    #: 宿主**预先切好**的批次，和 ``material`` 二选一。每项是 dict：
+    #: ``{"text": 必填, "label"?: 这段是什么, "occurred_from"?: ISO, "occurred_to"?: ISO}``。
+    #: 宿主知道消息边界和时间戳（按消息切、带重叠），内核只按字数切会切在半句话上。
+    #: 重叠部分导致的重复由跨批去重处理。
+    batches: tuple = ()
+    #: ``single_pass``（每批直接写卡）或 ``two_pass``（每批抽候选，最后统一写卡）。
+    strategy: str = "single_pass"
+    #: 按 ``material`` 切批时一批多少字。None = 默认 6000。
+    batch_chars: int | None = None
+    #: 两段式写卡阶段一次交给模型多少条候选。
+    write_batch_candidates: int = 40
+    #: 整次导入最多写出多少张卡（add + supersede 都算）。None = 不限。
+    #: ``max_cards`` 只限单批 —— 一份三年的记录分成几百批，单批上限拦不住总量。
+    max_total_cards: int | None = None
+    #: 卡没有 ``occurred_at`` 时用这个日期兜底（宿主明确给的，比如关系开始的那天）。
+    #: 内核自己**绝不**推测日期；不给就留空。
+    fallback_occurred_at: str = ""
+
 
 @dataclass
 class CuratedWriteRequest:

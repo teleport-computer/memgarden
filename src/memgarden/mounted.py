@@ -601,6 +601,8 @@ class MountedGarden:
     # -- 历史导入 ---------------------------------------------------------- #
 
     #: 一批多少字。够模型一次读完，也够小到中断时不心疼。
+    #: （保留作兼容别名；真正的默认值在 ``importing.IMPORT_BATCH_CHARS``，
+    #: 请求里的 ``batch_chars`` 可以覆盖。）
     IMPORT_BATCH_CHARS = 6000
 
     def import_history(self, scope: Scope, request: Any, *,
@@ -611,6 +613,11 @@ class MountedGarden:
         ``max_batches`` 限制这一次最多跑几批 —— 宿主可以跑一小段就把进度
         交还给用户（显示百分比），下次接着来。
 
+        切批、续传校验、提示词、解析、去重、上限都在
+        :class:`memgarden.importing.ImportSession` 里，和宿主驱动的
+        ``GardenComponent.import_session`` 是同一份。这里只多做两件事：
+        每批写卡前**重新读一次库**（跨批去重的依据），以及带 CAS 写回。
+
         ## 为什么必须串行
 
         第 N 批做判断时，前 N-1 批写进去的卡就在它的「已有记忆索引」里，
@@ -618,124 +625,79 @@ class MountedGarden:
         状态。并行跑的话每批看到的都是导入前的旧状态，同一件事在不同批里
         各写一张，谁也不知道。
         """
-        from .contracts import CaptureRequest
-        from .importing import ImportProgress, batch_key, split_material
+        from .contracts import ImportRequest
+        from .importing import ImportSession
 
-        import hashlib
-        import json
-
-        material = str(getattr(request, "material", "") or "")
         mount = scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT)
-        policy = getattr(request, "policy", None) or "history_import"
-        batch_card_limit = max(
-            1, int(getattr(request, "max_cards", 50) or 50))
-        source_digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
-        fingerprint_payload = [
-            "history-import-v1", source_digest, scope.tenant_id, scope.owner(),
-            mount, str(getattr(request, "locale", "") or ""), policy,
-            str(getattr(request, "material_kind", "") or ""),
-            str(getattr(request, "ai_name", "") or ""),
-            str(getattr(request, "user_name", "") or ""),
-            str(getattr(request, "idempotency_key", "") or ""),
-            batch_card_limit, self.IMPORT_BATCH_CHARS,
-        ]
-        import_fingerprint = hashlib.sha256(json.dumps(
-            fingerprint_payload, ensure_ascii=False,
-            separators=(",", ":")).encode("utf-8")).hexdigest()
-        prog = progress or ImportProgress(total=len(material),
-                                          source_digest=source_digest,
-                                          import_fingerprint=import_fingerprint)
-        if prog.cursor < 0 or prog.cursor > len(material):
-            raise ValueError("history import progress.cursor 超出材料范围")
-        if prog.source_digest and prog.source_digest != source_digest:
-            raise ValueError(
-                "history import progress 属于另一份材料；请从新进度开始导入")
-        if not prog.source_digest and prog.cursor:
-            raise ValueError(
-                "旧 history import progress 没有 source_digest，无法证明它属于"
-                "当前材料；请从头重启（稳定 batch 幂等键会防止重复落卡）")
-        if prog.import_fingerprint and prog.import_fingerprint != import_fingerprint:
-            raise ValueError(
-                "history import progress 的 scope/mount/locale/policy/来源/幂等/批次规则"
-                "与当前请求不同；不能安全续传")
-        if not prog.import_fingerprint and prog.cursor:
-            raise ValueError(
-                "旧 history import progress 没有 import_fingerprint，无法验证"
-                "当前导入语义；请从头重启")
-        prog.source_digest = source_digest
-        prog.import_fingerprint = import_fingerprint
-        prog.total = len(material)
-        # 同一正文换 mount/policy 也是另一条导入，幂等键必须绑定完整语义。
-        key_prefix = str(getattr(request, "idempotency_key", "") or "import")
-        base_key = f"{key_prefix}:{import_fingerprint[:16]}"
-
-        all_batches = split_material(
-            material, batch_chars=self.IMPORT_BATCH_CHARS)
-        # cursor 是不可信的持久输入，只接受本实现曾经返回过的位置。任意落在
-        # 某批中间的 cursor 会静默跳过该批前半段；落在空白洞里则可能永远卡住。
-        valid_cursors = {0, len(material)}
-        valid_cursors.update(off + len(chunk) for off, chunk in all_batches)
-        if prog.cursor not in valid_cursors:
-            raise ValueError(
-                "history import progress.cursor 不是合法批次边界；请使用服务"
-                "上次原样返回的 progress")
-        batches = [(off, chunk) for off, chunk in all_batches
-                   if off >= prog.cursor]
+        if isinstance(request, ImportRequest):
+            # actor 只能来自可信 Scope。
+            request = replace(request, actor=scope.actor, mount=mount)
+        else:
+            request = ImportRequest(**{
+                name: getattr(request, name)
+                for name in ImportRequest.__dataclass_fields__
+                if hasattr(request, name)
+            })
+            request = replace(request, actor=scope.actor, mount=mount)
+        # 续传指纹绑定 tenant + owner（默认请求下与此前版本逐字节一致，老进度能续传）。
+        session = ImportSession(self.component, request, progress=progress,
+                                binding=(scope.tenant_id, scope.owner()))
         if max_batches is not None and int(max_batches) < 1:
             raise ValueError("max_batches 必须至少为 1")
-        if max_batches:
-            batches = batches[:max_batches]
 
-        # 全空白输入不会生成 batch，但它已经被完整消费；cursor 必须走到末尾，
-        # 否则 progress.done 永远为 False，宿主会无限重试。
-        if not material.strip():
-            if material and not prog.skipped:
-                prog.skipped.append({"offset": 0, "reason": "blank_material"})
-            prog.failed.clear()
-            prog.cursor = len(material)
-            return prog
-
-        for offset, chunk in batches:
-            # 正在重试这一批时先移除它的旧失败记录。成功后 failed 应为空；
-            # 旧实现只 append，导致一次临时失败后即使续传成功也永远 done=False。
-            prog.failed[:] = [f for f in prog.failed
-                              if int(f.get("offset", -1)) != offset]
-            receipt = self.capture_and_store(scope, CaptureRequest(
-                window=chunk,
-                mount=mount,
-                locale=getattr(request, "locale", "") or "",
-                ai_name=getattr(request, "ai_name", "") or "",
-                user_name=getattr(request, "user_name", "") or "",
-                policy=policy,
-                material_kind=str(getattr(request, "material_kind", "") or ""),
-                source="history_import",
-                max_cards=batch_card_limit,
-                idempotency_key=batch_key(base_key, offset=offset, chunk=chunk),
-            ))
-            if receipt.error:
-                # 🔴 失败就**停在这里**，游标不动。继续往下跑的话，后面几批
-                # 看不到这一批本该写进去的卡，会把同一件事再记一遍；
-                # 而游标推过去了，这一批永远不会被重试。
-                prog.failed.append({"offset": offset, "error": receipt.error})
+        ran = 0
+        while max_batches is None or ran < int(max_batches):
+            if session.next_batch() is None:
                 break
-            prog.cursor = offset + len(chunk)
-            prog.batches_done += 1
-            if receipt.written:
-                prog.cards_written += len(receipt.record_ids)
-            else:
-                # 空结果**不是失败** —— 某一批确实没什么可记是正常的，
-                # 游标照常推进。但要记下来，否则「导入完什么都没有」时
-                # 分不清是材料没内容还是我们漏读了。
-                prog.skipped.append({"offset": offset,
-                                     "reason": receipt.reason or "empty"})
-        # split_material 故意不把纯空白批次送给模型。最后一批有效内容之后若
-        # 还有尾随空白，需要把它也标成已消费；否则下一次没有 batch 可跑，
-        # cursor 却永远小于 total。
-        if not prog.failed and not any(
-            off >= prog.cursor for off, _chunk in all_batches
-        ):
-            prog.cursor = len(material)
-        return prog
+            ran += 1
+            if self._import_one_batch(scope, mount, session):
+                # 🔴 失败就**停在这里**，游标不动（原因见 ImportSession._advance）。
+                break
+        session._consume_trailing()
+        return session.progress
+
+    def _import_one_batch(self, scope: Scope, mount: str, session: Any) -> bool:
+        """跑游标处的一批并写回。返回 True = 这批失败了。"""
+        from .component import _is_truncated
+
+        purpose = {"candidates": "import_candidates"}
+        for attempt in range(self.MAX_RECOMPUTE):
+            batch = session.next_batch()
+            if batch is None:
+                return False
+            snapshot = None
+            if batch.stage != "candidates":
+                # 写卡前现读：前面批次写进去的卡要出现在这一批的索引里。
+                snapshot = self._snapshot(scope)
+                cards = [c for c in self._visible(scope, snapshot.cards)
+                         if str(c.get("mount") or DEFAULT_MOUNT) == mount]
+                batch = session.next_batch(existing_cards=cards)
+            while (ask := batch.next_prompt()) is not None:
+                reply = self.component._model.complete(
+                    ask, purpose=purpose.get(batch.stage, "capture"))
+                batch.feed(reply, truncated=_is_truncated(reply))
+            outcome = batch.result()
+            if outcome.error or batch.stage == "candidates" or not outcome.mutations:
+                session._advance(outcome, [], register=False)
+                return bool(outcome.error)
+            receipt = self._apply(
+                scope, mount, outcome.mutations,
+                idempotency_key=outcome.idempotency_key,
+                trace=dict(outcome.trace),
+                expected_revision=snapshot.revision,
+            )
+            if receipt.error == "revision_conflict" and attempt + 1 < self.MAX_RECOMPUTE:
+                # 重读重算，不是重放旧结果（见 _capture_with_cas）。
+                continue
+            if receipt.error:
+                session.fail(outcome, receipt.error)
+                return True
+            if not receipt.written:
+                session._advance(replace(outcome, mutations=[]), [], register=False)
+                return False
+            session._advance(outcome, list(receipt.record_ids), register=False)
+            return False
+        return False
 
     # -- 用户明说要记 ------------------------------------------------------- #
 

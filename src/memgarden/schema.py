@@ -398,6 +398,12 @@ def _import_progress() -> dict:
             "done": {"type": "boolean"},
             "percent": {"type": "integer"},
             "schema_version": {"type": "integer", "default": 1},
+            "strategy": {"type": "string", "enum": ["single_pass", "two_pass"],
+                         "default": "single_pass"},
+            "cards_added": {"type": "integer", "default": 0},
+            # 两段式的候选含用户内容；宿主按记忆正文的等级保存进度。
+            "candidates": {"type": "array", "items": {"type": "object"}},
+            "candidates_cursor": {"type": "integer", "default": 0},
         },
         "additionalProperties": True,
     }
@@ -628,6 +634,23 @@ def method_schemas() -> dict[str, Any]:
                                        "ai_name": _OPT_STR,
                                        "user_name": _OPT_STR,
                                        "idempotency_key": _OPT_STR,
+                                       # 宿主预切的批次（给了就让 material 为空串）
+                                       "batches": {"type": "array", "items": {
+                                           "type": "object", "required": ["text"],
+                                           "properties": {
+                                               "text": _STR, "label": _OPT_STR,
+                                               "occurred_from": _OPT_STR,
+                                               "occurred_to": _OPT_STR},
+                                           "additionalProperties": False}},
+                                       "strategy": {"type": "string",
+                                                    "enum": ["single_pass", "two_pass"],
+                                                    "default": "single_pass"},
+                                       "batch_chars": {"type": "integer", "minimum": 200},
+                                       "write_batch_candidates": {"type": "integer",
+                                                                  "minimum": 1,
+                                                                  "default": 40},
+                                       "max_total_cards": {"type": "integer", "minimum": 0},
+                                       "fallback_occurred_at": _OPT_STR,
                                        # 断点续跑：把上次的 progress 传回来
                                        "progress": _import_progress(),
                                        "max_batches": {"type": "integer",
