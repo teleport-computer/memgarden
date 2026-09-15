@@ -25,6 +25,7 @@ Garden 提供排序、选卡算法和策略接口；宿主决定怎样把它接�
 - **分词器是插口**：`Tokenizer` 协议只要 `name` 和 `tokenize(text) -> list[str]`，`name` 进版本号。不传时用零依赖的 `DefaultTokenizer`：整段 ASCII 标识符（`jira-4821`、`v2.3.1`、`x100v` 不被切碎，也不会子串命中）、CJK 单字 + 相邻二字（不生成和语法助词相邻的二字）、其余文字按词。包本身仍然零依赖；jieba 之类由宿主注入。
 - **停用词**（`DEFAULT_STOPWORDS`）只从查询里去掉，不改变卡片侧统计。
 - **门槛**：卡片命中查询 IDF 总量 ≥25%（`min_coverage`），或分数 ≥ 1.25 × 本批候选的最大单词 IDF（`strong_evidence`，给长段粘贴用）。花园里没有的词也算进分母——这正是「没记过」的信号。
+- **长查询（多轮窗口）**：把最近几条对话拼起来当自动想起的查询时，默认闸挡不住泛词累加的杂卡（评测里无关闲聊窗口平均带回 7.9 张）。`strong_evidence_terms=8` 让强证据闸随查询 token 数按 √(n/8) 放大，无关窗口全部返回空，代价是长粘贴里只靠一个编号命中的答案也会被挡。默认不开，数字与取舍见 [evals/retrieval](../evals/retrieval/README.md) 的「多轮窗口」一节。
 - 数值由 `evals/retrieval` 校准，过程与放弃的候选见 [evals/retrieval/README.md](../evals/retrieval/README.md)。只有 53 条合成查询，**不证明线上质量**；换分词器或改门槛后请在自己的语料上重测，上线后看 trace。
 - 词法方法拿不到换说法、跨语言；它也不证明答案正确，只证明用词重叠。
 - 复现 io 旧 `memory_bm25` 的逐项结果：`rank(..., tokenizer=<jieba 分词器>, stopwords=frozenset(), min_coverage=0)`，版本号会带 `+cfg:` 后缀。

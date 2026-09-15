@@ -91,7 +91,7 @@ STABLE = {
     },
     "memgarden.retrieval": {
         "RANKING_VERSION", "DEFAULT_STOPWORDS", "DEFAULT_MIN_COVERAGE",
-        "DEFAULT_STRONG_EVIDENCE", "Tokenizer", "DefaultTokenizer",
+        "DEFAULT_STRONG_EVIDENCE", "DEFAULT_STRONG_EVIDENCE_TERMS", "Tokenizer", "DefaultTokenizer",
         "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
         "DEFAULT_QUOTAS", "select_context",
     },

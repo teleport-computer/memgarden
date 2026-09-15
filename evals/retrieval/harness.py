@@ -81,8 +81,34 @@ def load_garden() -> list[dict]:
     return cards
 
 
-def load_queries(cards: list[dict]) -> list[dict]:
-    queries = _jsonl(HERE / "queries.jsonl")
+#: 查询集。``single``：一句话查询（主动搜索、单轮召回）；``multi_turn``：按 io 自动想起
+#: 的方式把最近几条对话拼成查询（见 :func:`chat_window_query`）。
+QUERY_SETS = {"single": "queries.jsonl", "multi_turn": "queries_multi_turn.jsonl"}
+
+#: io 自动想起取窗口时认的角色（``backend/enclave/routes/chat.py::_build_context_memories``）。
+CHAT_ROLES = frozenset({"user", "human", "assistant", "agent", "openclaw"})
+CHAT_WINDOW = 4
+
+
+def chat_window_query(messages: list[dict]) -> str:
+    """照抄 io 的自动想起查询：最近 4 条非空 user/assistant 消息按时间顺序用换行拼起来。
+
+    含上一条 AI 回复；第 5 条及更早的消息掉出窗口。改 io 那边的构造时这里要跟着改，
+    否则这组数字量的就不是线上的查询。
+    """
+    recent = [m["content"] for m in messages
+              if m.get("role") in CHAT_ROLES
+              and isinstance(m.get("content"), str) and m["content"].strip()][-CHAT_WINDOW:]
+    return "\n".join(recent)
+
+
+def load_queries(cards: list[dict], query_set: str = "single") -> list[dict]:
+    queries = _jsonl(HERE / QUERY_SETS[query_set])
+    for q in queries:
+        if "messages" in q:
+            if "query" in q:
+                raise ValueError(f"{q['qid']}: give either query or messages, not both")
+            q["query"] = chat_window_query(q["messages"])
     known = {c["id"] for c in cards}
     problems = []
     for q in queries:
@@ -167,8 +193,19 @@ def mg_select(query: str, cards: list[dict], k: int) -> list[str]:
     return [str(c["id"]) for c in picked]
 
 
+def mg_select_scaled(query: str, cards: list[dict], k: int) -> list[str]:
+    """同 ``mg-select``，但打开按查询长度放大的强证据闸（``strong_evidence_terms=8``）。
+
+    给多轮窗口查询量的：默认闸在长查询上几乎全部放行，见 README「多轮窗口」。
+    """
+    pool = [{**c, "roles": list(c.get("roles") or [])} for c in cards]
+    picked, _trace = retrieval.select_context(query, pool, cap=k, strong_evidence_terms=8)
+    return [str(c["id"]) for c in picked]
+
+
 BUILTIN: dict[str, Ranker] = {"mg-relevant": mg_relevant, "mg-scores": mg_scores,
-                              "mg-bm25": mg_bm25, "mg-select": mg_select}
+                              "mg-bm25": mg_bm25, "mg-select": mg_select,
+                              "mg-select-scaled": mg_select_scaled}
 
 
 def load_external(spec: str) -> Ranker:
@@ -351,6 +388,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", help="write results JSON here")
     ap.add_argument("--misses", action="store_true", help="print per-query misses")
     ap.add_argument("--compare", nargs="+", help="print a table from saved result files")
+    ap.add_argument("--set", choices=sorted(QUERY_SETS), default="single",
+                    help="query set: single-sentence queries or multi-turn chat windows")
     args = ap.parse_args(argv)
 
     if args.compare:
@@ -362,7 +401,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cards = load_garden()
-    queries = load_queries(cards)
+    queries = load_queries(cards, args.set)
     specs = args.ranker or list(BUILTIN)
     results = []
     for index, spec in enumerate(specs):
@@ -373,7 +412,8 @@ def main(argv: list[str] | None = None) -> int:
                            for size in str(args.scale).split(",") if size.strip()]
         results.append(result)
 
-    meta = {"corpus_fingerprint": corpus_fingerprint(cards, queries), "cards": len(cards),
+    meta = {"query_set": args.set,
+            "corpus_fingerprint": corpus_fingerprint(cards, queries), "cards": len(cards),
             "visible_cards": len(visible(cards)), "queries": len(queries),
             "python": sys.version.split()[0]}
     print(f"garden {meta['cards']} cards ({meta['visible_cards']} visible) · "

@@ -84,6 +84,19 @@ any some not no yes
 #: 取两者的交集。只有 53 条合成查询 —— **不能证明线上质量**，上线后看 trace。
 DEFAULT_MIN_COVERAGE = 0.25
 DEFAULT_STRONG_EVIDENCE = 1.25
+#: 可选：强证据闸随查询长度放大。传 ``strong_evidence_terms=n`` 时，查询（去停用词、去重后）
+#: 超过 ``n`` 个 token 就把闸乘上 √(token 数 / n)。**默认不放大**（``None``）。
+#:
+#: 为什么有这个开关：自动想起的查询是**最近四条对话拼起来**（含 AI 回复），几十到上百个
+#: token，每个偶然撞上的泛词都给分，杂卡分数随查询变长线性上涨，固定的闸挡不住。
+#: ``evals/retrieval`` 多轮窗口集（16 条，``--set multi_turn``）上，默认闸无命中 0/3、
+#: 每轮平均带回 7.9 张卡；``strong_evidence_terms=8`` 时无命中 3/3、平均 1.8 张。
+#:
+#: 为什么默认不开：同一个放大会挡掉「长段粘贴里只有一个编号是锚点」的正确答案
+#: （``tests/test_retrieval_rank.py`` 的长粘贴用例、jieba 下单句集 q33 变成返回空），
+#: 且 8 这个值两侧都窄（6 或 10 都会让某一组退步）。要不要为自动想起开它是宿主的产品取舍，
+#: 数字见 ``evals/retrieval/README.md``。
+DEFAULT_STRONG_EVIDENCE_TERMS: int | None = None
 
 
 class SearchLimitExceeded(RuntimeError):
@@ -226,6 +239,7 @@ def rank(
     stopwords: Iterable[str] | None = None,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     strong_evidence: float = DEFAULT_STRONG_EVIDENCE,
+    strong_evidence_terms: int | None = DEFAULT_STRONG_EVIDENCE_TERMS,
     k1: float = K1,
     b: float = B,
     max_cards: int | None = None,
@@ -245,7 +259,9 @@ def rank(
     1. 分数 > ``min_score``（默认 0，即 BM25 原义）；
     2. **覆盖率** ≥ ``min_coverage``（命中词占查询 IDF 总量的比例），
        **或者**分数 ≥ ``strong_evidence`` × 本批候选里最大可能的单词 IDF
-       （「证据超过一个独有词」—— 长段粘贴时覆盖率天然很低，靠这条放行）。
+       （「证据超过一个独有词」—— 长段粘贴时覆盖率天然很低，靠这条放行）；
+       给了 ``strong_evidence_terms`` 且查询超过这么多个 token 时，这道闸再乘
+       √(token 数 / terms)（默认不放大，取舍见 :data:`DEFAULT_STRONG_EVIDENCE_TERMS`）。
 
     ``stopwords`` 默认 :data:`DEFAULT_STOPWORDS`，只从**查询**里去掉（卡片侧统计不变，
     换停用词表不改变其余词的分数）。无命中返回空 ``hits``。
@@ -258,6 +274,7 @@ def rank(
     scored, rejected, version, trace = _evaluate(
         query, candidates, tokenizer=tokenizer, text_of=text_of, min_score=min_score,
         stopwords=stopwords, min_coverage=min_coverage, strong_evidence=strong_evidence,
+        strong_evidence_terms=strong_evidence_terms,
         k1=k1, b=b, max_cards=max_cards, max_text_bytes=max_text_bytes)
     if limit is not None:
         scored = scored[:max(0, int(limit))]
@@ -274,7 +291,7 @@ class _Row:
 
 
 def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, min_coverage,
-              strong_evidence, k1, b, max_cards, max_text_bytes):
+              strong_evidence, strong_evidence_terms, k1, b, max_cards, max_text_bytes):
     """打分 + 过闸，返回（通过的行按序、被闸挡下的行按序、版本号、trace）。
 
     ``rank`` 和 ``select_context`` 共用这一份 —— 两条路是**同一把尺子**的结构保证。
@@ -284,6 +301,10 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
                          ("strong_evidence", strong_evidence)):
         if not math.isfinite(value) or value < 0:
             raise ValueError(f"{label} must be finite and non-negative")
+    if strong_evidence_terms is not None and (
+            isinstance(strong_evidence_terms, bool) or not isinstance(strong_evidence_terms, int)
+            or strong_evidence_terms < 1):
+        raise ValueError("strong_evidence_terms must be a positive int or None")
     if max_cards is not None and len(candidates) > max_cards:
         raise SearchLimitExceeded("cards")
 
@@ -298,6 +319,8 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
         config["min_score"] = min_score
     if (min_coverage, strong_evidence) != (DEFAULT_MIN_COVERAGE, DEFAULT_STRONG_EVIDENCE):
         config["min_coverage"], config["strong_evidence"] = min_coverage, strong_evidence
+    if strong_evidence_terms != DEFAULT_STRONG_EVIDENCE_TERMS:
+        config["strong_evidence_terms"] = strong_evidence_terms
     if (k1, b) != (K1, B):
         config["k1"], config["b"] = k1, b
     version = _version(str(getattr(tok, "name", "") or type(tok).__name__), config)
@@ -320,7 +343,7 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
             terms = Counter(tok.tokenize(text))
             documents.append((terms, sum(terms.values())))
 
-    empty = {"matched": 0, "below_min_score": 0, "below_gate": 0}
+    empty = {"evidence_scale": 1.0, "matched": 0, "below_min_score": 0, "below_gate": 0}
     if not query_terms or not documents:
         return [], [], version, {**trace, **empty}
 
@@ -334,7 +357,10 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
         return [], [], version, {**trace, **empty}
     idf = {term: _idf(corpus.documents, frequency[term]) for term in query_terms}
     query_mass = sum(idf.values())
-    strong_floor = strong_evidence * _idf(corpus.documents, 0)
+    evidence_scale = 1.0
+    if strong_evidence_terms is not None and len(query_terms) > strong_evidence_terms:
+        evidence_scale = math.sqrt(len(query_terms) / strong_evidence_terms)
+    strong_floor = strong_evidence * _idf(corpus.documents, 0) * evidence_scale
 
     passed: list[_Row] = []
     rejected: list[_Row] = []
@@ -362,6 +388,7 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
     rejected.sort(key=order)
     return passed, rejected, version, {
         **trace,
+        "evidence_scale": round(evidence_scale, 4),
         "matched": len(passed) + len(rejected),
         "below_min_score": sum(r.reason == "below_min_score" for r in rejected),
         "below_gate": sum(r.reason == "below_gate" for r in rejected),
@@ -386,6 +413,7 @@ def select_context(
     stopwords: Iterable[str] | None = None,
     min_coverage: float = DEFAULT_MIN_COVERAGE,
     strong_evidence: float = DEFAULT_STRONG_EVIDENCE,
+    strong_evidence_terms: int | None = DEFAULT_STRONG_EVIDENCE_TERMS,
     max_cards: int | None = None,
     max_text_bytes: int | None = None,
 ) -> tuple[list[dict], dict]:
@@ -416,7 +444,7 @@ def select_context(
     passed, rejected, version, rank_trace = _evaluate(
         query, pool, tokenizer=tokenizer, text_of=text_of, min_score=0.0,
         stopwords=stopwords, min_coverage=min_coverage, strong_evidence=strong_evidence,
-        k1=K1, b=B, max_cards=max_cards, max_text_bytes=max_text_bytes)
+        strong_evidence_terms=strong_evidence_terms, k1=K1, b=B, max_cards=max_cards, max_text_bytes=max_text_bytes)
 
     chosen: list[tuple[_Row, str]] = []
     seen: set[str] = set()
@@ -490,6 +518,7 @@ def _neg_id(card_id: str) -> tuple[int, ...]:
 
 __all__ = [
     "RANKING_VERSION", "DEFAULT_STOPWORDS", "DEFAULT_MIN_COVERAGE", "DEFAULT_STRONG_EVIDENCE",
+    "DEFAULT_STRONG_EVIDENCE_TERMS",
     "Tokenizer", "DefaultTokenizer",
     "Hit", "RankResult", "SearchLimitExceeded", "default_search_text", "rank",
     "DEFAULT_QUOTAS", "select_context",

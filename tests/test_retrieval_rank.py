@@ -335,3 +335,39 @@ def test_gate_parameters_are_validated_and_can_be_disabled():
         rank("豆包", garden, strong_evidence=float("inf"))
     closed = rank("我喜欢什么颜色的车", garden, stopwords=frozenset(), min_coverage=0.0)
     assert closed.ids == bm25("我喜欢什么颜色的车", garden).ids
+
+
+def test_strong_evidence_scaling_is_off_by_default_and_opt_in():
+    """放大闸默认不开：长粘贴里只靠一个编号命中的答案仍然放行；打开后被挡、版本号带 cfg。"""
+    garden = _garden()
+    paste = ("帮我看看这段是不是跟之前那次有关：09:12 alert auth-gateway 5xx rate 3.2% "
+             "login token refresh failing after gray release of JIRA-4821 follow-up patch, "
+             "rollback initiated ETA 10 min, error rate back to baseline, keeping incident open")
+    default = rank(paste, garden)
+    assert retrieval.DEFAULT_STRONG_EVIDENCE_TERMS is None
+    assert default.ids[:1] == ["jira"] and default.trace["evidence_scale"] == 1.0
+    assert "+cfg:" not in default.version
+    scaled = rank(paste, garden, strong_evidence_terms=8)
+    assert scaled.trace["evidence_scale"] > 1
+    assert scaled.ids == [], "这就是默认不开的原因：编号是唯一锚点时会被挡掉"
+    assert "+cfg:" in scaled.version
+    # 短查询不放大：token 数不超过 terms 时和默认完全相同。
+    assert rank("豆包", garden, strong_evidence_terms=8).ids == rank("豆包", garden).ids
+    assert rank("豆包", garden, strong_evidence_terms=8).trace["evidence_scale"] == 1.0
+
+
+@pytest.mark.parametrize("terms", [0, -1, 1.5, "8", True])
+def test_strong_evidence_terms_is_validated(terms):
+    with pytest.raises(ValueError):
+        rank("豆包", _garden(), strong_evidence_terms=terms)
+
+
+def test_select_context_shares_the_scaled_gate_with_rank():
+    garden = _garden()
+    query = "今天午饭随便吃了碗面\n下午有点困想点杯奶茶\n晚上还要加班真烦\n周末想出去走走散散心"
+    for terms in (None, 4):
+        ranked = rank(query, garden, strong_evidence_terms=terms)
+        picked, trace = retrieval.select_context(query, garden, strong_evidence_terms=terms)
+        assert trace["version"] == ranked.version
+        assert trace["evidence_scale"] == ranked.trace["evidence_scale"]
+        assert {c["id"] for c in picked} <= set(ranked.ids)

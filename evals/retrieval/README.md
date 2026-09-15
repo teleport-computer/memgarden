@@ -12,6 +12,7 @@ python evals/retrieval/harness.py                     # 内置 ranker：mg-relev
 python evals/retrieval/harness.py --misses            # 逐条列出漏召回 / 陷阱 / 无命中失败
 python evals/retrieval/harness.py --ranker my_rank.py:rank --name my-ranker --json out.json
 python evals/retrieval/harness.py --compare evals/retrieval/results/baseline-2026-09-15.json
+python evals/retrieval/harness.py --set multi_turn        # 多轮窗口查询集（自动想起的查询形状）
 ```
 
 外部 ranker 只需一个函数 `rank(query, cards, k) -> list[card_id]`，`cards` 是已过宿主生命周期
@@ -24,6 +25,7 @@ python evals/retrieval/harness.py --compare evals/retrieval/results/baseline-202
 |---|---|
 | `cards.jsonl` | 76 张手写卡：中/英/混写，工单号、版本号、航班号、型号，取代链（`status: superseded` + `supersedes`），线程，陷阱卡（同名歌手 Aurora、妈妈的膝盖、同事的马拉松、青苹果） |
 | `filler.py` | 按固定种子生成 140 张日常流水卡作背景噪声；生成时自查不含任何查询答案词 |
+| `queries_multi_turn.jsonl` | 16 个多轮对话窗口，6 类：`mt_anaphora`（当前一句是指代，实体在前文）`mt_switch`（窗口里换了话题）`mt_long_reply`（长篇建议式 AI 回复）`mt_mixed`（中英混写/型号）`mt_trap` `mt_no_hit`。每条给 `messages`，查询由 harness 按 io 的方式拼（见下文「多轮窗口」），标注字段同上 |
 | `queries.jsonl` | 53 条查询，12 类：`exact_entity` `paraphrase` `paraphrase_xlang` `cjk_nospace` `en_id` `mixed` `short` `long_paste` `distractor` `superseded` `history` `thread` `no_hit`。每条带 `must` / `should` / `must_not` / `why`；无命中类带 `expect_empty`；`history` 类带 `related`（应经关联读取拿到的旧卡，暂不计分） |
 
 **全部虚构，不含真实用户数据。**被取代的卡由 harness 按宿主规则过滤掉，两类 ranker 看到的是同一个候选池。
@@ -37,6 +39,8 @@ python evals/retrieval/harness.py --compare evals/retrieval/results/baseline-202
   （相关性门槛 0.35 + 转折/最近软配额，cap 8）。
 - `mg-scores`：同一套打分去掉门槛和分桶、纯按分数排。诊断用，区分「分不准」和「被门槛挡掉」。
 - `mg-bm25`：`retrieval.rank`，默认分词器、默认停用词和门槛，即统一后的排序器。
+- `mg-select`：`retrieval.select_context`，统一后的自动想起（同一把尺子 + 软配额）。
+- `mg-select-scaled`：同上，打开按查询长度放大的强证据闸（`strong_evidence_terms=8`）。
 
 ## 基线（2026-09-15）
 
@@ -97,3 +101,45 @@ Python 3.14，Apple Silicon 单核。
 - q49「我喜欢什么颜色的车」仍返回写着「喜欢」的卡：默认分词器把「喜」「欢」「喜欢」算了三次，
   证据分够得上强证据闸。`tests/test_retrieval_rank.py` 用 strict xfail 记着这条。
 - jieba 下 q52「我姐姐叫什么名字」返回 3 张带「名字」的卡。
+
+## 多轮窗口（自动想起的查询形状，2026-09-15）
+
+上面的 53 条都是「一句话」。io 的自动想起不是拿一句话去查：它把**最近 4 条非空的 user/assistant
+消息按时间顺序用换行拼起来**当查询（含上一条 AI 回复，第 5 条及更早的掉出窗口；
+io `backend/enclave/routes/chat.py::_build_context_memories`）。`harness.chat_window_query` 照抄这个构造，
+`queries_multi_turn.jsonl` 里每条给消息列表，由它拼成查询。改 io 那边的构造时这里要跟着改。
+
+结果文件 `results/multi-turn-2026-09-15.json`。`select_context` cap 8；jieba 列注入 io 的
+`memory_bm25.tokenize`（jieba 0.42.1，适配器在仓库外），Python 3.14，Apple Silicon 单核。
+
+| 指标 | 旧 mg-relevant | mg-select（默认闸） | mg-select 放大闸 | mg-select + jieba | 放大闸 + jieba |
+|---|---|---|---|---|---|
+| recall@5 | 0.962 | 0.962 | 0.923 | 1.000 | 0.923 |
+| MRR@8 | 0.515 | 0.923 | 0.923 | 0.923 | 0.923 |
+| precision@8 | 0.415 | 0.298 | 0.827 | 0.654 | 0.897 |
+| 无命中返回空 | 1/3 | **0/3** | 3/3 | **0/3** | 3/3 |
+| 有答案却返回空 | 0 | 0 | 0 | 0 | 0 |
+| 每轮平均带回 | 6.25 | **7.88** | 1.81 | **4.25** | 1.31 |
+| p50 @210 / 1000 卡 (ms) | 64 / 308 | 3.4 / 16 | 3.2 / 15 | 6.9 / 32 | 6.9 / 32 |
+
+同一个放大闸在单句集上的代价：默认分词器数字不变（recall@5 0.932、有答案却返回空 1）；
+jieba 下 recall@5 0.896 → 0.875、有答案却返回空 3 → 4（多出来的是 q33 长告警粘贴，唯一锚点是 JIRA-4821）。
+
+读法：
+
+- **长窗口的问题不是「门槛太严、答案被挡」，是「门槛太松」**：有答案的窗口答案都在前两位
+  （有答案却返回空 0），但没什么可想起的闲聊窗口照样带回一整屏杂卡。原因是固定的强证据闸
+  （1.25 × 最大单词 IDF ≈ 7.6）：四条消息去停用词后有 50–200 个 token，杂卡靠「楼下」「有点」「特别」这类
+  泛词各撞一点，分数累加到 15–25，远过闸；覆盖率这道闸反而正常（杂卡 0.02–0.08）。
+- **放大闸**（`strong_evidence_terms=8`：token 数超过 8 时闸乘 √(n/8)）把无命中全挡住、平均带回降到 1–2 张。
+  丢掉的两个答案（mt02 的「去六院看膝盖」、mt15 的「慢性胃炎」）是同一窗口里的**第二个**答案，
+  放大前也排在杂卡后面。
+- **为什么默认没开**：同一个放大会挡掉「长段粘贴里只有一个编号是锚点」的答案
+  （`tests/test_retrieval_rank.py` 的长粘贴用例、jieba 单句集 q33）——这正是强证据闸本来要放行的情况。
+  而且 8 两侧都窄：同一族参数里 6 让默认分词器单句集多两条返回空，10 让多轮无命中退回 0–1/3。
+  自动想起要不要开，是宿主在「闲聊时不乱想起」和「长粘贴只靠编号也能想起」之间的取舍。
+- **试过没用的**：只加覆盖率下限（0.03–0.06，多轮无命中最多 2/3 且伤单句集）；相对分数闸（≥ 中位数/均值 × λ，
+  无命中最多 1–2/3）；覆盖率或分数的 z 分数（要么挡不住、要么 recall 掉到 0.8 以下）；只累加稀有词的证据（单句集
+  recall@5 掉到 0.87 以下）。
+- 16 条合成窗口、3 条无命中——**只够说明方向，不够定线上阈值**。`tests/test_retrieval_eval_gate.py` 用 strict xfail
+  记着默认闸的无命中缺陷，并守放大闸的质量线；上线后看 trace 里的 `below_gate` / `evidence_scale`。
