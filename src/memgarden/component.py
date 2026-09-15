@@ -30,7 +30,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from .contracts import (
     Actor,
@@ -188,7 +188,7 @@ class _CapturePlan:
 
         cards_text = request.cards
         if request.existing_cards is not None:
-            existing = [dict(c) for c in request.existing_cards if isinstance(c, dict)]
+            existing = [dict(c) for c in request.existing_cards if isinstance(c, Mapping)]
             # 校验用**全部**现有卡，不是渲染进索引的那几张：一张没挤进索引、但
             # 模型从对话里看到了 id 的真卡，不该被当成编造的打回。
             self.known_ids = frozenset(
@@ -201,10 +201,13 @@ class _CapturePlan:
                 from .importing import bm25_index_ranker, select_index_cards
                 from .rendering import render_card_index_budgeted
 
+                # always_rank：卡数没超过张数上限时也按相关性排 —— 字数预算照样可能从末尾截，
+                # 不排的话截掉的是宿主列表末尾的卡，而不是最不相关的。
                 picked = select_index_cards(
                     existing, request.window or "",
                     limit=request.index_cards_limit,
                     ranker=bm25_index_ranker(owner._tokenizer),
+                    always_rank=True,
                 )
                 cards_text, shown = render_card_index_budgeted(
                     picked,

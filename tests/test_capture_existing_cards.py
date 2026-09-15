@@ -181,3 +181,55 @@ def test_budgeted_render_keeps_order_clips_and_is_one_line():
     text, ids = render_card_index_budgeted(cards, budget_chars=len("- b: 第二 行") + 3,
                                            summary_chars=10)
     assert ids == ["b"]
+
+
+# ------------------------------------------------------------ 发布前复审
+
+def _index_rows(prompt: str) -> list[str]:
+    index = prompt.split("target_id from here)]", 1)[1].split("\n[", 1)[0]
+    return [line for line in index.splitlines() if line.startswith("- ")]
+
+
+def test_small_garden_index_is_ranked_before_the_char_budget_cuts_it():
+    """卡数没超过 60 张时以前原样照宿主顺序渲染，字数预算从末尾截 —— 相关的那张排在最后就被截掉，
+    模型看不到它，只会再 add 一张。"""
+    long_unrelated = [{"id": f"mom_long_{i:02d}", "summary": f"第{i}次闲聊：" + "天气和午饭" * 60,
+                       "bucket": "日常", "importance": 0.5} for i in range(50)]
+    model = FakeModel(_reply())
+    _garden(model).capture(_request(existing_cards=[*long_unrelated, JOB]))
+    rows = _index_rows(model.prompts[0])
+    assert len(rows) < 51, "预算确实截掉了一部分"
+    assert rows[0].startswith("- mom_job:")
+
+
+def test_existing_cards_accept_any_mapping():
+    from types import MappingProxyType
+
+    model = FakeModel(_reply(_card("supersede", "mom_job", "老王下个月去腾讯做产品经理")))
+    result = _garden(model).capture(_request(existing_cards=[MappingProxyType(JOB)]))
+    assert [m.get("target_id") for m in result.mutations] == ["mom_job"]
+    assert len(model.prompts) == 1, "Mapping 里的真卡不许被当成编造的 id 重问"
+
+
+def test_mounted_capture_drops_a_fabricated_target_and_keeps_the_good_card():
+    from memgarden import MountedGarden, Scope
+    from memgarden.stores.memory import InMemoryStore
+
+    store = InMemoryStore()
+    store.apply("t", [{"op": "add", "card": {"summary": "老王在字节跳动做产品经理", "content": "正文"}}],
+                owner="alice", idempotency_key="seed")
+    real_id = store.load("t", owner="alice").cards[0]["id"]
+    bad = _reply(_card("supersede", "FAKE-9", "老王离职了"), _card("add", None, "老王下个月去腾讯"))
+    model = FakeModel(bad)
+    garden = MountedGarden(model=model, store=store)
+    scope = Scope(tenant_id="t", memory_owner_id="alice")
+    # 宿主另交一份 existing_cards（含那个假 id）也不算数：Store 才是事实源。
+    receipt = garden.capture_and_store(scope, _request(existing_cards=[{"id": "FAKE-9", "summary": "假"}]))
+    assert receipt.error is None and receipt.written, receipt
+    summaries = sorted(c["summary"] for c in store.load("t", owner="alice").cards)
+    assert summaries == ["老王下个月去腾讯", "老王在字节跳动做产品经理"]
+    assert len(model.prompts) == 2, "编造的 target 先重问一次"
+
+    ok = FakeModel(_reply(_card("supersede", real_id, "老王下个月去腾讯做产品经理")))
+    garden = MountedGarden(model=ok, store=store)
+    assert garden.capture_and_store(scope, _request(idempotency_key="second")).written

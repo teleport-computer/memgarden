@@ -230,19 +230,32 @@ def bm25_index_ranker(tokenizer: Any = None) -> IndexRanker:
 
 def select_index_cards(
     cards: Sequence[Mapping], text: str, *, limit: int = 60,
-    ranker: IndexRanker | None = None,
+    ranker: IndexRanker | None = None, always_rank: bool = False,
 ) -> list[dict]:
     """给这一批材料挑进「已有记忆索引」的旧卡。
 
     卡不多于 ``limit`` 时全给。多了就按和这一批文字的相关性挑，**留四分之一名额
     给重要度最高的卡** —— 核心事实（名字、关系、边界）常常和某一批的字面不重合，
     但模型写卡时仍需要知道它们已经在了。相关性默认由 :func:`bm25_index_ranker` 给。
+
+    ``always_rank=True``：卡不多于 ``limit`` 时也全给，但**排好序**（相关的在前，其余按
+    重要度）。给之后还要按字数预算从末尾截的调用方用（Capture 的索引）—— 否则截掉的是
+    宿主列表末尾的卡，可能正是最相关的那张。导入的索引不截，保持原顺序。
     """
     usable = [dict(c) for c in cards
               if str(c.get("id") or "").strip() and str(c.get("summary") or "").strip()]
     limit = max(0, int(limit))
     if len(usable) <= limit:
-        return usable
+        if not always_rank or len(usable) < 2:
+            return usable
+        by_id = {str(c["id"]): c for c in usable}
+        ordered: list[dict] = []
+        for rid in (ranker or bm25_index_ranker())(text, usable):
+            card = by_id.pop(str(rid), None)
+            if card is not None:
+                ordered.append(card)
+        ordered.extend(sorted(by_id.values(), key=lambda c: (-_importance(c), str(c.get("id")))))
+        return ordered
     if not limit:
         return []
     by_importance = sorted(usable, key=lambda c: (-_importance(c), str(c.get("id"))))

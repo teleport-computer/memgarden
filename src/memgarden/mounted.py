@@ -254,6 +254,11 @@ class MountedGarden:
             cards=request.cards or render_card_index(cards),
             buckets=request.buckets or render_buckets(cards),
             threads=request.threads or render_threads(cards),
+            # Store 是事实源：merge/supersede 的 target_id 只许指向这次快照里的卡。
+            # 宿主另给的 existing_cards 一律换成快照 —— 两份来源会让「索引里看到的」和
+            # 「校验认的」对不上；CAS 冲突重算时这里重新读，校验名单跟着新快照走。
+            # 模型编出来的 id 由组件重问、仍不对只丢那一张，同窗口的好卡照常落库。
+            existing_cards=cards,
         )
         return prepared, snapshot.revision
 
