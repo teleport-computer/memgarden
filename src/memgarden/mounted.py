@@ -28,6 +28,8 @@ from .contracts import (
     ContextRequest,
     ContextResult,
     MaintenanceRequest,
+    SearchRequest,
+    SearchResult,
     ToolCall,
     ToolResult,
 )
@@ -305,6 +307,38 @@ class MountedGarden:
                       if mount is None
                       or str(c.get("mount") or DEFAULT_MOUNT) == mount]
         return self.component.build_context(ContextRequest(
+            query=query,
+            actor=scope.actor,
+            mounts=tuple(mounts),
+            candidates=candidates,
+            limit=limit,
+        ))
+
+    # -- 主动搜索 -------------------------------------------------------- #
+
+    def search(
+        self,
+        scope: Scope,
+        query: str,
+        *,
+        limit: int = 20,
+        mount: str | None = None,
+    ) -> SearchResult:
+        """按查询找真实命中的卡 —— 候选同样自己从库里取、按 Scope 过滤。
+
+        **不走 selection_policy**：策略里可能有 RecentStage 这类不看查询的段，
+        自动想起用它打底没问题，主动搜索混进来就是答非所问。无命中返回空。
+
+        生命周期和 :meth:`context_for_turn` 一致：只看当前有效的卡
+        （归档、被取代的不参与；真删的卡 Store 里已经没有）。
+        """
+        if mount is not None:
+            scope.check(mount)
+        mounts = (mount,) if mount is not None else scope.mounts()
+        candidates = [c for c in self._readable_cards(scope)
+                      if mount is None
+                      or str(c.get("mount") or DEFAULT_MOUNT) == mount]
+        return self.component.search(SearchRequest(
             query=query,
             actor=scope.actor,
             mounts=tuple(mounts),
@@ -777,8 +811,14 @@ class MountedGarden:
             query = str((call.arguments or {}).get("query") or "").strip()
             if not query:
                 return ToolResult(ok=False, error="query_required")
-            found = self.context_for_turn(scope, query, limit=8)
-            by_id = {str(c.get("id") or ""): c for c in self._readable_cards(scope)}
+            # 走 search，不走 context_for_turn：后者按挑卡策略执行，策略里的
+            # RecentStage 会把「最近写的几张」混进搜索结果（2026-09-15 修）。
+            # 候选只读一次：结果和回填用同一份快照，不会出现「搜到了、回填时卡已不在」。
+            cards = self._readable_cards(scope)
+            found = self.component.search(SearchRequest(
+                query=query, actor=scope.actor, mounts=tuple(scope.mounts()),
+                candidates=cards, limit=8))
+            by_id = {str(c.get("id") or ""): c for c in cards}
             lines = []
             for rid in found.record_ids:
                 card = by_id.get(rid) or {}

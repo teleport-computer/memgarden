@@ -1,4 +1,4 @@
-"""Opt-in relevant SelectionPolicy: project cues/role without changing storage.
+"""Relevant SelectionPolicy on the unified ranker: project roles without changing storage.
 
 Run: python examples/retrieval_runtime.py
 The model and vectors are synthetic; this is integration evidence, not a
@@ -9,21 +9,20 @@ from __future__ import annotations
 import json
 
 from memgarden import CaptureRequest, MountedGarden, Scope
+from memgarden.retrieval import select_context
 from memgarden.scoring.hybrid import select_hybrid_context_memories_with_trace
-from memgarden.scoring.relevance import select_relevant_context_memories_with_trace
 from memgarden.selection import Pick, SelectionResult
 from memgarden.stores.memory import InMemoryStore
 
 
 def project_for_search(card):
-    """Example HOST policy: preserve explicit search_text and roles if supplied."""
+    """Example HOST policy: map the stored single ``role`` to selector ``roles``.
+
+    Search text needs no projection: ``retrieval.default_search_text`` already reads
+    summary, content, bucket, threads and normalized retrieval_cues. A host with its
+    own searchable fields passes ``search_text`` (or ``text_of=``) instead.
+    """
     projected = dict(card)
-    if not str(card.get("search_text") or "").strip():
-        cues = [x for x in card.get("retrieval_cues", []) if isinstance(x, str)]
-        projected["search_text"] = " ".join([
-            str(card.get("summary") or ""), str(card.get("content") or ""),
-            str(card.get("bucket") or ""), *cues,
-        ])
     if "roles" not in card:
         role = str(card.get("role") or "").strip()
         projected["roles"] = [role] if role else []
@@ -34,7 +33,7 @@ class RelevantPolicy:
     def select(self, cards, query, *, limit):
         # MountedGarden already restricted these candidates to this Scope.
         projected = [project_for_search(card) for card in cards]
-        chosen, _ = select_relevant_context_memories_with_trace(projected, query, cap=limit)
+        chosen, _ = select_context(query, projected, cap=limit)
         # Return only IDs/evidence. Garden renders original authorized cards.
         return SelectionResult(picks=tuple(Pick(
             card_id=str(card["id"]), stage=card["selection"]["bucket"],

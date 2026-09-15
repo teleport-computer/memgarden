@@ -7,6 +7,7 @@
 | 时机 | SDK / wire 入口 | 宿主处理结果 |
 |---|---|---|
 | 对话前召回 | `context_for_turn` / `context.get` | 把 `blocks` 注入本轮上下文，保留 `record_ids` 供追溯 |
+| 主动搜索 | `search` / `records.search` | 只返回真实命中（`record_ids` + `hits` + `ranking`），无命中为空；不经过挑卡策略，不补最近卡 |
 | 对话后记忆 | `capture_and_store` / `capture.run` | 检查业务回执，再标记这段素材已处理 |
 | 宿主自行调模型 | `capture.begin/feed/cancel` | 按 `needs_model` 调模型并 feed，直到 `completed`，再检查其中回执 |
 | 检查、执行整理 | `check_maintenance`、`run_and_store_maintenance` / `maintenance.check/run` | 调度归宿主，卡片与整理账本由 Garden 一起提交 |
@@ -17,7 +18,7 @@
 | 用户删除 | `delete_record` / `records.delete` | 提供请求身份并检查删除回执 |
 | 改变可见范围 | `promote` / `records.promote` | 宿主先授权，不能把模型给的 `authorized` 当作权限证据 |
 | 升级旧卡字段 | `migrate_and_store` / `records.migrate` | 给出旧卡和允许修改的 ID；这不是数据库 schema 迁移 |
-| 给模型的工具 | `tools`、`invoke_tool` / `tool.list/invoke` | 绑定可信 Scope 后再执行 |
+| 给模型的工具 | `tools`、`invoke_tool` / `tool.list/invoke` | 绑定可信 Scope 后再执行；`memory_search` 走 `search`，只给摘要文本 |
 
 SDK 完整参数见 [contracts.py](../src/memgarden/contracts.py) 和 [mounted.py](../src/memgarden/mounted.py)。wire 字段以 [`schema.py`](../src/memgarden/schema.py) 为准，可通过 `schema.get` 获取；不要假定 Python 请求类的每一个字段都由每条 wire 方法透传。
 
@@ -42,6 +43,27 @@ JSON Lines 每行一个请求与响应，stdout 承载协议。示例请求：
 ```
 
 请求 ID 可为字符串、整数或 null。先检查响应顶层 `error`，再检查业务结果中的 `error` / 工具的 `ok`；`completed` 只代表会话已结束，不能替代存储成功判断。
+
+### 稳定公开模块
+
+顶层 `memgarden.__all__` 之外，宿主常用的工具函数放在少数子模块里。`memgarden.STABLE_MODULES` 列出**承诺稳定**的那些，每个模块的 `__all__` 就是可以依赖的名字；删名字要先经过一个 deprecated 版本，并写进 [CHANGELOG](../CHANGELOG.md)。
+
+| 模块 | 用途 |
+|---|---|
+| `memgarden.contracts` | 请求/结果数据类 |
+| `memgarden.selection` | 挑卡插口：`Chain`、各 `Stage`、`SelectionPolicy` |
+| `memgarden.timestamps` | 历史时间戳解析、排序键、规范化 |
+| `memgarden.text.card_guard` / `card_text` / `leak_signals` | 卡片文本闸、JSON 取块、宿主泄漏识别器组合 |
+| `memgarden.guards.dream_gates` | 整理结果的 id 泄漏与爆炸半径闸 |
+| `memgarden.prompts.recall_fields` | `retrieval_cues` 规范化 |
+| `memgarden.prompts.buckets` | 常用桶、写卡指引、桶名语言归一 |
+| `memgarden.dreaming` | 整理门槛、快照与幂等键 |
+| `memgarden.observability` | 内容无关的注入记录 |
+| `memgarden.garden_language` | 花园语言判定 |
+| `memgarden.policies` | 落卡档位与提示词常量 |
+| `memgarden.retrieval` | 统一排序器 `rank`、自动想起 `select_context`、`Tokenizer` 插口 |
+
+不在清单里的模块（`prompts.capture`、`prompts.dream`、`scoring.*`、`rendering` 等）是内部零件：可以读、可以在测试里用，但不承诺兼容。宿主应在自己仓库加一条「只 import 公开 API」的守卫，以 `STABLE_MODULES` 和各模块 `__all__` 为准；`tests/test_public_api_surface.py` 在本仓库对这两样做快照。
 
 ## 2. 归属与权限
 

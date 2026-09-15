@@ -50,6 +50,8 @@ from .contracts import (
     ContextResult,
     MaintenanceRequest,
     MaintenanceResult,
+    SearchRequest,
+    SearchResult,
     ToolCall,
     ToolDefinition,
     ToolResult,
@@ -112,6 +114,8 @@ class GardenCapabilities:
     #: 硬用那把偏保守的尺子去读用户交出的三年记录，表现是「导入成功但几乎
     #: 没记住什么」，用户和宿主都查不出原因。宁可明说不支持。
     history_import: bool = True
+    #: 主动搜索：只返回真实命中，无命中为空（``search`` / ``records.search``）。
+    search: bool = True
     #: 逻辑可见范围。第一阶段只保证 agent-private —— 声明清楚，
     #: 别让宿主以为写进 shared 会生效。
     mounts: tuple[str, ...] = ("agent-private",)
@@ -566,6 +570,7 @@ class GardenComponent:
         min_new_cards_for_maintenance: int = 10,
         max_capture_retries: int = 1,
         on_step=None,
+        tokenizer=None,
     ) -> None:
         #: 每一步都回调一次。宿主用它记轨迹 —— 不给就什么都不记。
         #: 收进组件的编排不能让宿主的可观测性净退步，这是那条的落点。
@@ -576,6 +581,8 @@ class GardenComponent:
         self._clock = clock or SystemClock()
         self._min_new_cards = min_new_cards_for_maintenance
         self._max_retries = max(0, max_capture_retries)
+        #: 搜索用的分词器（``retrieval.Tokenizer``）。None = 零依赖默认分词器。
+        self._tokenizer = tokenizer
 
     def _step(self, step: Step) -> None:
         """汇报一步。回调抛异常不许影响主流程 —— 记轨迹失败不该让落卡失败。"""
@@ -913,6 +920,30 @@ class GardenComponent:
             },
         )
 
+    # -- 主动搜索 -------------------------------------------------------- #
+
+    def search(self, request: SearchRequest) -> SearchResult:
+        """按查询找真实命中的卡。
+
+        和 :meth:`build_context` **不是一回事**：那条可以按策略带背景卡（最近、转折点），
+        这条只返回 ``retrieval.rank`` 过了门槛的命中。无命中返回空 —— 不补最近卡，
+        不给「你可能想找」。排序器与自动想起的 ``retrieval.select_context`` 是同一个，
+        ``ranking`` 就是它的版本号。
+
+        候选由宿主给，生命周期和权限过滤在宿主那边做完（同 build_context）。
+        """
+        from .retrieval import rank
+
+        result = rank(request.query, request.candidates, tokenizer=self._tokenizer,
+                      limit=max(0, int(request.limit)))
+        return SearchResult(
+            record_ids=result.ids,
+            hits=[{"id": h.id, "score": h.score, "matched": list(h.matched),
+                   "coverage": h.coverage} for h in result.hits],
+            ranking=result.version,
+            trace=dict(result.trace),
+        )
+
     # -- 整理 ------------------------------------------------------------ #
 
     def run_maintenance(self, request: MaintenanceRequest) -> MaintenanceResult:
@@ -980,7 +1011,8 @@ class GardenComponent:
                 }],
             )
         if call.name == "memory_search":
-            # 搜索要读库，而库在宿主手里 —— 内核给不出结果，只能明说。
+            # 搜索要读库，而库在宿主手里 —— 这个入口没有候选，给不出结果，只能明说。
+            # 宿主自己取候选时调 :meth:`search`；接了存储的用 MountedGarden.invoke_tool。
             return ToolResult(ok=False, error="search_requires_host_store")
         return ToolResult(ok=False, error=f"unknown_tool:{call.name}")
 

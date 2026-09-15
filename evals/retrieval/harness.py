@@ -56,6 +56,7 @@ if str(HERE) not in sys.path:
 
 import filler  # noqa: E402
 from memgarden.prompts.recall_fields import retrieval_cues  # noqa: E402
+from memgarden import retrieval  # noqa: E402
 from memgarden.scoring import relevance  # noqa: E402
 
 KS = (1, 3, 5, 8)
@@ -150,7 +151,24 @@ def mg_scores(query: str, cards: list[dict], k: int) -> list[str]:
     return [cid for _s, _o, cid in scored[:k]]
 
 
-BUILTIN: dict[str, Ranker] = {"mg-relevant": mg_relevant, "mg-scores": mg_scores}
+def mg_bm25(query: str, cards: list[dict], k: int) -> list[str]:
+    """``memgarden.retrieval.rank``：统一排序器，默认分词器和默认参数。"""
+    return retrieval.rank(query, cards, limit=k).ids
+
+
+def mg_select(query: str, cards: list[dict], k: int) -> list[str]:
+    """``memgarden.retrieval.select_context``：统一后的自动想起（同一把尺子 + 软配额，cap = k）。
+
+    卡片文本用 ``default_search_text``（和 mg-bm25 一样含 bucket / threads / cues），
+    只多带 ``roles`` —— 这样和 mg-bm25 的差异只来自软配额，不来自投影。
+    """
+    pool = [{**c, "roles": list(c.get("roles") or [])} for c in cards]
+    picked, _trace = retrieval.select_context(query, pool, cap=k)
+    return [str(c["id"]) for c in picked]
+
+
+BUILTIN: dict[str, Ranker] = {"mg-relevant": mg_relevant, "mg-scores": mg_scores,
+                              "mg-bm25": mg_bm25, "mg-select": mg_select}
 
 
 def load_external(spec: str) -> Ranker:

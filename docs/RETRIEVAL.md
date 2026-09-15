@@ -2,30 +2,42 @@
 
 [接入主循环](GETTING-STARTED.md) · [字段与存储](INTEGRATION-AND-DATA.md) · [验证证据](STATUS.md)
 
-Garden 提供选卡算法和策略接口；宿主决定怎样把它接入自己的上下文、搜索索引和 embedding。**安装或升级包不会自动开启新检索模式。**
+Garden 提供排序、选卡算法和策略接口；宿主决定怎样把它接入自己的上下文、搜索索引和 embedding。升级包后，使用默认 `RelevanceStage` 的策略会换成新排序器（见第 1 节）；向量混合检索仍需显式开启。
 
 ## 1. 选择入口
 
+自动想起和主动搜索用**同一个排序器** `memgarden.retrieval`：BM25 词法打分 + 停用词 + 覆盖率/强证据门槛。两条路的 trace 带同一个 `version`（如 `memgarden-bm25-v1+tok:mg-default-v1`），宿主据此确认用的是同一把尺子。
+
 | 入口 | 行为 | 如何接入 |
 |---|---|---|
-| `selection.Chain` | 组合 RelevanceStage、RecentStage、RoleStage 等；每段按自己的规则选卡 | 传给 `MountedGarden(selection_policy=...)` |
-| `scoring.relevance` 的 default / strict | 保留既有行为；default 中可有不经过相关性门槛的最近卡/转折卡 | 低层函数，传入已授权候选 |
-| `select_relevant_context_memories_with_trace` | 各类候选都必须通过词法相关性门槛；转折≤3、最近≤2，空余名额供其他相关卡使用，默认总数8 | 调用低层函数，或用下面的 SelectionPolicy 包装 |
-| `select_hybrid_context_memories_with_trace` | 向量与词法分别过门槛，再用加权 RRF 融合；在 shortlist 内按软配额选卡 | 显式传入宿主向量及参数；不在旧 dispatcher 或 DSH 配置中自动启用 |
+| `retrieval.rank` | 按相关性排序；无命中返回空；可设 `limit` 与资源上限 | 主动搜索、宿主自己的索引页；传入已授权候选 |
+| `retrieval.select_context` | 自动想起：每张都先过门槛；转折≤3、最近≤2 软配额决定座位，空位按分数补；输出按分数排，默认总数 8 | 低层函数，或包成 SelectionPolicy（见第 3 节） |
+| `selection.Chain` + `RelevanceStage` | 可组合；`RelevanceStage` 默认 `scorer="bm25"`（即 `rank`），`RecentStage`/`RoleStage` 不看查询 | 传给 `MountedGarden(selection_policy=...)` |
+| `scoring.relevance`（deprecated） | 旧短语/稀有词打分，保留一个版本给未切换的宿主回滚；`RelevanceStage(scorer="legacy")` 同理 | 不要在新接入里使用 |
+| `select_hybrid_context_memories_with_trace` | 向量与词法分别过门槛，再用加权 RRF 融合；词法一侧仍是旧打分 | 显式传入宿主向量及参数；不在默认策略中启用 |
 
-`mode="relevant"` 只属于 `scoring.relevance.select_context_memories_with_trace`，不是 `context_for_turn` 的一个参数。调用低层选卡函数前，必须先过滤 tenant/owner/mount 和归档、取代、删除状态；这些纯函数不替你做授权。
+调用低层函数前，必须先过滤 tenant/owner/mount 和归档、取代、删除状态；这些纯函数不替你做授权。IDF 按传入的候选算，所以**候选池是谁决定了尺子**：同一个 query、同一批候选，`rank` 与 `select_context` 的顺序一致；候选池不同（自动想起取最近一页、搜索取全量）时分数不可直接比较。
 
 默认 `context_for_turn` 的 block 文本是**记忆摘要**，同时返回 `record_ids`。厚正文保存在卡中；需要全文时，由宿主在同一授权范围读取并按上下文预算组织，不要假定 block 已包含全部细节。
+
+### 分词器、停用词与门槛
+
+- **分词器是插口**：`Tokenizer` 协议只要 `name` 和 `tokenize(text) -> list[str]`，`name` 进版本号。不传时用零依赖的 `DefaultTokenizer`：整段 ASCII 标识符（`jira-4821`、`v2.3.1`、`x100v` 不被切碎，也不会子串命中）、CJK 单字 + 相邻二字（不生成和语法助词相邻的二字）、其余文字按词。包本身仍然零依赖；jieba 之类由宿主注入。
+- **停用词**（`DEFAULT_STOPWORDS`）只从查询里去掉，不改变卡片侧统计。
+- **门槛**：卡片命中查询 IDF 总量 ≥25%（`min_coverage`），或分数 ≥ 1.25 × 本批候选的最大单词 IDF（`strong_evidence`，给长段粘贴用）。花园里没有的词也算进分母——这正是「没记过」的信号。
+- 数值由 `evals/retrieval` 校准，过程与放弃的候选见 [evals/retrieval/README.md](../evals/retrieval/README.md)。只有 53 条合成查询，**不证明线上质量**；换分词器或改门槛后请在自己的语料上重测，上线后看 trace。
+- 词法方法拿不到换说法、跨语言；它也不证明答案正确，只证明用词重叠。
+- 复现 io 旧 `memory_bm25` 的逐项结果：`rank(..., tokenizer=<jieba 分词器>, stopwords=frozenset(), min_coverage=0)`，版本号会带 `+cfg:` 后缀。
 
 ## 2. 三个容易混淆的字段
 
 | 字段 | 当前责任与行为 |
 |---|---|
-| `retrieval_cues` | Capture/Dream 可生成的搜索线索，保存在卡里；不是新事实，也不会自动进入词法打分 |
-| `search_text` | 宿主构造的搜索投影，存在时优先用于词法匹配；缺失时算法只用 summary/content/bucket |
+| `retrieval_cues` | Capture/Dream 可生成的搜索线索，保存在卡里；不是新事实。`retrieval.default_search_text` 会把规范化后的 cues 放进匹配文本；旧 `scoring.relevance` 不读 |
+| `search_text` | 宿主构造的搜索投影，存在时优先用于词法匹配；缺失时 `retrieval` 用 summary/content/bucket/threads/cues，旧打分只用 summary/content/bucket |
 | `role` / `roles` | 持久 Card 是单个 `role` 字符串；选卡器接收 `roles: list[str]`。宿主需要显式映射，例如 `role="turning_point"` → `roles=["turning_point"]`，不会自动迁移或猜测标题 |
 
-如果希望 cues 参与检索，把它们加入宿主的 `search_text` 或 embedding 输入。不要把检索投影覆盖回原始记忆正文，也不要把 cues 当成事实证据。`importance_level` 1–5 在解析时映射到既有 `importance` 0.2/0.4/0.6/0.8/1.0，存储仍是 0–1；不是新增一套长期数值字段。
+不要把检索投影覆盖回原始记忆正文，也不要把 cues 当成事实证据。`importance_level` 1–5 在解析时映射到既有 `importance` 0.2/0.4/0.6/0.8/1.0，存储仍是 0–1；不是新增一套长期数值字段。
 
 生成器将 cues 规范化为最多5条、每条120个 Python 字符；这是模型生成的辅助线索预算，不是正文存储上限。正式 Card/schema 的可选字符串数组不对既有或外部卡片增加这两个硬限制。
 
@@ -34,15 +46,33 @@ Garden 提供选卡算法和策略接口；宿主决定怎样把它接入自己�
 [可运行示例](../examples/retrieval_runtime.py) 提供 `RelevantPolicy.select`：
 
 1. 接收 MountedGarden 已按 Scope 过滤的候选。
-2. 在候选副本中把 cues 加入 search_text，把 role 映射为 roles；保留宿主已显式提供的投影。
-3. 调用 relevant 选卡函数。
+2. 在候选副本中把 role 映射为 roles；搜索文本由 `default_search_text` 读取，不必另做投影。
+3. 调用 `retrieval.select_context`。
 4. 返回 `SelectionResult(Pick(...))`，只给出候选 ID 和选择依据；Garden 使用原始卡片生成上下文。
 
 ```bash
 uv run python examples/retrieval_runtime.py
 ```
 
-示例还检查另一个 owner 召回不到这些记忆。不注入这类策略就不会隐式切换默认行为。直接用自定义 Store 的宿主同样需要遵守权限和生命周期过滤。
+示例还检查另一个 owner 召回不到这些记忆。直接用自定义 Store 的宿主同样需要遵守权限和生命周期过滤。
+
+## 3a. 主动搜索
+
+用户或模型**明确要找**某件事时走搜索，不走自动想起：
+
+| | 自动想起（`context_for_turn` / `select_context`） | 主动搜索（`search` / `records.search` / `memory_search`） |
+|---|---|---|
+| 查询 | 宿主拼（例如最近几条消息） | 用户或模型给的一句话 |
+| 背景卡 | 挑卡策略可带（`RecentStage`、`RoleStage`） | **不带**，不经过 selection_policy |
+| 无命中 | 可以为空，也可以只有策略里的背景卡 | **空**；本版没有 `suggestions` 字段 |
+| 返回 | `record_ids` + `blocks` + trace | `record_ids` + `hits[{id, score, matched, coverage}]` + `ranking` + trace |
+
+- `GardenComponent.search(SearchRequest)`：候选由宿主给（已过权限与生命周期过滤），默认 `limit=20`。分词器在构造组件时注入：`GardenComponent(model=..., tokenizer=my_tokenizer)`；`MountedGarden(..., tokenizer=...)` 同样透传。
+- `MountedGarden.search(scope, query, *, limit=20, mount=None)`：候选按 Scope 从库里取，只含当前有效的卡；另一个 owner、未授权 mount、真删或被取代的卡都搜不到。
+- `memory_search` 工具（SDK 与 `tool.invoke`）走同一个 `search`，只返回命中卡的摘要文本，无命中时 `content` 为空串。
+- JSON Lines：`records.search`，manifest 声明 `capabilities.search`；Store 不支持 owner 分区时和其它读路径一起关闭。
+- `hits[].matched` 是命中的查询词，属于用户文本片段；`trace` 只有计数和版本。宿主把结果落日志前自行裁剪。
+- 两条路的 `ranking` / `trace.version` 相同即可确认是同一把尺子。不要要求两条路 top-k 相同：查询不同、候选池不同、自动想起还有配额。
 
 ## 4. Hybrid 的分工
 
@@ -55,7 +85,7 @@ uv run python examples/retrieval_runtime.py
 
 各向量必须维度相同、分量有限且范数非零。启用向量计算时，若使用版本校验，`vector_model` / `card_vector_models` 必须成对提供，每张实际参与计算的向量都必须有匹配标签；不接受“缺标签当匹配”。不提供版本校验时，维度相同不等于模型相同，宿主自行保证来源一致。
 
-词法默认门槛为0.35且至少 medium 证据；向量使用宿主的余弦门槛。通过任意一侧即可成为候选，每侧只给自己合格的卡排名。融合使用 `w_v/(k+r_v) + w_l/(k+r_l)`；缺席一侧贡献0，权重0禁用该侧。默认 k=20、权重2:1是算法初始值，**不是在你的数据上验证过的最佳参数**。
+Hybrid 的词法一侧目前仍是旧打分：默认门槛为0.35且至少 medium 证据；向量使用宿主的余弦门槛。通过任意一侧即可成为候选，每侧只给自己合格的卡排名。融合使用 `w_v/(k+r_v) + w_l/(k+r_l)`；缺席一侧贡献0，权重0禁用该侧。默认 k=20、权重2:1是算法初始值，**不是在你的数据上验证过的最佳参数**。
 
 融合 shortlist 默认20张（至少覆盖 cap），软配额在其中分配席位，最终按融合顺序返回。没有向量的卡只参加词法通道；没有查询向量时明确降级为词法。空查询返回空，不用向量暗中注入记忆。
 

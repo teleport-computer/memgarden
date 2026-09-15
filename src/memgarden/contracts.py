@@ -434,6 +434,38 @@ class MaintenanceResult:
     schema_version: int = SCHEMA_VERSION
 
 
+@dataclass
+class SearchRequest:
+    """「用户/模型明确要找这件事」。和 :class:`ContextRequest` 分开是刻意的。
+
+    自动想起可以有背景打底（最近卡、转折点），主动搜索不行：用户明说要找
+    某件事时，拿「最近写的几张」凑数等于答非所问（Seven 2026-09-14 §4.2）。
+    """
+
+    query: str = ""
+    actor: Actor = field(default_factory=Actor)
+    mounts: tuple[Mount, ...] = (DEFAULT_MOUNT,)
+    #: 候选卡片，宿主已做完生命周期与权限过滤（同 ContextRequest）。
+    candidates: list[dict] = field(default_factory=list)
+    limit: int = 20
+    schema_version: int = SCHEMA_VERSION
+
+
+@dataclass
+class SearchResult:
+    """真实命中，按相关性排好。**无命中就是空**，没有补位、没有建议。"""
+
+    record_ids: list[str] = field(default_factory=list)
+    #: 与 record_ids 同序：``{id, score, matched, coverage}``。
+    #: ``matched`` 是命中的查询词，属于用户文本片段，宿主落日志前自己裁剪。
+    hits: list[dict] = field(default_factory=list)
+    #: 排序器版本（``retrieval.RankResult.version``）。自动想起的 trace 里是同一个值。
+    ranking: str = ""
+    #: 内容无关：候选数、命中数、被门槛挡下的数量。
+    trace: dict = field(default_factory=dict)
+    schema_version: int = SCHEMA_VERSION
+
+
 # --------------------------------------------------------------------------- #
 # 展示投影 —— 给 Runtime 的通用记忆列表用
 # --------------------------------------------------------------------------- #
@@ -528,6 +560,7 @@ __all__ = [
     "ExportRequest", "ExportResult", "PromoteRequest",
     "MigrateRequest", "MigrateResult",
     "ContextRequest", "ContextResult",
+    "SearchRequest", "SearchResult",
     "MaintenanceRequest", "MaintenanceResult",
     "ToolDefinition", "ToolCall", "ToolResult",
     "BrowseItem", "to_browse_item",
