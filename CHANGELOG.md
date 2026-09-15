@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.21.1 — 2026-09-16
+
+- Maintenance whose proposals are all rejected for truncated/unrendered targets now returns `maintenance_targets_rejected`, without advancing the Store ledger. A legitimate empty proposal list remains a successful no-op. Mixed plans still retain safe proposals.
+- Shared conformance scenario version 2 checks that an accepted long card is also returned whole by `fetch`, not merely stored whole. Hosts may continue to explicitly reject oversize writes; no universal 5000-character storage limit was added.
+- Current status documentation now distinguishes published capabilities, this patch's verification, and historical real-model evidence. No new history-import requirement or algorithm-default change.
+
 ## 0.21.0 — 2026-09-16
 
 ### Added

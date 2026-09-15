@@ -37,7 +37,7 @@ def test_reference_hosts_pass_every_scenario_without_declarations(factory):
 def test_scenario_ids_and_clause_prefixes_are_unique_and_stable():
     ids = kit.scenario_ids()
     assert len(ids) == len(set(ids)) == 22
-    assert kit.SCENARIO_VERSION == 1
+    assert kit.SCENARIO_VERSION == 2
 
 
 # --------------------------------------------------------------------------- #
@@ -125,6 +125,12 @@ class TruncatesContent(ReferenceHost):
                            request_id=request_id, record_id=record_id)
 
 
+class TruncatesRead(ReferenceHost):
+    def fetch(self, owner, ids, *, include_history=False):
+        return [{**row, "content": row["content"][:5000]}
+                for row in super().fetch(owner, ids, include_history=include_history)]
+
+
 class OverwritingAdd(ReferenceHost):
     """自带 id 撞上已有卡时直接覆盖。"""
 
@@ -149,6 +155,7 @@ class PatchResetsOccurredAt(ReferenceHost):
     (IgnoresRevision, {"conflict.stale_patch", "supersede.concurrent_same_target"}),
     (FailureLooksEmpty, {"capture.write_failure"}),
     (TruncatesContent, {"content.length"}),
+    (TruncatesRead, {"content.length"}),
     (OverwritingAdd, {"add.supplied_id_never_overwrites"}),
     (PatchResetsOccurredAt, {"patch.preserves_provenance"}),
 ])
