@@ -598,9 +598,8 @@ class MountedGarden:
 
     # -- 历史导入 ---------------------------------------------------------- #
 
-    #: 一批多少字。够模型一次读完，也够小到中断时不心疼。
-    #: （保留作兼容别名；真正的默认值在 ``importing.IMPORT_BATCH_CHARS``，
-    #: 请求里的 ``batch_chars`` 可以覆盖。）
+    #: 一批多少字。**只读的兼容别名**：导入会话不读它，子类改写这个属性不改变批次大小。
+    #: 默认值在 ``importing.IMPORT_BATCH_CHARS``；要换批次大小传 ``ImportRequest.batch_chars``。
     IMPORT_BATCH_CHARS = 6000
 
     def import_history(self, scope: Scope, request: Any, *,
@@ -629,7 +628,10 @@ class MountedGarden:
 
         ran = 0
         while max_batches is None or ran < int(max_batches):
-            if session.next_batch() is None:
+            # 只看游标处还有没有批次，不在这里取批：取批会按旧索引白挑一遍卡，
+            # prepare_import_batch 重读库后还要再挑一次。整次上限满了由它记下来。
+            session._consume_trailing()
+            if session._expected() is None:
                 break
             ran += 1
             if self._import_one_batch(scope, session):
@@ -675,9 +677,12 @@ class MountedGarden:
         要出现在这一批的提示词里（跨批去重靠它）。候选批次不读库，版本为 None。
         返回 ``(None, None)`` = 没有可跑的批次了。
         """
-        batch = session.next_batch()
-        if batch is None or batch.stage == "candidates":
-            return batch, None
+        session._consume_trailing()
+        expected = session._expected()
+        if expected is None or expected[0] == "candidates":
+            # 不写卡的批次（或没有批次）不读库。直接取批 —— 先取一次再带着库里的卡取第二次
+            # 会白算一遍索引挑卡（每批一次 BM25）。
+            return session.next_batch(), None
         mount = scope.check(getattr(session.request, "mount", None) or DEFAULT_MOUNT)
         snapshot = self._snapshot(scope)
         cards = [c for c in self._visible(scope, snapshot.cards)
@@ -691,6 +696,9 @@ class MountedGarden:
         - 判断失败（``outcome.error``）：记进 ``progress.failed``，游标不动；
         - 候选批次、没什么可记：不写库，游标前进；
         - 写库失败：``session.fail``，游标不动；
+        - ``idempotency_conflict``：同一个批次键之前已经写进去过（崩在写库之后、存进度
+          之前，续传时模型回复又变了）—— 当作已写入，``session.commit_applied``，游标前进，
+          ``skipped`` 记 ``already_applied``，回执 ``reason="already_applied"``、不带 error；
         - ``revision_conflict``：**进度不动、也不记失败** —— 调用方重新
           :meth:`prepare_import_batch` 重读重算（重算次数由调用方封顶），
           放弃时自己调 ``session.fail(outcome, "revision_conflict")``。
@@ -712,6 +720,12 @@ class MountedGarden:
         )
         if receipt.error == "revision_conflict":
             return receipt
+        if receipt.error == "idempotency_conflict":
+            # 批次键 = 导入语义 + 批次位置 + 这批材料的摘要，不含模型回复。同键不同内容只会是
+            # 「上次写进去了、进度没存下来」：再写一份是重复，报失败则游标永远卡在这一批。
+            session.commit_applied(outcome)
+            return OperationReceipt(reason="already_applied", trace={
+                **trace, "idempotency_conflict": True})
         if receipt.error:
             session.fail(outcome, receipt.error)
         elif not receipt.written:

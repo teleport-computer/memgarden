@@ -37,6 +37,24 @@
         ids = my_write(outcome.mutations, idempotency_key=outcome.idempotency_key)
         save(session.commit(outcome, record_ids=ids))
 
+## 崩在「写进去了、进度还没存」之间
+
+幂等键只由**材料**（和导入语义）决定，不含模型回复：同一批重跑一次，模型看到的已有记忆
+索引里多了上次刚写的卡，回复几乎一定不同。所以续传时**先按幂等键查自己的写入记录**，
+查到了就别再问模型::
+
+    while (batch := session.next_batch(existing_cards=reread())) is not None:
+        ids = my_write_log.get(batch.idempotency_key)
+        if ids is not None:                    # 上次写进去了，只是进度没存下来
+            save(session.commit_applied(batch, record_ids=ids))
+            continue
+        ...
+
+``commit_applied`` 只推进游标、不登记内容（会话手里没有上次那批卡的正文）；
+这批卡由宿主下一次 ``next_batch(existing_cards=...)`` 重读库带进索引。
+宿主没有写入记录、而库在同键不同内容时报冲突的，同样用 ``commit_applied``（id 未知就不传）。
+``MountedGarden`` / wire ``history.import*`` 的 service 写入模式自动这样处理。
+
 ## 跨批去重靠什么
 
 不靠「记住上一批写了什么」的额外状态（那会和库不一致），靠的是**每批写卡时
@@ -65,6 +83,8 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Mapping, Sequence
 
 #: 按 ``material`` 切批时一批多少字。够模型一次读完，也够小到中断时不心疼。
+#: 这是默认值，不是旋钮：改这个常量（或 ``MountedGarden.IMPORT_BATCH_CHARS``）不影响
+#: 已经在跑的会话，要换批次大小传 ``ImportRequest.batch_chars``（它进续传指纹）。
 IMPORT_BATCH_CHARS = 6000
 
 #: 两段式的候选总数硬上限。候选存在进度对象里（宿主要持久化），不设上限的话
@@ -104,7 +124,10 @@ class ImportProgress:
     schema_version: int = 1
     #: ``single_pass`` / ``two_pass``。
     strategy: str = "single_pass"
-    #: 计入 ``max_total_cards`` 的写卡数（add + supersede）。
+    #: 计入 ``max_total_cards`` 的写卡数（每条 add / supersede 算一张；Capture 的 merge
+    #: 落成 supersede，也算）。宿主驱动（``commit``）按交给宿主的写卡指令计，不管宿主
+    #: 写进去几张；Store 路径按 Store 回执里的 id 计。
+    #: ``commit_applied`` 按宿主给的 id 个数计 —— 不给 id 就不计，上限可能被略微超出。
     cards_added: int = 0
     #: 两段式抽出的候选（**含用户内容**），写卡阶段按 ``candidates_cursor`` 消费。
     candidates: list[dict] = field(default_factory=list)
@@ -576,6 +599,48 @@ class ImportSession:
                 f"({len(outcome.mutations)}) 不一致")
         return self._advance(outcome, ids, register=True)
 
+    def commit_applied(self, batch: "ImportBatch | ImportBatchResult", *,
+                       record_ids: Sequence[str] = ()) -> ImportProgress:
+        """这一批**之前已经写进去了**（崩在写库之后、存进度之前），只推进游标。
+
+        ``batch`` 是 :meth:`next_batch` 给的批次（或它的 ``result()``），用来确认是会话
+        当前的那一批。``record_ids`` 是宿主写入记录里这个幂等键对应的 id（不知道就不传）：
+        只用来计数，**不登记内容** —— 会话不知道上次那批卡写的是什么，宿主下一次
+        ``next_batch(existing_cards=...)`` 重读库时它们自然进索引。
+
+        不需要调模型、也不要调：重跑同一批的回复和上次不同（索引里多了刚写的卡），
+        拿新回复去 ``commit`` 会 id 数对不上，数对上了则把新内容登记到旧 id 上。
+        ``skipped`` 记一行 ``already_applied``。两段式的候选批次不写库，不适用。
+        """
+        if batch.stage == "candidates":
+            raise ValueError("候选批次不写库，没有「已经写进去」这回事；重跑这一批即可")
+        ids = [str(x or "") for x in record_ids]
+        if self._expected() != (batch.stage, batch.offset):
+            raise ValueError(
+                "这一批不是会话当前待提交的批次（重复提交或跳批）；"
+                "请用 next_batch() 重新取")
+        outcome = ImportBatchResult(stage=batch.stage, offset=batch.offset, end=batch.end,
+                                    idempotency_key=batch.idempotency_key)
+        prog = self.progress
+        prog.failed[:] = [
+            f for f in prog.failed
+            if not (int(f.get("offset", -1)) == outcome.offset
+                    and str(f.get("stage") or outcome.stage) == outcome.stage)]
+        written = [i for i in ids if i]
+        prog.cards_written += len(written)
+        prog.cards_added += len(ids)
+        row = {"offset": outcome.offset, "reason": "already_applied"}
+        if outcome.stage != "cards":
+            row["stage"] = outcome.stage
+        prog.skipped.append(row)
+        if outcome.stage == "cards":
+            prog.cursor = outcome.end
+        else:
+            prog.candidates_cursor = outcome.end
+        prog.batches_done += 1
+        self._consume_trailing()
+        return prog
+
     def fail(self, outcome: ImportBatchResult, error: str) -> ImportProgress:
         """判断成功但宿主写库失败：记成这一批失败，游标不动。"""
         return self._advance(replace(outcome, error=str(error or "write_failed"),
@@ -725,6 +790,9 @@ class ImportSession:
             naming_rule=getattr(req, "naming_rule", None),
             identity=str(getattr(req, "identity", "") or ""),
             cards=render_card_index(index, limit=len(index)) if index else "",
+            # 交全部已知卡：merge/supersede 的 target_id 必须是其中一张，编出来的 id
+            # 重问一次、仍不对只丢那一张（同 Capture）。``cards`` 非空时索引仍用上面这份。
+            existing_cards=known,
             buckets=render_buckets(known),
             threads=render_threads(known),
             policy=self.policy, material_kind=str(req.material_kind or ""),

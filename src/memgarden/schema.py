@@ -794,9 +794,13 @@ def method_schemas() -> dict[str, Any]:
             "request": {"type": "object",
                         "required": ["session_id", "record_ids"],
                         "properties": {"session_id": _STR,
-                                       # 与 needs_commit 的 batch.mutations 一一对应
+                                       # 与 needs_commit 的 batch.mutations 一一对应；
+                                       # already_applied 时是写入记录里这个批次键的 id（不知道就 []）
                                        "record_ids": {"type": "array",
-                                                      "items": _STR}},
+                                                      "items": _STR},
+                                       # 宿主的写入记录里已有 batch.idempotency_key：只推进游标
+                                       "already_applied": {"type": "boolean",
+                                                           "default": False}},
                         "additionalProperties": True},
             "response": _ok_envelope(import_state),
         },

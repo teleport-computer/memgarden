@@ -852,6 +852,7 @@ class GardenComponent:
         existing_cards: Sequence[dict] | None = None,
         owner_key: str = "",
         index_ranker: Any = None,
+        tenant: str = "",
     ) -> "ImportSession":
         """开一次由**宿主驱动**的分批历史导入。见 :mod:`memgarden.importing`。
 
@@ -861,6 +862,9 @@ class GardenComponent:
         ``existing_cards``：宿主库里这个人**已有的、可见的**卡（明文，带 ``id``）。
         ``owner_key``：绑定进续传指纹的主体标识（默认 ``actor.user_id``）——
         同一份进度不能拿到另一个人的导入上续传。
+        ``tenant``：多租户宿主的租户标识，同样进指纹（同一个 owner_key 在两个租户下的进度
+        不能互相续传）。默认空串，指纹与不传时逐字节相同，老进度照常续传。
+        与 ``MountedGarden.import_session`` 绑的是同一对 ``(tenant, owner)``。
         ``index_ranker``：可选，``ranker(batch_text, cards) -> 卡 id 列表``，
         用宿主自己的检索挑「已有记忆索引」。不给就用 ``retrieval.rank``
         （关掉门槛，分词器用本组件的 ``tokenizer``），见 :func:`memgarden.importing.bm25_index_ranker`。
@@ -869,7 +873,7 @@ class GardenComponent:
 
         return ImportSession(
             self, request, progress=progress, existing_cards=existing_cards,
-            binding=("", str(owner_key or request.actor.user_id or "")),
+            binding=(str(tenant or ""), str(owner_key or request.actor.user_id or "")),
             ranker=index_ranker)
 
     def write_one(self, request: CuratedWriteRequest) -> CaptureResult:

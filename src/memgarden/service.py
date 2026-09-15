@@ -321,8 +321,7 @@ class Service:
             for sid in expired:
                 sessions.pop(sid, None)
 
-    def _put_session(self, sessions: dict[str, dict], sid: str,
-                     entry: dict) -> None:
+    def _check_capacity(self, sessions: dict[str, dict], sid: str) -> None:
         self._purge_expired_sessions()
         active = (len(self._sessions) + len(self._maintenance_sessions)
                   + len(self._import_sessions))
@@ -331,6 +330,10 @@ class Service:
                 "session_capacity",
                 "host-driven 在途会话已达到容量上限；请取消旧会话或稍后重试",
             )
+
+    def _put_session(self, sessions: dict[str, dict], sid: str,
+                     entry: dict) -> None:
+        self._check_capacity(sessions, sid)
         sessions[sid] = {**entry, "_touched_at": self._clock()}
 
     def _get_session(self, sessions: dict[str, dict], sid: str) -> dict | None:
@@ -564,6 +567,18 @@ class Service:
     # 每次都要存下来；续传就是拿存下的 progress 重新 import_begin。已提交的批次
     # 不再调模型；写回用的幂等键由批次内容和导入语义算出，重放不会写第二份。
     #
+    # ## 崩在「写进去了、进度没存下来」之间
+    #
+    # 重跑这一批时模型回复会变（索引里多了上次写的卡），同一个幂等键带着不同内容：
+    #
+    #     service 模式  Store 报同键冲突 → 当作已写入，游标前进，skipped 记 already_applied
+    #     host 模式     宿主先按 batch.idempotency_key 查自己的写入记录；查到了就
+    #                   import_commit {already_applied: true, record_ids: 记录里的 id}
+    #                   （needs_model 时就可以，不必先喂模型；needs_commit 时同样可用）
+    #
+    # 服务自己读写失败、会话容量满这类中途出错，回复 status=failed 并**照样带最新 progress**
+    # （可能已经推进过）；宿主存下它，稍后用它重新 import_begin。
+    #
     # ⚠️ ``two_pass`` 的 progress 含用户内容（候选事实与原话证据）。宿主按记忆
     # 正文的等级保存，不写日志。服务自身不记录 progress、prompt 或 reply。
 
@@ -582,6 +597,8 @@ class Service:
             scope, _import_request(p), progress=_import_progress_from(p),
             existing_cards=list(existing or ()) if mode == "host" else None)
         sid = uuid.uuid4().hex
+        # 容量在推进任何进度之前查：满了就和别的 begin 一样报 session_capacity，进度没动过。
+        self._check_capacity(self._import_sessions, sid)
         entry = {"session": session, "scope": scope, "mode": mode,
                  "attempts": 0}
         return self._import_next(sid, entry)
@@ -604,14 +621,23 @@ class Service:
         sid = str(p.get("session_id") or "")
         entry = self._import_entry(sid)
         outcome = entry.get("pending")
+        record_ids = [str(x) for x in p.get("record_ids") or ()]
+        if entry["mode"] == "host" and p.get("already_applied"):
+            # 宿主的写入记录里已经有这个批次键：上次写进去了，只是进度没存。不看这次的
+            # mutations（和上次不同），只推进游标。needs_model / needs_commit 都可以。
+            batch = outcome if outcome is not None else entry.get("batch")
+            if batch is None:
+                raise ServiceError("invalid_request", "这个导入会话当前没有待提交的批次")
+            entry["session"].commit_applied(batch, record_ids=record_ids)
+            entry.update(pending=None, batch=None)
+            return self._import_next(sid, entry)
         if entry["mode"] != "host" or outcome is None:
             raise ServiceError(
                 "invalid_request",
                 "import_commit 只在 write_mode=host 且会话处于 needs_commit 时可用")
         # record_ids 数量对不上时 ImportSession 抛 ValueError → invalid_request，
         # 会话保持 needs_commit，宿主可以带正确的 id 重试。
-        entry["session"].commit(outcome, record_ids=[
-            str(x) for x in p.get("record_ids") or ()])
+        entry["session"].commit(outcome, record_ids=record_ids)
         entry["pending"] = None
         return self._import_next(sid, entry)
 
@@ -626,12 +652,17 @@ class Service:
         sid = str(p.get("session_id") or "")
         entry = self._import_entry(sid)
         outcome = entry.get("pending")
+        error = str(p.get("error") or "host_failed")
+        if outcome is None and entry.get("batch") is None:
+            # 会话手里没有批次（比如上一步取下一批时出错了）：没有哪一批可以记失败，
+            # 结束会话，进度原样带回。
+            self._import_sessions.pop(sid, None)
+            return self._import_state(sid, entry, "failed", error=error)
         if outcome is None:
             batch = entry["batch"]
             outcome = ImportBatchResult(
                 stage=batch.stage, offset=batch.offset, end=batch.end,
                 idempotency_key=batch.idempotency_key)
-        error = str(p.get("error") or "host_failed")
         entry["session"].fail(outcome, error)
         self._import_sessions.pop(sid, None)
         return self._import_state(sid, entry, "failed", error=error)
@@ -656,11 +687,19 @@ class Service:
         """取下一批并发出提示词；没有批次了就结束会话。"""
         session = entry["session"]
         while True:
-            if entry["mode"] == "service":
-                batch, revision = self.garden.prepare_import_batch(
-                    entry["scope"], session)
-            else:
-                batch, revision = session.next_batch(), None
+            try:
+                if entry["mode"] == "service":
+                    batch, revision = self.garden.prepare_import_batch(
+                        entry["scope"], session)
+                else:
+                    batch, revision = session.next_batch(), None
+            except Exception as exc:  # noqa: BLE001
+                # 前面的批次可能已经提交、进度已经推进：直接抛成 internal_error 的话宿主
+                # 拿不到这份进度，续传会把已写的批次再跑一遍。结束会话，带着进度报失败。
+                self._import_sessions.pop(sid, None)
+                return self._import_state(
+                    sid, {**entry, "batch": None, "pending": None}, "failed",
+                    error=f"storage_failed:{type(exc).__name__}", committed=committed)
             if batch is None:
                 session._consume_trailing()
                 self._import_sessions.pop(sid, None)
@@ -669,7 +708,13 @@ class Service:
             entry.update(batch=batch, revision=revision, pending=None)
             prompt = batch.next_prompt()
             if prompt is not None:
-                self._put_session(self._import_sessions, sid, entry)
+                try:
+                    self._put_session(self._import_sessions, sid, entry)
+                except ServiceError as exc:
+                    # 容量满了。前面串起来结算的批次已经推进了进度 —— 带着它报失败，
+                    # 别让宿主只拿到一个错误码、丢掉这段进度。
+                    return self._import_state(sid, {**entry, "batch": None}, "failed",
+                                              error=exc.code, committed=committed)
                 extra = {"retrying_after": retrying_after} if retrying_after else {}
                 return self._import_state(sid, entry, "needs_model",
                                           next_prompt=prompt,
