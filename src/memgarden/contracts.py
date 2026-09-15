@@ -412,6 +412,18 @@ class MaintenanceRequest:
     #: 留空则不做这项检查 —— 但只要你喂了卡进去，就该把它们的 id 也给出来。
     known_ids: tuple[str, ...] = ()
 
+    #: 渲染进提示词的卡片预算。卡片按 ``cards`` 的顺序、带正文渲染：
+    #: 最多 ``cards_limit`` 张，卡片区总字符不超过 ``cards_budget_chars``
+    #: （按整张卡累加，放不下就停）；单卡正文超过 ``card_body_chars`` 或摘要
+    #: 超过 ``card_summary_chars`` 时截断并标 TRUNCATED，提示词禁止改写这种卡。
+    #: 默认值见 :mod:`memgarden.prompts.dream`（60 张 / 60000 字 / 正文 5000 / 摘要 2000）。
+    #: 实际渲染了哪些、截断了哪些记在 trace 的 ``cards_rendered`` /
+    #: ``cards_truncated`` / ``truncated_card_ids``；``known_ids`` 会自动并入实际渲染的卡。
+    cards_limit: int = 60
+    cards_budget_chars: int = 60_000
+    card_body_chars: int = 5_000
+    card_summary_chars: int = 2_000
+
     #: 只看要不要整理、不真的整理。宿主的调度器用它决定要不要排这个活。
     dry_run: bool = False
     idempotency_key: str = ""
