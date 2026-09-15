@@ -1,0 +1,53 @@
+{"qid": "q01", "category": "exact_entity", "query": "豆包体检的结果怎么样", "must": ["p02"], "should": ["p03"], "must_not": [], "why": "实体「豆包」+「体检」都在卡面上，最直白的召回"}
+{"qid": "q02", "category": "exact_entity", "query": "Project Aurora 的 deadline 是哪天", "must": ["w08"], "should": [], "must_not": ["d03"], "why": "英文实体短语 Project Aurora；同名歌手 Aurora 的卡是陷阱"}
+{"qid": "q03", "category": "exact_entity", "query": "Sunrise Runners 在哪集合", "must": ["r05"], "should": [], "must_not": [], "why": "英文专名只出现在一张中文卡里"}
+{"qid": "q04", "category": "exact_entity", "query": "小满生日", "must": ["f03"], "should": ["f01"], "must_not": [], "why": "人名+事件，两词都在卡面"}
+{"qid": "q05", "category": "exact_entity", "query": "爸爸那台 Olympus 胶片机", "must": ["b02"], "should": ["b01"], "must_not": [], "why": "品牌名+中文描述混合"}
+{"qid": "q06", "category": "paraphrase", "query": "我家猫咪的肾脏问题", "must": ["p02"], "should": ["p03"], "must_not": [], "why": "卡写「肾指标偏高」「豆包」，问法换成「猫咪」「肾脏」，只剩单字「肾」重叠"}
+{"qid": "q07", "category": "paraphrase", "query": "我换工作之后做的是什么方向", "must": ["w02"], "should": ["w11", "w12", "e01"], "must_not": [], "why": "卡用「跳槽」「入职」，问法用「换工作」；cue 里有「新工作」"}
+{"qid": "q08", "category": "paraphrase", "query": "晚上老是睡不着怎么办", "must": ["x03"], "should": ["x04"], "must_not": ["d08"], "why": "卡写「凌晨三点才睡着」「失眠」；猫睡十六小时是陷阱"}
+{"qid": "q09", "category": "paraphrase", "query": "上次腿受伤医生怎么说", "must": ["x02"], "should": ["x01", "r06"], "must_not": ["d05"], "why": "卡写「膝盖」「运动医学科」，问法写「腿受伤」「医生」；妈妈的膝盖是陷阱"}
+{"qid": "q10", "category": "paraphrase_xlang", "query": "What did the doctor say about my stomach?", "must": ["x05"], "should": ["t04"], "must_not": [], "why": "跨语言：卡是中文「胃炎」。词法排序预期拿不到，用来标出词法的边界而不是判罚"}
+{"qid": "q11", "category": "paraphrase_xlang", "query": "我的日本旅行航班", "must": ["t02"], "should": ["t01", "t05"], "must_not": [], "why": "卡写「大阪关西」「MU5137」，没有「日本」「航班」字样（护照卡有「日本签证」）"}
+{"qid": "q12", "category": "cjk_nospace", "query": "上次跟你说的那个膝盖疼后来去医院看了没有", "must": ["x02"], "should": ["x01", "r06"], "must_not": ["d05"], "why": "长中文句无空格，关键词「膝盖」埋在口语里"}
+{"qid": "q13", "category": "cjk_nospace", "query": "搬家的时候丢的那箱书赔了多少钱", "must": ["h03"], "should": ["h02"], "must_not": [], "why": "中文分词：搬家/箱/书/赔"}
+{"qid": "q14", "category": "cjk_nospace", "query": "我爸吃的降压药叫什么名字来着", "must": ["f04"], "should": [], "must_not": [], "why": "「降压药」只在 cue 里，卡面是「高血压」「氨氯地平」"}
+{"qid": "q15", "category": "cjk_nospace", "query": "豆包到底肯不肯吃处方粮", "must": ["p03"], "should": ["p02"], "must_not": [], "why": "「处方粮」连写，两张卡都有，p03 更贴"}
+{"qid": "q16", "category": "en_id", "query": "JIRA-4821", "must": ["w03"], "should": [], "must_not": [], "why": "带连字符的工单号必须整体匹配"}
+{"qid": "q17", "category": "en_id", "query": "v2.3.1 rollback reason", "must": ["w04"], "should": ["w03"], "must_not": [], "why": "带点号的版本号 + 英文词"}
+{"qid": "q18", "category": "en_id", "query": "PR #317", "must": ["w07"], "should": [], "must_not": [], "why": "数字编号；PR 是泛词，317 才是区分项"}
+{"qid": "q19", "category": "en_id", "query": "MU5137 几点起飞", "must": ["t02"], "should": [], "must_not": [], "why": "航班号字母数字连写 + 中文"}
+{"qid": "q20", "category": "en_id", "query": "10km PB 48:30", "must": ["r02"], "should": [], "must_not": [], "why": "带冒号的成绩数字"}
+{"qid": "q21", "category": "en_id", "query": "X100V", "must": ["b01"], "should": ["b02"], "must_not": [], "why": "型号单 token"}
+{"qid": "q22", "category": "en_id", "query": "尿酸480", "must": ["x08"], "should": [], "must_not": [], "why": "中文与数字无空格连写"}
+{"qid": "q23", "category": "mixed", "query": "周五 standup 上 Dave 说了什么", "must": ["w05"], "should": ["w06"], "must_not": [], "why": "中英混：英文卡里的 standup/Dave"}
+{"qid": "q24", "category": "mixed", "query": "Postgres 16 迁移窗口定在几号", "must": ["w06"], "should": ["w05"], "must_not": [], "why": "中英混，两张卡同线程，中文那张更贴"}
+{"qid": "q25", "category": "mixed", "query": "Kyoto 行程第二天去哪", "must": ["t03"], "should": ["t01", "t02"], "must_not": ["d01"], "why": "英文地名对英文卡；「京都风拉面」是陷阱"}
+{"qid": "q26", "category": "mixed", "query": "Priya 打回我的那个 PR", "must": ["w07"], "should": ["f07"], "must_not": [], "why": "人名 + 中文动作"}
+{"qid": "q27", "category": "mixed", "query": "Garmin 表带又断了", "must": ["r03"], "should": [], "must_not": [], "why": "品牌 + 中文"}
+{"qid": "q28", "category": "short", "query": "豆包", "must": ["p01", "p02", "p03", "p04"], "should": ["d08", "p05", "p06"], "must_not": [], "why": "两字实体短查询，应召回整条线"}
+{"qid": "q29", "category": "short", "query": "搬家", "must": ["h02", "h03"], "should": ["h05"], "must_not": ["h01"], "why": "两字主题词；h01 已被取代，宿主过滤后不该出现"}
+{"qid": "q30", "category": "short", "query": "N2", "must": ["l01", "l02"], "should": [], "must_not": [], "why": "两字符英文数字短 token"}
+{"qid": "q31", "category": "short", "query": "gym", "must": ["r06"], "should": [], "must_not": [], "why": "三字母英文单词在中文卡里"}
+{"qid": "q32", "category": "short", "query": "猫", "must": ["p01"], "should": ["p02", "p03", "p04", "p06", "d08"], "must_not": [], "why": "单个汉字；卡面「橘猫」「猫粮」「猫毛」。单字弱证据是否足够是产品取舍，记录不判罚"}
+{"qid": "q33", "category": "long_paste", "query": "帮我看看这段是不是跟我之前那次事故有关：\n[#oncall-platform] 09:12 alert: auth-gateway 5xx rate 3.2% (threshold 1%)\n09:14 @here login token refresh failing for a subset of users after the gray release of JIRA-4821 follow-up patch\n09:20 rollback initiated, ETA 10 min\n09:31 error rate back to baseline, keeping the incident open for postmortem\n09:40 note: same symptom as last time, please link the previous postmortem doc", "must": ["w03"], "should": ["w04", "w13"], "must_not": [], "why": "粘贴的长告警日志，真正的锚点是 JIRA-4821 与「登录 token」"}
+{"qid": "q34", "category": "long_paste", "query": "航空公司刚发来的邮件，帮我看要不要改行程：\n尊敬的旅客您好，您预订的 11 月 14 日 MU5137 上海浦东—大阪关西航班因航路调整，起飞时间由 08:25 调整为 10:05，抵达时间相应顺延。如需免费改签或退票，请于 10 月 31 日前通过官方渠道办理。给您带来的不便敬请谅解。", "must": ["t02"], "should": ["t01", "t05", "t03"], "must_not": [], "why": "长邮件，锚点是航班号和日期"}
+{"qid": "q35", "category": "long_paste", "query": "刚看到一篇文章：髂胫束综合征是跑步人群最常见的膝关节外侧疼痛原因之一，典型表现是跑到一定距离后膝盖外侧刺痛、下楼梯加重。治疗以休息、泡沫轴放松和臀中肌力量训练为主，严重时需要注射治疗。你觉得我是不是也是这个问题？", "must": ["x01", "x02"], "should": ["r06"], "must_not": ["d05"], "why": "长科普段落，与两张膝伤卡大量重叠；妈妈膝盖是陷阱"}
+{"qid": "q36", "category": "long_paste", "query": "Pasting my notes from today's standup so you have context: Dave asked again about the Postgres 16 migration, wants the rollback plan reviewed before the staging rehearsal. Priya will pair with me on the runbook. Nothing else blocking. Also reminder to book the dentist.", "must": ["w05", "w06"], "should": ["f07"], "must_not": [], "why": "英文长笔记，覆盖 migration 线程两张卡"}
+{"qid": "q37", "category": "distractor", "query": "Aurora 那场演唱会", "must": ["d03"], "should": [], "must_not": ["w08"], "why": "与 q02 成对：同一个词 Aurora，这次要的是歌手不是项目"}
+{"qid": "q38", "category": "distractor", "query": "我的苹果手机屏幕修了没", "must": ["b08"], "should": [], "must_not": ["b07"], "why": "「苹果」指手机不是青苹果"}
+{"qid": "q39", "category": "distractor", "query": "我的马拉松目标成绩", "must": ["r01"], "should": ["r02", "r04"], "must_not": ["d02"], "why": "同事 Ken 的 Boston Marathon 是陷阱"}
+{"qid": "q40", "category": "distractor", "query": "我自己那个记账 project 用的什么技术", "must": ["w09"], "should": ["d07"], "must_not": ["w08"], "why": "泛词 project 不该把 Project Aurora 拉进来"}
+{"qid": "q41", "category": "superseded", "query": "我现在住在哪", "must": ["h02"], "should": ["h04", "h05"], "must_not": ["h01"], "why": "现住址是 h02；被取代的杭州旧址不该出现"}
+{"qid": "q42", "category": "superseded", "query": "我对什么抗生素过敏", "must": ["x07"], "should": [], "must_not": ["x06"], "why": "纠正卡取代了旧说法，旧卡被召回等于说错话"}
+{"qid": "q43", "category": "superseded", "query": "我每天喝什么咖啡", "must": ["b05"], "should": [], "must_not": ["b04"], "why": "饮食习惯已变更"}
+{"qid": "q44", "category": "history", "query": "我以前在杭州住哪个区", "must": ["h02"], "should": ["e01", "f01"], "must_not": [], "related": ["h01"], "why": "问的是旧事实：排序只能拿到取代它的 h02，旧卡 h01 应经关联读取（显式 supersedes 链）拿到。related 暂不计分"}
+{"qid": "q45", "category": "history", "query": "我在星河科技的时候是做什么的", "must": ["w02"], "should": ["w10", "e01"], "must_not": [], "related": ["w01"], "why": "同上：w01 已被 w02 取代，只能经关联读取出现"}
+{"qid": "q46", "category": "thread", "query": "马拉松备赛进展怎么样了", "must": ["r01", "r02", "r04"], "should": ["x01", "r05", "r06"], "must_not": ["d02"], "why": "线程级召回：一条线上多张卡都该来"}
+{"qid": "q47", "category": "thread", "query": "我和小满远距离的事", "must": ["f01", "f02"], "should": ["t01", "t03", "f03"], "must_not": [], "why": "线程名「远距离」+ 人名"}
+{"qid": "q48", "category": "thread", "query": "值班出过哪些事故", "must": ["w03", "w04"], "should": ["w13"], "must_not": [], "why": "线程名「值班事故」"}
+{"qid": "q49", "category": "no_hit", "query": "我喜欢什么颜色的车", "must": [], "should": [], "must_not": [], "expect_empty": true, "why": "花园里没有车和颜色的卡；主动搜应返回空而不是凑数"}
+{"qid": "q50", "category": "no_hit", "query": "what's my blood type", "must": [], "should": [], "must_not": [], "expect_empty": true, "why": "无血型卡"}
+{"qid": "q51", "category": "no_hit", "query": "我有没有去过冰岛", "must": [], "should": [], "must_not": [], "expect_empty": true, "why": "无冰岛卡；「去过」是泛词"}
+{"qid": "q52", "category": "no_hit", "query": "我姐姐叫什么名字", "must": [], "should": [], "must_not": [], "expect_empty": true, "why": "无姐姐卡"}
+{"qid": "q53", "category": "no_hit", "query": "Do I have any tattoos?", "must": [], "should": [], "must_not": [], "expect_empty": true, "why": "无纹身卡"}
