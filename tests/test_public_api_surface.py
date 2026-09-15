@@ -96,6 +96,12 @@ STABLE = {
         "DEFAULT_QUOTAS", "select_context",
     },
     "memgarden.related": {"one_hop", "links", "RELATIONS", "DEFAULT_CAP"},
+    # -- 接入面能力声明（feat/wire-capabilities）------------------------- #
+    "memgarden.surfaces": {
+        "CAPABILITIES", "SURFACES", "SDK_BACKING", "SDK_INFRASTRUCTURE",
+        "DSH_BACKING", "WIRE_INFRASTRUCTURE", "backing", "available_methods",
+        "surface_capabilities",
+    },
 }
 
 #: 公开请求/进度对象上宿主会直接设置或读取的字段（名字 → 默认值）。字段不在 ``__all__`` 里，

@@ -101,6 +101,8 @@ STABLE_MODULES: tuple[str, ...] = (
     "memgarden.policies",
     "memgarden.retrieval",
     "memgarden.related",
+    # -- 接入面能力声明（feat/wire-capabilities）------------------------- #
+    "memgarden.surfaces",
 )
 
 __all__ = [
