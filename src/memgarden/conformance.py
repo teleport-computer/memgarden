@@ -45,7 +45,7 @@ from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 from .timestamps import parse_ts
 
 #: 场景集版本。场景语义有变化（加条款、改判据）就 +1，宿主报告里带上它。
-SCENARIO_VERSION = 1
+SCENARIO_VERSION = 2
 
 #: 写操作失败时的规范错误类别。适配器把宿主自己的错误码映射进来。
 ERROR_KINDS = frozenset({
@@ -683,6 +683,10 @@ def _content_length(host: Host, c: Checks) -> None:
     view = host.inspect("alice", out.record_ids[0]) or {}
     c.check(view.get("content") == body, "content.length/stored_whole",
             {"wrote_chars": len(body), "stored_chars": len(str(view.get("content") or ""))})
+    if view.get("content") == body:
+        fetched = host.fetch("alice", out.record_ids)
+        c.check(len(fetched) == 1 and fetched[0].get("content") == body,
+                "content.length/read_whole", {"returned": len(fetched)})
 
 
 def _capture_failure(host: Host, c: Checks) -> None:

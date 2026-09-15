@@ -577,6 +577,10 @@ class _MaintenancePlan:
 
     def finish(self) -> MaintenanceResult:
         dropped = {} if self.err else self._drop_unsafe_targets()
+        if dropped and not self.consolidations:
+            # A wholly rejected plan is not a legitimate empty decision. In
+            # particular, MountedGarden must not commit its maintenance ledger.
+            self.err = "maintenance_targets_rejected"
         trace = {"reason": self.verdict.reason, "new_cards": self.verdict.new_cards,
                  "consolidations": len(self.consolidations),
                  "signature": self.snapshot.signature,

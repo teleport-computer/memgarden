@@ -245,6 +245,10 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 
 ### 共用验收场景（`memgarden.conformance`）
 
+场景版本 2 增加 `content.length/read_whole`：接受长正文并完整入库后，完整 `fetch` 也必须原样返回；预览和模型上下文预算不属于完整读取。宿主可明确拒绝超限新写入，不要求所有宿主采用同一个长度上限。
+
+Maintenance 的建议全部因目标未渲染或被截断而拒绝时，0.21.1 返回 `maintenance_targets_rejected`，不写卡、不推进账本。合法空建议仍是成功的 no-op；混合建议保留安全部分并在 trace 中记录拒绝数量。
+
 Store 契约测试验的是 `StoragePort` 这一层。**不走 MountedGarden、写入用自己执行器的宿主**（io 就是这种接法）过不了、也不该只拿它当证据：内置 Store 通过了幂等、删除、CAS，不代表宿主那条路也满足。`memgarden.conformance` 把共同业务语义写成 22 个可运行场景，宿主实现一个 `Host` 适配器（add / patch / supersede / archive / delete / observe、Capture 提交与进度、`inspect` 存储真相，以及 fetch / index / search / recall / related / history 六条产品读路径）后，在真实数据库上 `run_all`：
 
 | 场景组 | 断言的语义 |
