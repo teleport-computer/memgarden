@@ -612,23 +612,7 @@ class MountedGarden:
         状态。并行跑的话每批看到的都是导入前的旧状态，同一件事在不同批里
         各写一张，谁也不知道。
         """
-        from .contracts import ImportRequest
-        from .importing import ImportSession
-
-        mount = scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT)
-        if isinstance(request, ImportRequest):
-            # actor 只能来自可信 Scope。
-            request = replace(request, actor=scope.actor, mount=mount)
-        else:
-            request = ImportRequest(**{
-                name: getattr(request, name)
-                for name in ImportRequest.__dataclass_fields__
-                if hasattr(request, name)
-            })
-            request = replace(request, actor=scope.actor, mount=mount)
-        # 续传指纹绑定 tenant + owner（默认请求下与此前版本逐字节一致，老进度能续传）。
-        session = ImportSession(self.component, request, progress=progress,
-                                binding=(scope.tenant_id, scope.owner()))
+        session = self.import_session(scope, request, progress=progress)
         if max_batches is not None and int(max_batches) < 1:
             raise ValueError("max_batches 必须至少为 1")
 
@@ -637,53 +621,117 @@ class MountedGarden:
             if session.next_batch() is None:
                 break
             ran += 1
-            if self._import_one_batch(scope, mount, session):
+            if self._import_one_batch(scope, session):
                 # 🔴 失败就**停在这里**，游标不动（原因见 ImportSession._advance）。
                 break
         session._consume_trailing()
         return session.progress
 
-    def _import_one_batch(self, scope: Scope, mount: str, session: Any) -> bool:
+    def import_session(self, scope: Scope, request: Any, *,
+                       progress: Any = None,
+                       existing_cards: Sequence[dict] | None = None):
+        """挂了 Store 的分批导入会话：**宿主调模型，这里写 Store**。
+
+        和 :meth:`import_history` 是同一个构造（actor / mount 取自可信 Scope，
+        续传指纹绑定 tenant + owner），所以两边存下的进度可以互相续传。
+        逐批用 :meth:`prepare_import_batch` 取批、宿主喂模型回复、
+        :meth:`store_import_batch` 写回并推进进度。
+
+        ``existing_cards`` 只给「宿主自己写库」的用法（wire 的 host 写入模式）：
+        那时 Store 不是事实源，索引由宿主给、由 ``session.commit`` 登记。
+        """
+        from .contracts import ImportRequest
+        from .importing import ImportSession
+
+        mount = scope.check(getattr(request, "mount", None) or DEFAULT_MOUNT)
+        if not isinstance(request, ImportRequest):
+            request = ImportRequest(**{
+                name: getattr(request, name)
+                for name in ImportRequest.__dataclass_fields__
+                if hasattr(request, name)
+            })
+        # actor 只能来自可信 Scope。
+        request = replace(request, actor=scope.actor, mount=mount)
+        # 续传指纹绑定 tenant + owner（默认请求下与此前版本逐字节一致，老进度能续传）。
+        return ImportSession(self.component, request, progress=progress,
+                             existing_cards=existing_cards,
+                             binding=(scope.tenant_id, scope.owner()))
+
+    def prepare_import_batch(self, scope: Scope, session: Any) -> tuple[Any, Any]:
+        """游标处的下一批，以及写回时要带的快照版本。
+
+        写卡批次先**重读 Store** 并替换会话的已有记忆索引 —— 前面批次写进去的卡
+        要出现在这一批的提示词里（跨批去重靠它）。候选批次不读库，版本为 None。
+        返回 ``(None, None)`` = 没有可跑的批次了。
+        """
+        batch = session.next_batch()
+        if batch is None or batch.stage == "candidates":
+            return batch, None
+        mount = scope.check(getattr(session.request, "mount", None) or DEFAULT_MOUNT)
+        snapshot = self._snapshot(scope)
+        cards = [c for c in self._visible(scope, snapshot.cards)
+                 if str(c.get("mount") or DEFAULT_MOUNT) == mount]
+        return session.next_batch(existing_cards=cards), snapshot.revision
+
+    def store_import_batch(self, scope: Scope, session: Any, outcome: Any, *,
+                           expected_revision: Any = None) -> OperationReceipt:
+        """把一批判断结果写回 Store 并推进进度。
+
+        - 判断失败（``outcome.error``）：记进 ``progress.failed``，游标不动；
+        - 候选批次、没什么可记：不写库，游标前进；
+        - 写库失败：``session.fail``，游标不动；
+        - ``revision_conflict``：**进度不动、也不记失败** —— 调用方重新
+          :meth:`prepare_import_batch` 重读重算（重算次数由调用方封顶），
+          放弃时自己调 ``session.fail(outcome, "revision_conflict")``。
+        """
+        trace = dict(getattr(outcome, "trace", {}) or {})
+        if outcome.error:
+            session._advance(outcome, [], register=False)
+            return OperationReceipt(error=outcome.error, trace=trace)
+        if outcome.stage == "candidates" or not outcome.mutations:
+            session._advance(outcome, [], register=False)
+            return OperationReceipt(
+                reason=("candidates_recorded" if outcome.stage == "candidates"
+                        else "nothing_worth_keeping"), trace=trace)
+        mount = scope.check(getattr(session.request, "mount", None) or DEFAULT_MOUNT)
+        receipt = self._apply(
+            scope, mount, outcome.mutations,
+            idempotency_key=outcome.idempotency_key,
+            trace=trace, expected_revision=expected_revision,
+        )
+        if receipt.error == "revision_conflict":
+            return receipt
+        if receipt.error:
+            session.fail(outcome, receipt.error)
+        elif not receipt.written:
+            session._advance(replace(outcome, mutations=[]), [], register=False)
+        else:
+            session._advance(outcome, list(receipt.record_ids), register=False)
+        return receipt
+
+    def _import_one_batch(self, scope: Scope, session: Any) -> bool:
         """跑游标处的一批并写回。返回 True = 这批失败了。"""
         from .component import _is_truncated
 
         purpose = {"candidates": "import_candidates"}
         for attempt in range(self.MAX_RECOMPUTE):
-            batch = session.next_batch()
+            batch, revision = self.prepare_import_batch(scope, session)
             if batch is None:
                 return False
-            snapshot = None
-            if batch.stage != "candidates":
-                # 写卡前现读：前面批次写进去的卡要出现在这一批的索引里。
-                snapshot = self._snapshot(scope)
-                cards = [c for c in self._visible(scope, snapshot.cards)
-                         if str(c.get("mount") or DEFAULT_MOUNT) == mount]
-                batch = session.next_batch(existing_cards=cards)
             while (ask := batch.next_prompt()) is not None:
                 reply = self.component._model.complete(
                     ask, purpose=purpose.get(batch.stage, "capture"))
                 batch.feed(reply, truncated=_is_truncated(reply))
             outcome = batch.result()
-            if outcome.error or batch.stage == "candidates" or not outcome.mutations:
-                session._advance(outcome, [], register=False)
-                return bool(outcome.error)
-            receipt = self._apply(
-                scope, mount, outcome.mutations,
-                idempotency_key=outcome.idempotency_key,
-                trace=dict(outcome.trace),
-                expected_revision=snapshot.revision,
-            )
-            if receipt.error == "revision_conflict" and attempt + 1 < self.MAX_RECOMPUTE:
-                # 重读重算，不是重放旧结果（见 _capture_with_cas）。
-                continue
-            if receipt.error:
+            receipt = self.store_import_batch(
+                scope, session, outcome, expected_revision=revision)
+            if receipt.error == "revision_conflict":
+                if attempt + 1 < self.MAX_RECOMPUTE:
+                    # 重读重算，不是重放旧结果（见 _capture_with_cas）。
+                    continue
                 session.fail(outcome, receipt.error)
                 return True
-            if not receipt.written:
-                session._advance(replace(outcome, mutations=[]), [], register=False)
-                return False
-            session._advance(outcome, list(receipt.record_ids), register=False)
-            return False
+            return bool(receipt.error)
         return False
 
     # -- 用户明说要记 ------------------------------------------------------- #
