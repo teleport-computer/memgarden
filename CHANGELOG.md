@@ -17,6 +17,11 @@
 - `ImportRequest` 新增字段（均有默认值，默认时行为不变）：`batches`（宿主预切批次，可带 `label` / `occurred_from` / `occurred_to`）、`strategy`（`single_pass` 默认 / `two_pass`）、`batch_chars`、`write_batch_candidates`、`max_total_cards`、`fallback_occurred_at`、`naming_rule`、`identity`。wire `history.import` 接受前六项；`ImportProgress` 新增 `strategy`、`cards_added`、`candidates`、`candidates_cursor`。
 - `two_pass`：每批先抽候选事实（`prompts/history_import.py`），读完材料后分组交给 Capture 提示词统一写卡。⚠️ 这时 `ImportProgress.candidates` 含用户内容，宿主要按记忆正文等级保存进度；候选总数上限 4000。
 - 跨批桶名确定性收敛（大小写/空白、通用桶的双语斜杠写法、模型把通用桶清单相邻两项连抄成「工作、目标与成长」时取第一个）。
+- JSON Lines `records.related`（manifest `capabilities.related`）：请求 `{scope, ids, cap=6, include_archived, include_superseded}`，回复 `{items: [{id, summary, source_id, relation, status}]}`（schema `RelatedResult`）。owner / 挂载点 / 生命周期按请求里的可信 scope 过滤，`ids` 指向范围外的卡返回空。
+- JSON Lines 宿主驱动历史导入 `history.import_begin` / `import_feed` / `import_commit` / `import_fail` / `import_cancel`（manifest `capabilities.import_session`，不需要服务侧模型）。begin 接受 `history.import` 的全部导入字段外加 `write_mode`（`service` 默认：服务写自己的 Store，重读 + CAS，冲突重算；`host`：回 `needs_commit` 带 mutations，宿主写库后 commit 真实 id）与 `existing_cards`（仅 host）。回复是 `ImportSessionState`：`status` ∈ `needs_model` / `needs_commit` / `completed` / `failed`，每次都带 `progress`（含 `done` / `percent`）和 `estimate`。续传 = 带存下的 `progress` 重新 begin；与 `history.import` 同一个续传指纹。⚠️ `two_pass` 的 progress 含用户内容，宿主按记忆正文等级保存、不写日志。
+- `MountedGarden.import_session(scope, request, *, progress, existing_cards)`、`prepare_import_batch(scope, session)`、`store_import_batch(scope, session, outcome, *, expected_revision)`：挂了 Store 的宿主驱动导入三步，wire 会话与 `import_history` 都跑在它们上面。
+- `maintenance.run` / `maintenance.begin` 接受 `cards_limit`、`cards_budget_chars`、`card_body_chars`、`card_summary_chars`（≥1，不传用 `MaintenanceRequest` 默认值）。
+- `memgarden.surfaces`（进 `STABLE_MODULES`）：`surface_capabilities()` 给出 SDK（`MountedGarden`）/ JSON Lines / DSH Adapter 各自接通的能力，由实际方法算出；`tests/test_surfaces.py` 双向核对并快照矩阵。当前 DSH 只接通 `capture`、`turn_context`、`maintenance`、`model_tools`。
 
 ### Changed
 
@@ -28,6 +33,7 @@
 - 导入批次的「已有记忆索引」改为按本批文字挑相关旧卡（60 个名额，四分之一留给重要度最高的卡），此前只取重要度前 60，大导入的后续批次看不到前面写的卡。相关性默认由 `importing.bm25_index_ranker` 给（`retrieval.rank` 关掉门槛，分词器跟组件的 `tokenizer=`），`MountedGarden.import_history` 与宿主驱动共用；宿主可注入 `index_ranker`。合成导入批次上（`evals/retrieval/import_index.py`，4 个话题 / 6000 字）该进索引的旧卡进了 0.775 → 0.944、整批都进 33% → 76%（jieba 0.967 / 86%），对比对象是 MG-8 初版的词面重叠。
 - `MountedGarden` 的自动想起、主动搜索（含 `memory_search` 工具）和关联读取共用一个候选过滤（owner、挂载点收窄、生命周期）。想起和搜索因此也认外部 Store 直接写在卡上的 `status` / `lifecycle`：`archived` / `superseded` / `deleted` 或没见过的值不再进候选（此前只看 Store 的 `archived` / `superseded_by`，这种卡能被搜到、被想起，关联读取却把它当归档卡）。内置 Store 不受影响。
 - `MountedGarden.import_history` 不再经过 `capture_and_store`；monkeypatch 该方法来伪造导入回执的调用方需要改为注入模型。
+- manifest 的 `capabilities` 多出 `related`、`import_session` 两个键；`maintenance` 的两条 lane 都把 `maintenance.check` 算进去（方法一直存在，声明值不变）。
 
 ### Deprecated
 

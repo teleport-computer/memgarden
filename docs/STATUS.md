@@ -15,6 +15,7 @@
 | 关联读取（MG-6） | `memgarden.related.one_hop` 与 `MountedGarden.related`，与 io 读侧实现由 144 组黄金用例对拍；仅 SDK，不做反向与多跳 |
 | Dream 带正文（MG-7） | 整理提示词恢复卡片正文，`MaintenanceRequest` 新增四个预算字段；**提示词文本有变化**，依赖整份提示词快照的宿主要更新 |
 | 宿主驱动历史导入（MG-8） | `GardenComponent.import_session` / `ImportSession`；`MountedGarden.import_history` 改跑在同一状态机上，默认请求的续传指纹不变；`two_pass` 的进度对象含用户内容；**单段式 `history_import` 提示词有变化** |
+| wire 接通与分面声明（`feat/wire-capabilities`，未合入本页基线） | JSON Lines 新增 `records.related`、宿主驱动导入 `history.import_begin/feed/commit/fail/cancel`（manifest `import_session`），`maintenance.run/begin` 接受四个渲染预算；`memgarden.surfaces` 按实际方法给出 SDK / JSON Lines / DSH 各自的能力表并双向测试。老方法请求与回复不变；manifest 多出 `related`、`import_session` 两个能力键 |
 | 整合 | 导入的已有记忆索引默认用 `retrieval.rank` 挑卡；想起/搜索/关联读取共用一个候选过滤（外部 Store 写在卡上的非 active 生命周期不再进想起和搜索）；`related` 进 `STABLE_MODULES`，宿主设置的请求字段与默认值进快照；多轮窗口评测与可选的 `strong_evidence_terms` |
 
 没有新增存储表、加解密、默认向量存储或外部运行依赖；运行包仍只依赖标准库。
@@ -73,8 +74,8 @@
 
 仍存在但不能混称“本轮漏修”的接入边界：
 
-- **History Import/Migrate**：核心已有，宿主驱动导入目前只有 SDK 的 `import_session`，wire 上没有 begin/feed；默认 DSH 无模型服务按运行时 manifest 降级。
-- **关联读取**：仅 SDK，不做反向（从旧卡找新卡）和多跳。
+- **History Import/Migrate**：核心已有；宿主驱动导入在 SDK 与 JSON Lines（`history.import_*`）都有，Migrate 在 wire 上仍没有宿主驱动入口；DSH Adapter 两者都没接。
+- **关联读取**：SDK 与 JSON Lines 有，DSH Adapter 没接；不做反向（从旧卡找新卡）和多跳。
 - **规模与导出**：SQLite 按 owner 集合读取，响应分页不提供跨请求快照；目标规模压测与一致导出协调仍是部署判断。
 - **完整忘记**：指定卡真删，不自动级联删除宿主素材、备份、向量或其他派生卡；宿主需协调并防止旧素材重放复活。
 - **outbox 部署**：没有证明多进程共享一个文件安全；实例独立 stateDir，或另外实现并验证共享队列。

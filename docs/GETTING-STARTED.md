@@ -139,7 +139,7 @@ capture.feed(session_id, reply, truncated)
 
 不要预先猜测 `session_id`，使用 begin 返回的值。服务重启或会话过期后，重新 begin；使用相同业务幂等身份避免重复写卡。宿主终止模型调用时可 `capture.cancel`；整理使用同构的 `maintenance.begin/feed/cancel`。取消临时会话不是撤销已经提交的记忆。
 
-**先检查响应顶层 `ok/error`，再检查业务 `result.error`。** `completed` 只表示状态机结束，不等于已保存。服务未配模型时，History Import / Migrate 仍没有宿主驱动入口，manifest 会明确禁用。
+**先检查响应顶层 `ok/error`，再检查业务 `result.error`。** `completed` 只表示状态机结束，不等于已保存。服务未配模型时，历史导入走同构的 `history.import_begin/feed`（每个回复都把 `progress` 存下来，续传就是带它重新 begin；完整流程见[数据参考 §7](INTEGRATION-AND-DATA.md#7-导入分页和规模)）；Migrate 仍没有宿主驱动入口，manifest 会明确禁用。取回卡时的一跳关联用 `records.related`。三条入口各自接通了哪些能力见[数据参考 §1](INTEGRATION-AND-DATA.md#各接入面接通了什么)。
 
 从源码运行带进程 deadline 的协议示例（模型回复固定、不付费）：
 
@@ -147,7 +147,7 @@ capture.feed(session_id, reply, truncated)
 uv run python examples/wire_capture.py
 ```
 
-它实际启动 `memgarden serve`，完成 begin/feed、存储、导出与召回。完整请求 schema 通过 `schema.get` 获取。
+它实际启动 `memgarden serve`，完成 begin/feed、存储、导出与召回，再跑一次宿主驱动的历史导入和关联读取。完整请求 schema 通过 `schema.get` 获取。
 
 ## 4. DeepSeek Harness
 

@@ -104,6 +104,7 @@ uv run python examples/retrieval_runtime.py
 ## Retrieval
 
 - Automatic recall (`retrieval.select_context`, default `RelevanceStage`) and active search (`search`, `records.search`, the `memory_search` tool) share one BM25 ranker with an injectable tokenizer; both report the same ranking version. Search returns real matches only and is empty on no hit.
+- One-hop related read (`related`, `records.related`) and host-driven batched history import (`import_session`, `history.import_begin/feed/commit/fail/cancel`) are available on the SDK and JSON Lines. The DSH Adapter wires only capture, per-turn recall, maintenance and the model tools; `memgarden.surfaces.surface_capabilities()` reports what each surface actually wires.
 - `SelectionPolicy` plugs into `MountedGarden`; hybrid functions do not automatically replace it.
 - `retrieval_cues` are stored hints, not additional evidence. The default search text includes them; hosts with their own `search_text` or embedding projection include them there.
 - Stored `Card.role` is singular; selection uses `roles: list[str]`. The [policy example](examples/retrieval_runtime.py) explicitly projects between them without rewriting storage.

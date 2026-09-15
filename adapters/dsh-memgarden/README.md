@@ -65,7 +65,7 @@ capture.begin     → DSH llm.stream → capture.feed
 maintenance.begin → DSH llm.stream → maintenance.feed
 ```
 
-服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。History Import / Migrate 当前没有对应的宿主驱动 lane，因此该默认服务会在 manifest 关闭这两项。它们并非自动 turn hook，不能因核心接口存在就宣称 DSH 已具备管理入口。
+服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。该默认服务的 manifest 会关闭需要服务侧模型的 `history_import`（一次性）与 `migrate`。服务虽然提供宿主驱动的 `history.import_*`、`records.related`、`records.search` 等方法，**这个 Adapter 没有接它们**：DSH 上接通的只有轮末 Capture、每轮召回、Maintenance 和模型工具（主动搜索与写卡经 `memgarden_memory_search` / `memgarden_memory_write`）。各接入面的能力表见[数据参考](../../docs/INTEGRATION-AND-DATA.md#各接入面接通了什么)，`tests/test_surfaces.py` 核对这张表与插件实际发出的请求一致。
 
 ## 窗口预算与恢复
 

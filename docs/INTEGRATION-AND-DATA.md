@@ -8,14 +8,14 @@
 |---|---|---|
 | 对话前召回 | `context_for_turn` / `context.get` | 把 `blocks` 注入本轮上下文，保留 `record_ids` 供追溯 |
 | 主动搜索 | `search` / `records.search` | 只返回真实命中（`record_ids` + `hits` + `ranking`），无命中为空；不经过挑卡策略，不补最近卡 |
-| 取回卡时的关联提示 | `related`（仅 SDK；纯函数 `memgarden.related.one_hop`） | 把返回的一跳邻居（id、摘要、关系、是否历史版本）附在取回结果旁；要读全文由宿主在同一 Scope 再取。见 [Retrieval §7](RETRIEVAL.md#7-关联读取一跳邻居) |
+| 取回卡时的关联提示 | `related` / `records.related`（纯函数 `memgarden.related.one_hop`） | 把返回的一跳邻居（id、摘要、关系、是否历史版本）附在取回结果旁；要读全文由宿主在同一 Scope 再取。见 [Retrieval §7](RETRIEVAL.md#7-关联读取一跳邻居) |
 | 对话后记忆 | `capture_and_store` / `capture.run` | 检查业务回执，再标记这段素材已处理 |
 | 宿主自行调模型 | `capture.begin/feed/cancel` | 按 `needs_model` 调模型并 feed，直到 `completed`，再检查其中回执 |
 | 检查、执行整理 | `check_maintenance`、`run_and_store_maintenance` / `maintenance.check/run` | 调度归宿主，卡片与整理账本由 Garden 一起提交 |
 | 宿主驱动整理 | `maintenance.begin/feed/cancel` | 与 Capture 使用相同的模型往返方式 |
 | 用户明确保存 | `write_one` / `records.write` | 不再套自动 Capture 的价值筛选 |
 | 历史材料导入 | `import_history` / `history.import` | 持久保存原材料和 `ImportProgress`，失败后以相同语义续传 |
-| 宿主驱动导入 | `GardenComponent.import_session`（仅 SDK） | 逐批 `next_batch` → 宿主调模型 `feed` → `result` → 宿主写库 → `commit(record_ids)`，保存返回的进度 |
+| 宿主驱动导入 | `GardenComponent.import_session`、`MountedGarden.import_session` / `history.import_begin/feed/commit/fail/cancel` | 按 `needs_model` 调模型并 feed；host 写入模式下按 `needs_commit` 写自己的库再 commit 真实 id。**每个回复都存下 `progress`**，续传就是带它重新 begin |
 | 读取与导出 | `browse`、`export` / `records.browse/export` | 持续读取 `next_cursor`，直到为空 |
 | 用户删除 | `delete_record` / `records.delete` | 提供请求身份并检查删除回执 |
 | 改变可见范围 | `promote` / `records.promote` | 宿主先授权，不能把模型给的 `authorized` 当作权限证据 |
@@ -32,11 +32,30 @@ Python 模型接口是 `complete(prompt, *, purpose="") -> str`。凭据、超�
 
 Capture 与 Maintenance 的 SDK / 宿主驱动入口分别共用各自的内核状态机。成功调用却返回空白正文时，会按现有重试预算请求一次格式修正（默认最多额外一次）；连续空白明确失败，不当作“无需记忆／整理”，也不推进处理进度或整理账本。非空但没有 JSON 的纯文本仍按原策略报解析失败。截断、格式修正共享同一预算，provider 明确报错不伪装成空正文。SDK 可接既有 `{text, truncated}` 回复信封；宿主驱动时将正文和 `truncated` 分开传入 feed。
 
-Dream（整理）提示词里的卡片**带正文**：按 `MaintenanceRequest.cards` 的顺序渲染 id、bucket、threads、occurred_at、summary、retrieval_cues 和 content。上限由请求字段控制——`cards_limit`（默认60张）、`cards_budget_chars`（卡片区总字符，默认60000，按整张卡累加，放不下下一张就停，不切半张也不跳着塞短卡）、`card_body_chars`（单卡正文，默认5000）、`card_summary_chars`（单卡摘要，默认2000）。被截断的卡在卡头和正文处标 `TRUNCATED`，提示词禁止把这种卡放进 `card_ids`；这是提示词约束，解析和守卫不据此拦截，需要硬拦的宿主可读 trace 的 `truncated_card_ids` 自行检查。trace 另记 `cards_rendered` / `cards_truncated` / `cards_omitted`。墓碑卡守卫的 `known_ids` 自动并入实际渲染的卡。宿主要把最该整理的卡排在前面；读字段只认 `summary` / `content` 等规范名，旧标题字段先翻译。wire 的 `maintenance.*` 方法目前使用默认上限。
+Dream（整理）提示词里的卡片**带正文**：按 `MaintenanceRequest.cards` 的顺序渲染 id、bucket、threads、occurred_at、summary、retrieval_cues 和 content。上限由请求字段控制——`cards_limit`（默认60张）、`cards_budget_chars`（卡片区总字符，默认60000，按整张卡累加，放不下下一张就停，不切半张也不跳着塞短卡）、`card_body_chars`（单卡正文，默认5000）、`card_summary_chars`（单卡摘要，默认2000）。被截断的卡在卡头和正文处标 `TRUNCATED`，提示词禁止把这种卡放进 `card_ids`；这是提示词约束，解析和守卫不据此拦截，需要硬拦的宿主可读 trace 的 `truncated_card_ids` 自行检查。trace 另记 `cards_rendered` / `cards_truncated` / `cards_omitted`。墓碑卡守卫的 `known_ids` 自动并入实际渲染的卡。宿主要把最该整理的卡排在前面；读字段只认 `summary` / `content` 等规范名，旧标题字段先翻译。wire 的 `maintenance.run` / `maintenance.begin` 接受同名的四个字段（都要 ≥1，不传用默认值）。
 
 解析对模型输出的容错范围是有限的：Capture/Dream/Migrate 从回复中取第一个完整 JSON 对象，允许前后有说明文字、Markdown 代码围栏或推理块；合法 JSON 字符串里的 `{` `}` 不影响取块。只有 Capture 在直接解析失败后会尝试补转义裸引号，并按 JSON 结构判断：只修**对象成员的值**里的引号，例如 `她说"好的"然后走了`、`他报价"1000"块`、`He said "ok" and left`、`他说"好"、"行"`，以及引语在值末尾的 `"他只说了"算了""`；键名和数组元素（如 `threads`）里的裸引号一概不修。值里的引号后面紧跟 `,` `}` `]` `:`（如 `她说"好的", 然后`）与字段结束无法区分，也修不了。只要结构上还有别的错，整份不修：漏冒号（`"is_sensitive" True,`，无论后面跟的是什么）、数组元素之间写错分隔符（`["a"， "b"]`、`["a"、"b"]`、`["a” "b"]`、`["a" "b"]`）、成员或对象之间写错分隔符、缺/多逗号、截断。这些情况都报 `json_decode_error`（Capture 与 Maintenance 会按现有重试预算重问），修复不会把它们猜成另一种意思落库。值里既有裸引号又有 `}`（`"她说"好"然后看 } 这个符号"`）时，Capture 会用完整对象去修；Dream/Migrate 不做引号修复，这类回复对它们仍是 `json_decode_error`。已知局限（会按字面解析而不是报错）：值里的引号后面恰好是 `,` 且残文又拼成合法 JSON（`"她说"好的","content":"…"`）；值末尾多敲一个引号（`"好的""` 读成 `好的"`）；值里的引号后面紧跟 `}` 且对象恰好在这里闭合（`{"content":"a "b" }"}` 读成 `a "b`）。
 
-`capture.run`、`maintenance.run`、`history.import`、`records.migrate` 需要服务侧配置模型。前两项另有 begin/feed 路径；后两项在 wire 上当前没有（历史导入的宿主驱动形状目前只有 SDK 的 `import_session`）。因此默认 DSH 无模型服务的 `history_import`、`migrate` 为 false，这是明确的接入边界。
+`capture.run`、`maintenance.run`、`history.import`、`records.migrate` 需要服务侧配置模型。前三项另有宿主驱动路径（`capture.*`、`maintenance.*` 的 begin/feed，历史导入的 `history.import_*`，manifest 能力名 `import_session`）；`records.migrate` 在 wire 上没有。因此无模型服务的 `history_import`、`migrate` 为 false，而 `import_session` 为 true，这是明确的接入边界。
+
+### 各接入面接通了什么
+
+同一个能力名在三条入口上不是一回事。`memgarden.surfaces.surface_capabilities()` 按**实际存在的方法**算出这张表（SDK 看 `MountedGarden` 的方法，JSON Lines 看服务方法表，DSH 看 Adapter 里真正发出的 `client.request`），`tests/test_surfaces.py` 双向对账并快照：
+
+| 能力 | SDK（`MountedGarden`） | JSON Lines | DSH Adapter |
+|---|---|---|---|
+| `capture` | `capture_and_store`；`prepare_capture` + `store_capture_result` | `capture.run`；`capture.begin/feed/cancel` | ✓（begin/feed/cancel，轮末 hook） |
+| `turn_context` | `context_for_turn` | `context.get` | ✓（pre-step） |
+| `search` | `search` | `records.search` | ✗（只有模型工具 `memory_search`） |
+| `related` | `related` | `records.related` | ✗ |
+| `maintenance` | `check_maintenance` + `run_and_store_maintenance` 或 `prepare_maintenance` + `store_maintenance_result` | `maintenance.check` + `run` 或 `begin/feed/cancel` | ✓（check + begin/feed/cancel） |
+| `model_tools` | `tools`、`invoke_tool` | `tool.list/invoke` | ✓ |
+| `curated_write` | `write_one` | `records.write` | ✗（只有模型工具 `memory_write`） |
+| `browse` / `export` / `delete` / `promote` / `migrate` | 对应方法 | `records.*` | ✗ |
+| `history_import` | `import_history` | `history.import`（需服务侧模型） | ✗ |
+| `import_session` | `import_session` + `prepare_import_batch` + `store_import_batch` | `history.import_begin/feed/commit/fail/cancel` | ✗ |
+
+这是静态接线。连上具体服务后以 `manifest.get` 为准，它还会按模型与 Store 能力关掉一部分。
 
 独立 `memgarden manifest` 是静态声明；连接后的 `manifest.get` 才按实际模型和 Store 给出能力。`manifest.storage.capabilities`、`degradations`、`user_notices` 用于识别缺失条件，不是外部 Store 已经通过测试的证明。
 
@@ -67,6 +86,7 @@ JSON Lines 每行一个请求与响应，stdout 承载协议。示例请求：
 | `memgarden.policies` | 落卡档位与提示词常量 |
 | `memgarden.retrieval` | 统一排序器 `rank`、自动想起 `select_context`、`Tokenizer` 插口 |
 | `memgarden.related` | 关联读取纯函数 `one_hop`（挂了 Store 用 `MountedGarden.related`） |
+| `memgarden.surfaces` | SDK / JSON Lines / DSH 各自接通的能力（`surface_capabilities()`） |
 
 分批导入的会话对象 `ImportSession` / `ImportBatch` / `ImportBatchResult` 从顶层导出。Dream 带正文渲染的预算是 `MaintenanceRequest` 的 `cards_limit` / `cards_budget_chars` / `card_body_chars` / `card_summary_chars` 字段；渲染函数 `prompts.dream.render_dream_cards` 本身不是公开合同，宿主走 `maintenance_session` / `run_maintenance` 就会用到它。请求对象上宿主直接设置的字段和默认值同样由快照测试钉住。
 
@@ -225,6 +245,23 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 History Import 的 cursor 是原材料的字符偏移（宿主预切 `batches` 时是各批文字长度的累计）。`source_digest` 绑定材料；`import_fingerprint` 还绑定 scope（宿主驱动时为 `owner_key`，默认 `actor.user_id`）、mount、locale、policy、材料类型、称呼、导入幂等键及批次规则；`strategy`、`max_total_cards`、`fallback_occurred_at`、`naming_rule`、`identity`、预切批次只在偏离默认值时进指纹，所以默认请求的旧进度仍能续传。失败不推进该批 cursor；单批成功可续传；更改导入语义必须从头开始。`max_batches` 限制一次调用工作量，`max_cards` 限制单批输出，`max_total_cards` 限制整次导入写出的卡数（add 与 supersede 都算；满了之后剩余批次不再调模型，并在 `skipped` 里记 `max_total_cards`）。
 
 `MountedGarden.import_history` 和 `GardenComponent.import_session` 走同一个 `ImportSession`：切批、提示词、解析与重问、跨批去重、上限和进度推进是同一份代码。区别只在谁调模型、谁写库，以及索引从哪来——前者每个写卡批次前重读 Store，后者用宿主开会话时给的 `existing_cards`，并在每次 `commit(outcome, record_ids=...)` 时把刚写的卡（带宿主的真实 id）登记进后面批次的索引。`record_ids` 必须与 `mutations` 一一对应；写库失败用 `fail(outcome, error)` 记录，游标不动。
+
+wire 上的 `history.import_begin` 接受和 `history.import` 同一组导入字段（外加 `write_mode`、`existing_cards`），续传指纹相同，所以两边存下的进度可以互相续。流程：
+
+```text
+history.import_begin(scope, material|batches, locale, …, progress?, write_mode?)
+  → needs_model   {session_id, next_prompt, batch, progress, estimate}
+history.import_feed(session_id, reply, truncated)
+  → needs_model   本批重问 / 下一批（写库冲突后重读重算时带 retrying_after=conflict）
+  → needs_commit  仅 write_mode=host：batch.mutations / cards / idempotency_key 交给宿主写库
+                  → history.import_commit(session_id, record_ids) 或 history.import_fail(session_id, error)
+  → completed     读完或整次上限已满；committed 是最后一批的回执
+  → failed        这一批失败，游标不动，会话结束；带 progress 重新 begin 会重试这一批
+history.import_fail(session_id, error)   宿主放弃当前这一批（模型调用失败、host 写库失败）
+history.import_cancel(session_id)        丢掉会话，progress 不变
+```
+
+`write_mode=service`（默认）时服务把每批写进自己的 Store：写卡前重读、CAS 提交、冲突最多重算 3 次。`write_mode=host` 时服务不碰 Store，已有记忆索引来自 begin 的 `existing_cards` 与每次 commit 登记的卡。会话在进程内（与 capture 共用 15 分钟 TTL 和容量上限），服务重启或过期后给 `unknown_session`；**持久状态只有宿主存下的 `progress`**。已提交的批次续传时不再调模型；写回幂等键由批次内容和导入语义算出，但续传若对同一批拿到不同的模型回复，Store 会报 `idempotency_conflict` 而不是写第二份——所以每个回复之后都要存 progress。⚠️ `two_pass` 的 progress 含用户内容，按记忆正文等级保存，不要写进日志；服务自身不记录 progress、prompt 或 reply。
 
 「已有记忆索引」按和这一批文字的相关性挑旧卡（最多 60 张，其中四分之一留给重要度最高的卡），不再只取重要度前 60。相关性默认用 `retrieval.rank`（关掉门槛、分词器跟组件的 `tokenizer=`，即 `importing.bm25_index_ranker`）；宿主可传 `index_ranker(batch_text, cards) -> ids` 换成自己的检索。桶名只做确定性收敛（大小写/空白一致并到已有写法，`中文/English` 通用桶对按 locale 取一半），近义词不猜。`fallback_occurred_at` 只填没有日期的卡，内核不推测日期。
 

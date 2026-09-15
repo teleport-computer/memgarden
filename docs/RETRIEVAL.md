@@ -114,7 +114,7 @@ Hybrid 的词法一侧目前仍是旧打分：默认门槛为0.35且至少 mediu
 
 ## 7. 关联读取（一跳邻居）
 
-模型或用户取回某几张卡时，`MountedGarden.related(scope, ids, cap=6)` 顺带给出与它们相连的卡，每项 `{id, summary, source_id, relation, status}`，`summary` 折叠空白后最多120字，不含正文。它不是搜索：没有查询文本，只沿卡片上已经存在的关系走一步。
+模型或用户取回某几张卡时，`MountedGarden.related(scope, ids, cap=6)` 顺带给出与它们相连的卡，每项 `{id, summary, source_id, relation, status}`，`summary` 折叠空白后最多120字，不含正文。它不是搜索：没有查询文本，只沿卡片上已经存在的关系走一步。非 Python Runtime 用 JSON Lines 的 `records.related`（参数同名，回复 `{items: [...]}`），过滤由服务按请求里的可信 scope 做。
 
 | relation | 来源 | 能否带出历史卡 |
 |---|---|---|
