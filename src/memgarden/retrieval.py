@@ -515,6 +515,11 @@ def _evaluate(query, candidates, *, tokenizer, text_of, min_score, stopwords, mi
         "below_gate": sum(r.reason == "below_gate" for r in rejected),
     }
 
+#: hybrid 融合的算法初始值（与 :mod:`memgarden.scoring.hybrid` 相同）；不是在宿主数据上
+#: 验证过的最佳参数。``min_cosine`` 故意没有默认值。
+DEFAULT_RRF_K = 20
+DEFAULT_VECTOR_WEIGHT = 2.0
+DEFAULT_LEXICAL_WEIGHT = 1.0
 #: 自动想起的默认软配额：（角色或 ``recent``，最多几张）。和
 #: ``scoring.relevance.select_relevant_context_memories_with_trace`` 相同。
 DEFAULT_QUOTAS: tuple[tuple[str, int], ...] = (("turning_point", 3), ("recent", 2))
@@ -538,6 +543,14 @@ def select_context(
     coverage_pool_floor: int = DEFAULT_COVERAGE_POOL_FLOOR,
     max_cards: int | None = None,
     max_text_bytes: int | None = None,
+    query_vector: Sequence[float] | None = None,
+    card_vectors: Mapping[str, Sequence[float]] | None = None,
+    min_cosine: float | None = None,
+    vector_model: str | None = None,
+    card_vector_models: Mapping[str, str] | None = None,
+    vector_weight: float = DEFAULT_VECTOR_WEIGHT,
+    lexical_weight: float = DEFAULT_LEXICAL_WEIGHT,
+    rrf_k: int = DEFAULT_RRF_K,
 ) -> tuple[list[dict], dict]:
     """自动想起：这一轮该带哪几张卡进上下文。
 
@@ -560,6 +573,15 @@ def select_context(
       （旧实现按段排列）；配额决定的是哪些卡有座位，这一点不变；
     - 分数并列时 id **升序**（与 :func:`rank` 一致，旧实现是降序）；
     - 没有 ``id`` 的卡不参与打分，也不进 IDF 统计。
+
+    **向量（hybrid）**：宿主给了 ``query_vector`` 就多一条向量通道 —— 每张有向量的候选
+    算余弦，过 ``min_cosine``（没有默认值，必须按宿主的模型和语料标定）的卡按余弦排名；
+    词法通道就是上面这把 BM25 尺子过闸后的排名。两条排名用加权 RRF
+    （``w_v/(k+r_v) + w_l/(k+r_l)``，见 :mod:`memgarden.scoring.hybrid`）融合，**任一通道
+    合格即为候选**：换了说法、一个词都不重合的卡可以只靠向量进来；没有向量的卡只走词法。
+    配额与座位规则不变，座位上的顺序按融合分。不给 ``query_vector`` 时行为与结果
+    **逐字节不变**（trace 不多一个键）；给了向量但查询为空仍返回空 —— 向量不能替空轮
+    偷偷注入记忆。
     """
     cap = max(0, int(cap))
     if max_cards is not None and len(candidates) > max_cards:
@@ -570,6 +592,22 @@ def select_context(
         stopwords=stopwords, min_coverage=min_coverage, strong_evidence=strong_evidence,
         strong_evidence_terms=strong_evidence_terms, coverage_pool_floor=coverage_pool_floor,
         k1=K1, b=B, max_cards=max_cards, max_text_bytes=max_text_bytes)
+
+    hybrid = query_vector is not None
+    if hybrid:
+        ordered, score_of, extra_of, hybrid_trace, leftovers = _fuse_lanes(
+            query, pool, passed, rejected, query_vector=query_vector,
+            card_vectors=card_vectors or {}, min_cosine=min_cosine, vector_model=vector_model,
+            card_vector_models=card_vector_models, vector_weight=vector_weight,
+            lexical_weight=lexical_weight, rrf_k=rrf_k)
+        reason = "hybrid_rrf"
+    else:
+        ordered = passed
+        score_of = {}
+        extra_of = {}
+        hybrid_trace = {}
+        leftovers = None
+        reason = "bm25_match"
 
     chosen: list[tuple[_Row, str]] = []
     seen: set[str] = set()
@@ -588,53 +626,155 @@ def select_context(
     for name, quota in quotas:
         name, quota = str(name), max(0, int(quota))
         if name == "recent":
-            rows = sorted(passed, key=lambda r: (timestamps.sort_key(r.card.get("created_at")),
-                                                 _neg_id(r.hit.id)), reverse=True)
+            rows = sorted(ordered, key=lambda r: (timestamps.sort_key(r.card.get("created_at")),
+                                                  _neg_id(r.hit.id)), reverse=True)
         else:
-            rows = sorted((r for r in passed if name in (r.card.get("roles") or [])),
+            rows = sorted((r for r in ordered if name in (r.card.get("roles") or [])),
                           key=lambda r: (timestamps.sort_key(r.card.get("occurred_at")),
                                          _neg_id(r.hit.id)), reverse=True)
         take(rows, quota, _BUCKET_LABELS.get(name, name))
-    take(passed, cap, "query")
+    take(ordered, cap, "query")
     # 配额决定**谁有座位**，座位上的顺序按分数（和 rank 同序）。旧实现按段排
     # （转折 → 最近 → 相关），最相关的卡可能排在第 6 位；评测里 MRR 0.70 → 0.89，
     # 选中的集合不变。
-    position = {row.hit.id: index for index, row in enumerate(passed)}
+    position = {row.hit.id: index for index, row in enumerate(ordered)}
     chosen.sort(key=lambda pair: position[pair[0].hit.id])
 
     selected = []
     trace_selected = []
     for row, bucket in chosen:
+        # Lexical candidates may contain multiple versions of an ID. Report
+        # the selected row's evidence, not another version's score.
+        score = score_of[row.hit.id] if hybrid else row.hit.score
         out = dict(row.card)
         out["selection"] = {
-            "score": row.hit.score, "coverage": row.hit.coverage, "bucket": bucket,
-            "reason": "bm25_match", "matched_units": list(row.hit.matched)[:8],
-            "version": version,
+            "score": score, "coverage": row.hit.coverage, "bucket": bucket,
+            "reason": reason, "matched_units": list(row.hit.matched)[:8],
+            "version": version, **extra_of.get(row.hit.id, {}),
         }
         selected.append(out)
-        trace_selected.append({"id": row.hit.id, "bucket": bucket, "score": round(row.hit.score, 4),
-                               "coverage": row.hit.coverage, "reason": "bm25_match",
-                               "selected": True})
+        trace_selected.append({"id": row.hit.id, "bucket": bucket,
+                               "score": round(score, 4),
+                               "coverage": row.hit.coverage, "reason": reason,
+                               "selected": True, **extra_of.get(row.hit.id, {})})
 
-    leftovers = [(r, "over_cap") for r in passed if r.hit.id not in seen]
-    leftovers += [(r, r.reason) for r in rejected]
-    leftovers.sort(key=lambda pair: (-pair[0].hit.score, pair[0].hit.id))
+    if leftovers is None:
+        leftovers = [(r, "over_cap") for r in passed if r.hit.id not in seen]
+        leftovers += [(r, r.reason) for r in rejected]
+        leftovers.sort(key=lambda pair: (-pair[0].hit.score, pair[0].hit.id))
+    else:
+        leftovers = [(r, why) for r, why in leftovers if r.hit.id not in seen]
     trace = {
         **rank_trace,
-        "mode": "bm25",
+        "mode": "hybrid" if hybrid else "bm25",
         "cap": cap,
         "quotas": [[str(n), int(q)] for n, q in quotas],
         "index_count": len(pool),
-        "eligible": len(passed),
+        "eligible": len(ordered),
+        **hybrid_trace,
         "selected": trace_selected,
         "rejected_sample": [
-            {"id": r.hit.id, "bucket": "rejected", "score": round(r.hit.score, 4),
-             "coverage": r.hit.coverage, "reason": reason, "selected": False}
-            for r, reason in leftovers[:8]
+            {"id": r.hit.id, "bucket": "rejected",
+             "score": round(score_of.get(r.hit.id, r.hit.score), 4),
+             "coverage": r.hit.coverage, "reason": why, "selected": False}
+            for r, why in leftovers[:8]
         ],
     }
     return selected, trace
 
+
+def _fuse_lanes(query, pool, passed, rejected, *, query_vector, card_vectors, min_cosine,
+                vector_model, card_vector_models, vector_weight, lexical_weight, rrf_k):
+    """向量通道 + 词法通道 → 加权 RRF。返回
+    （融合顺序的行、id→融合分、id→额外字段、trace 片段、落选样本）。
+
+    词法通道的输入就是 ``_evaluate`` 过闸后的 ``passed``（同一把尺子）；只被闸挡下的
+    卡若靠向量进来，保留它的 BM25 分和命中词，不重打分。
+    """
+    from .scoring import hybrid as _hybrid  # 纯计算模块；放函数内避免导入环
+
+    if min_cosine is None or not math.isfinite(min_cosine) or not -1 <= min_cosine <= 1:
+        raise ValueError("min_cosine is required with query_vector and must be within [-1, 1]")
+    for name, w in (("vector_weight", vector_weight), ("lexical_weight", lexical_weight)):
+        if not math.isfinite(w) or w < 0:
+            raise ValueError(f"{name} must be finite and >= 0")
+    if (vector_model is None) != (card_vector_models is None):
+        raise _hybrid.VectorContractError(
+            "vector_model and card_vector_models must be provided together")
+
+    by_id = {str(c["id"]): c for c in pool}
+    lex_row = {row.hit.id: row for row in passed}
+    gated_row = {row.hit.id: row for row in rejected}
+    lex_rank = {row.hit.id: i + 1 for i, row in enumerate(passed)}
+
+    vec_score: dict[str, float] = {}
+    vector_lane = "active"
+    if not str(query or "").strip():
+        # 空轮：词法通道本来就空，向量也不许单独把卡塞进来。
+        vector_lane = "skipped"
+    else:
+        qv = _hybrid._as_float_vector(query_vector, what="query_vector")
+        for cid in by_id:
+            raw = card_vectors.get(cid)
+            if raw is None:
+                continue
+            if vector_model is not None and card_vector_models is not None:
+                cm = card_vector_models.get(cid)
+                if cm != vector_model:
+                    raise _hybrid.VectorContractError(
+                        f"card {cid}: vector model {cm!r} != query model {vector_model!r}")
+            vec_score[cid] = _hybrid.cosine(qv, _hybrid._as_float_vector(
+                raw, what=f"card_vectors[{cid}]"))
+    vec_sorted = sorted(
+        (cid for cid, s in vec_score.items() if s >= min_cosine),
+        key=lambda cid: (-vec_score[cid], -_occurred_ts(by_id[cid]), cid))
+    vec_rank = {cid: i + 1 for i, cid in enumerate(vec_sorted)}
+
+    fused = _hybrid.rrf_fuse({"lexical": lex_rank, "vector": vec_rank},
+                             {"lexical": lexical_weight, "vector": vector_weight}, k=rrf_k)
+
+    def row_for(cid: str) -> _Row:
+        if cid in lex_row:
+            return lex_row[cid]
+        if cid in gated_row:
+            return _Row(gated_row[cid].hit, gated_row[cid].card)
+        return _Row(Hit(id=cid, score=0.0), by_id[cid])
+
+    ordered = sorted((row_for(cid) for cid in fused),
+                     key=lambda r: (-fused[r.hit.id], -_occurred_ts(r.card), r.hit.id))
+    extra = {cid: {"bm25": round(row_for(cid).hit.score, 4),
+                   "cosine": (round(vec_score[cid], 4) if cid in vec_score else None),
+                   "lanes": {"lexical": lex_rank.get(cid), "vector": vec_rank.get(cid)}}
+             for cid in fused}
+
+    # 一张卡只有一个终态。两路都拒绝的卡保留词法那一行（带 BM25 分和命中词），
+    # 终态写成 ``<词法原因>+below_cosine``；不许同一 id 在样本里出现两次。
+    left: dict[str, tuple[_Row, str]] = {r.hit.id: (r, "over_cap") for r in ordered}
+    for r in rejected:
+        if r.hit.id not in fused:
+            left[r.hit.id] = (r, r.reason)
+    for cid in vec_score:
+        if cid in vec_rank or cid in fused:
+            continue
+        if cid in left:
+            row, why = left[cid]
+            left[cid] = (row, f"{why}+below_cosine")
+        else:
+            left[cid] = (_Row(Hit(id=cid, score=0.0), by_id[cid]), "below_cosine")
+    leftovers = sorted(left.values(),
+                       key=lambda pair: (-fused.get(pair[0].hit.id, 0.0), -pair[0].hit.score,
+                                         pair[0].hit.id))
+    trace = {
+        "vector_lane": vector_lane,
+        "hybrid": {
+            "rrf_k": rrf_k, "vector_weight": vector_weight, "lexical_weight": lexical_weight,
+            "min_cosine": min_cosine, "vector_model": vector_model,
+            "with_vector": len(vec_score), "vector_eligible": len(vec_rank),
+            "lexical_eligible": len(passed), "fused": len(fused),
+            "vector_only": sum(1 for cid in fused if cid not in lex_rank),
+        },
+    }
+    return ordered, fused, extra, trace, leftovers
 
 def _neg_id(card_id: str) -> tuple[int, ...]:
     """倒序排序里让 id **升序**的键 —— 并列时和 :func:`rank` 同一个方向。"""

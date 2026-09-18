@@ -74,6 +74,27 @@ def test_same_ruler_as_rank_when_quotas_do_not_bind():
         assert [c["selection"]["score"] for c in picked] == [h.score for h in ranked.hits]
 
 
+@pytest.mark.parametrize("quotas, expected_index", [((), 0), ((("recent", 1),), 1)])
+def test_duplicate_id_keeps_the_selected_rows_own_bm25_score(quotas, expected_index):
+    # Hosts merging candidate sources can supply two versions of one ID. Keep
+    # the existing selection/deduplication behavior, but never mix their scores.
+    versions = [
+        {"id": "same", "summary": "coffee", "created_at": "2026-01-01"},
+        {"id": "same", "summary": "coffee " + "noise " * 100,
+         "created_at": "2026-09-01"},
+    ]
+    garden = versions + [{"id": f"n{i}", "summary": "noise"} for i in range(20)]
+    scores = [hit.score for hit in rank("coffee", garden).hits]
+    assert len(scores) == 2 and scores[0] > scores[1]
+
+    picked, trace = select_context("coffee", garden, cap=1, quotas=quotas)
+
+    assert len(picked) == 1
+    assert picked[0]["summary"] == versions[expected_index]["summary"]
+    assert picked[0]["selection"]["score"] == scores[expected_index]
+    assert trace["selected"][0]["score"] == round(scores[expected_index], 4)
+
+
 def test_quotas_decide_seats_and_output_is_ordered_by_score():
     """cap 小于合格卡数时，配额决定谁有座位；座位上的顺序按分数。"""
     garden = _garden() + [

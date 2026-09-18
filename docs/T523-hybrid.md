@@ -1,3 +1,5 @@
+> **2026-09-19 更新**：io 的自动想起已经切到 `retrieval.select_context`（BM25），本文描述的 `scoring.hybrid` 入口的词法一侧是旧打分器。向量通道现已并进 `select_context` 本身（同一把 BM25 尺子 + RRF），新接入用它；本文的向量契约（维度/NaN/模型标签/`min_cosine` 无默认）不变。
+
 # T523 batch 2a: opt-in hybrid (dense + lexical) context selection
 
 Implementation/design note retained for provenance; hybrid shipped in v0.20.0. See [Retrieval](RETRIEVAL.md) for the current integration contract and [Status](STATUS.md) for evidence. Host rollout is separate from package publication.
