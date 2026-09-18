@@ -11,7 +11,7 @@ Garden 提供排序、选卡算法和策略接口；宿主决定怎样把它接�
 | 入口 | 行为 | 如何接入 |
 |---|---|---|
 | `retrieval.rank` | 按相关性排序；无命中返回空；可设 `limit` 与资源上限（`max_cards` / `max_text_bytes`，超出抛 `SearchLimitExceeded`）；没有 `id` 的卡不参与 | 主动搜索、宿主自己的索引页；传入已授权候选 |
-| `retrieval.select_context` | 自动想起：每张都先过门槛；转折≤3、最近≤2 软配额决定座位，空位按分数补；输出按分数排，默认总数 8 | 低层函数，或包成 SelectionPolicy（见第 3 节） |
+| `retrieval.select_context` | 自动想起：每张都先过门槛；转折≤3、最近≤2 软配额决定座位，空位按分数补；输出按分数排，默认总数 8；可选向量通道（见第 4 节） | 低层函数，或包成 SelectionPolicy（见第 3 节） |
 | `selection.Chain` + `RelevanceStage` | 可组合；`RelevanceStage` 默认 `scorer="bm25"`（即 `rank`），`RecentStage`/`RoleStage` 不看查询。`strong_min` / `medium_min` / `excluded_reasons` / `any_score` 只属于 `scorer="legacy"`，和 bm25 一起给会在构造时抛 `ValueError` | 传给 `MountedGarden(selection_policy=...)` |
 | `scoring.relevance`（deprecated） | 旧短语/稀有词打分，保留一个版本给未切换的宿主回滚；`RelevanceStage(scorer="legacy")` 同理 | 不要在新接入里使用 |
 | `select_hybrid_context_memories_with_trace` | 向量与词法分别过门槛，再用加权 RRF 融合；词法一侧仍是旧打分 | 显式传入宿主向量及参数；不在默认策略中启用 |
@@ -87,7 +87,7 @@ uv run python examples/retrieval_runtime.py
 
 各向量必须维度相同、分量有限且范数非零。启用向量计算时，若使用版本校验，`vector_model` / `card_vector_models` 必须成对提供，每张实际参与计算的向量都必须有匹配标签；不接受“缺标签当匹配”。不提供版本校验时，维度相同不等于模型相同，宿主自行保证来源一致。
 
-Hybrid 的词法一侧目前仍是旧打分：默认门槛为0.35且至少 medium 证据；向量使用宿主的余弦门槛。通过任意一侧即可成为候选，每侧只给自己合格的卡排名。融合使用 `w_v/(k+r_v) + w_l/(k+r_l)`；缺席一侧贡献0，权重0禁用该侧。默认 k=20、权重2:1是算法初始值，**不是在你的数据上验证过的最佳参数**。
+**入口选 `retrieval.select_context`**：给它 `query_vector` / `card_vectors` / `min_cosine`（可选成对的 `vector_model` / `card_vector_models`），词法一侧就是它自己的 BM25 尺子（同一次打分、同一道闸、同一个版本号），向量一侧用宿主的余弦门槛；不给 `query_vector` 时结果与 trace 逐字节不变。`scoring.hybrid.select_hybrid_context_memories_with_trace` 保留给还在用旧打分（0.35 门槛 + medium 证据）的宿主，新接入不要用它——两条词法尺子会在同一个花园里打架。通过任意一侧即可成为候选，每侧只给自己合格的卡排名；被 BM25 闸挡下但靠向量进来的卡保留自己的 BM25 分和命中词。融合使用 `w_v/(k+r_v) + w_l/(k+r_l)`；缺席一侧贡献0，权重0禁用该侧。默认 k=20、权重2:1是算法初始值，**不是在你的数据上验证过的最佳参数**。
 
 融合 shortlist 默认20张（至少覆盖 cap），软配额在其中分配席位，最终按融合顺序返回。没有向量的卡只参加词法通道；没有查询向量时明确降级为词法。空查询返回空，不用向量暗中注入记忆。
 
