@@ -10,7 +10,6 @@ import json
 
 from memgarden import CaptureRequest, MountedGarden, Scope
 from memgarden.retrieval import select_context
-from memgarden.scoring.hybrid import select_hybrid_context_memories_with_trace
 from memgarden.selection import Pick, SelectionResult
 from memgarden.stores.memory import InMemoryStore
 
@@ -66,14 +65,15 @@ def main():
 
     # Pure synthetic vector illustration, not a calibrated production threshold.
     cards = [{"id": "c1", "summary": "A long walk in the park", "content": "Fresh air helps."}]
-    chosen, trace = select_hybrid_context_memories_with_trace(
-        cards, "outdoor exercise", query_vector=[1.0, 0.0],
+    chosen, trace = select_context(
+        "outdoor exercise", cards, query_vector=[1.0, 0.0],
         card_vectors={"c1": [1.0, 0.0]}, min_cosine=0.9,
         vector_model="synthetic-demo", card_vector_models={"c1": "synthetic-demo"},
-        reference_time="2026-09-10T00:00:00Z",
     )
     assert [card["id"] for card in chosen] == ["c1"]
     assert trace["vector_lane"] == "active"
+    assert chosen[0]["selection"]["reason"] == "hybrid_rrf"
+    assert chosen[0]["selection"]["lanes"] == {"lexical": None, "vector": 1}
     print("Relevant policy: cues + role projection + owner isolation: PASS")
     print("Hybrid: synthetic vector contract + fusion: PASS (not a quality benchmark)")
 

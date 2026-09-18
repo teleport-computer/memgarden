@@ -144,6 +144,39 @@ def test_zero_vector_weight_reduces_to_the_lexical_set():
     assert hybrid == plain
 
 
+@pytest.mark.parametrize("count", [19, 20, 21])
+def test_hybrid_role_quota_uses_all_eligible_cards_not_a_top_twenty_shortlist(count):
+    cards = [{"id": f"c{i:02d}", "summary": "unrelated",
+              "occurred_at": "2026-01-01"} for i in range(count)]
+    cards[-1]["roles"] = ["turning_point"]
+    vectors = {card["id"]: [1.0, i / count] for i, card in enumerate(cards)}
+    kwargs = dict(cap=1, query_vector=QV, card_vectors=vectors, min_cosine=0.5)
+
+    top, _ = select_context("coffee", cards, quotas=(), **kwargs)
+    selected, _ = select_context("coffee", cards, quotas=(("turning_point", 1),), **kwargs)
+
+    assert top[0]["id"] == "c00"
+    assert selected[0]["id"] == cards[-1]["id"]
+    assert selected[0]["selection"]["lanes"] == {"lexical": None, "vector": count}
+    assert selected[0]["selection"]["bucket"] == "turning"
+
+
+@pytest.mark.parametrize("newer_date", ["2000-01-02", "2099-01-01"])
+def test_hybrid_recent_is_relative_order_not_a_wall_clock_window(newer_date):
+    cards = [
+        {"id": "strong", "summary": "unrelated", "created_at": "2000-01-01"},
+        {"id": "newer", "summary": "unrelated", "created_at": newer_date},
+    ]
+    kwargs = dict(cap=1, query_vector=QV,
+                  card_vectors={"strong": [1.0, 0.0], "newer": [1.0, 0.5]}, min_cosine=0.5)
+    top, _ = select_context("coffee", cards, quotas=(), **kwargs)
+    selected, _ = select_context("coffee", cards, quotas=(("recent", 1),), **kwargs)
+
+    assert top[0]["id"] == "strong"
+    assert selected[0]["id"] == "newer"
+    assert selected[0]["selection"]["bucket"] == "recent"
+
+
 def test_model_labels_must_match_when_given():
     ok, _ = _hybrid(vector_model="e5-small+p1",
                     card_vector_models={cid: "e5-small+p1" for cid in VECTORS})

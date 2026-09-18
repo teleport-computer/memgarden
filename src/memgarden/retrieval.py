@@ -603,7 +603,7 @@ def select_context(
         reason = "hybrid_rrf"
     else:
         ordered = passed
-        score_of = {row.hit.id: row.hit.score for row in passed}
+        score_of = {}
         extra_of = {}
         hybrid_trace = {}
         leftovers = None
@@ -643,15 +643,18 @@ def select_context(
     selected = []
     trace_selected = []
     for row, bucket in chosen:
+        # Lexical candidates may contain multiple versions of an ID. Report
+        # the selected row's evidence, not another version's score.
+        score = score_of[row.hit.id] if hybrid else row.hit.score
         out = dict(row.card)
         out["selection"] = {
-            "score": score_of[row.hit.id], "coverage": row.hit.coverage, "bucket": bucket,
+            "score": score, "coverage": row.hit.coverage, "bucket": bucket,
             "reason": reason, "matched_units": list(row.hit.matched)[:8],
             "version": version, **extra_of.get(row.hit.id, {}),
         }
         selected.append(out)
         trace_selected.append({"id": row.hit.id, "bucket": bucket,
-                               "score": round(score_of[row.hit.id], 4),
+                               "score": round(score, 4),
                                "coverage": row.hit.coverage, "reason": reason,
                                "selected": True, **extra_of.get(row.hit.id, {})})
 
