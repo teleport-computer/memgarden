@@ -178,3 +178,22 @@ def test_trace_is_json_encodable_and_content_free():
     for card in _garden():
         assert card["summary"] not in encoded
     assert all(math.isfinite(c["selection"]["score"]) for c in selected)
+
+
+def test_card_rejected_by_both_lanes_has_one_terminal_state_with_bm25_evidence():
+    # codex 复现（PR #8 review）：一张卡被 BM25 闸挡下、又低于 min_cosine —— 以前
+    # rejected_sample 里同一 id 出现两种终态，还挤掉别的卡。
+    garden = [{"id": "gated", "summary": "coffee", "content": "", "occurred_at": "2026-01-01",
+               "created_at": "2026-01-01"}]
+    garden += [{"id": f"n{i:02d}", "summary": "noise", "content": "", "occurred_at": "2026-01-01",
+                "created_at": "2026-01-01"} for i in range(20)]
+    selected, trace = select_context(
+        "coffee tea plant train", garden, min_coverage=0.9, strong_evidence=100,
+        query_vector=[1.0, 0.0], card_vectors={"gated": [0.0, 1.0]}, min_cosine=0.5)
+    assert selected == []
+    entries = [r for r in trace["rejected_sample"] if r["id"] == "gated"]
+    assert len(entries) == 1
+    assert entries[0]["reason"] == "below_gate+below_cosine"
+    assert entries[0]["score"] > 0.0  # 词法证据保留
+    ids = [r["id"] for r in trace["rejected_sample"]]
+    assert len(ids) == len(set(ids))

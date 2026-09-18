@@ -744,13 +744,23 @@ def _fuse_lanes(query, pool, passed, rejected, *, query_vector, card_vectors, mi
                    "lanes": {"lexical": lex_rank.get(cid), "vector": vec_rank.get(cid)}}
              for cid in fused}
 
-    leftovers = [(r, "over_cap") for r in ordered]
-    leftovers += [(r, "below_cosine") for r in
-                  (_Row(Hit(id=cid, score=0.0), by_id[cid]) for cid in vec_score
-                   if cid not in vec_rank and cid not in fused)]
-    leftovers += [(r, r.reason) for r in rejected if r.hit.id not in fused]
-    leftovers.sort(key=lambda pair: (-fused.get(pair[0].hit.id, 0.0), -pair[0].hit.score,
-                                     pair[0].hit.id))
+    # 一张卡只有一个终态。两路都拒绝的卡保留词法那一行（带 BM25 分和命中词），
+    # 终态写成 ``<词法原因>+below_cosine``；不许同一 id 在样本里出现两次。
+    left: dict[str, tuple[_Row, str]] = {r.hit.id: (r, "over_cap") for r in ordered}
+    for r in rejected:
+        if r.hit.id not in fused:
+            left[r.hit.id] = (r, r.reason)
+    for cid in vec_score:
+        if cid in vec_rank or cid in fused:
+            continue
+        if cid in left:
+            row, why = left[cid]
+            left[cid] = (row, f"{why}+below_cosine")
+        else:
+            left[cid] = (_Row(Hit(id=cid, score=0.0), by_id[cid]), "below_cosine")
+    leftovers = sorted(left.values(),
+                       key=lambda pair: (-fused.get(pair[0].hit.id, 0.0), -pair[0].hit.score,
+                                         pair[0].hit.id))
     trace = {
         "vector_lane": vector_lane,
         "hybrid": {
