@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+## 0.22.0 — 2026-09-19
+
 - `retrieval.select_context` accepts optional host-supplied vectors and an explicit calibrated `min_cosine`: gated BM25 and cosine ranks are combined using weighted RRF. No query vector keeps the lexical path unchanged; active search and default SDK/JSON Lines/DSH policies do not automatically enable embeddings. No new runtime dependency or vector storage is included.
 - Hybrid selection keeps the existing all-eligible-candidate soft quotas and relative timestamp ordering. The guide and runnable example now use this BM25-based entry point, and distinguish it from the legacy hybrid function's shortlist and reference-time window.
 - Preserve the selected row's BM25 score when duplicate candidate IDs are supplied, including in trace output; do not replace it with another version's score. Regression coverage includes quota-selected and rank-selected versions.

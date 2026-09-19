@@ -7,7 +7,7 @@
 0.21.0 已发布（main 基线 `989f67b`），不再是尚未推送的 release/next 草稿。
 0.21.1 是在该基线上的完整性修复，不改变默认检索算法、不增加外部运行依赖。
 
-当前未发布变更（PR #8）：`retrieval.select_context` 可显式接收宿主向量，融合 BM25 与余弦排名；不替宿主生成或保存向量，不改变主动搜索或默认 SDK / JSON Lines / DSH 策略。保留原有全体合格候选软配额和相对时间排序，不新增时间窗口或前20张 shortlist。新旧入口差异见 [Retrieval](RETRIEVAL.md)。本次不自动发版或升级宿主依赖。
+0.22.0 收录已合入的 PR #8：`retrieval.select_context` 可显式接收宿主向量，融合 BM25 与余弦排名；不替宿主生成或保存向量，不改变主动搜索或默认 SDK / JSON Lines / DSH 策略。保留原有全体合格候选软配额和相对时间排序，不新增时间窗口或前20张 shortlist。新旧入口差异见 [Retrieval](RETRIEVAL.md)。发版不自动升级宿主依赖，最终发布结果以 release workflow、GitHub Release 和 PyPI 为准。
 
 | 能力 | 当前实现与边界 |
 |---|---|
