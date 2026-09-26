@@ -7,7 +7,7 @@
 
 两段式把一次导入拆成两类调用：
 
-    抽候选   每批只抽「值得长期记住的事实」+ 一句原话证据，输出很短
+    抽候选   每批抽有依据的事实或具体经历 + 一句原话证据，输出很短
     写卡     所有批都抽完之后，把候选分组交给写卡提示词：去重、归桶、写厚正文
 
 这是宿主 io 的 genesis 导入一直在跑的形状（fact_map → fact_write）。它的好处是
@@ -68,7 +68,7 @@ _CANDIDATES_PROMPT_TEMPLATE = """{framing}
 {filter}
 
 [Rules]
-· One candidate = one durable fact. Do not bundle unrelated facts into one line.
+· One candidate = one supported fact or concrete event, including a one-time experience. Do not bundle unrelated facts into one line.
 · summary: the fact in one plain line.
 · evidence: a SHORT verbatim quote from the material that supports it (copy, do not paraphrase).
 · about: "person" for a fact about this person; "relationship" for a fact about the two of you.

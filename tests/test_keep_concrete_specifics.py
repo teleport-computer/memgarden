@@ -13,6 +13,7 @@ import pytest
 from memgarden import policies
 from memgarden.prompts.capture import build_capture_prompt
 from memgarden.prompts import dream as dream_prompts
+from memgarden.prompts.history_import import build_import_candidates_prompt
 
 GOLDEN = pathlib.Path(__file__).parent / "golden"
 
@@ -68,7 +69,21 @@ def test_history_import_rubrics_keep_one_off_specifics():
         assert "DO keep the concrete specifics" in golden and "one-off events" not in golden
 
 
-def test_curated_archive_rubric_is_untouched():
+@pytest.mark.parametrize("policy", ["history_import", "curated_archive"])
+def test_rendered_candidates_accept_supported_one_off_events(policy):
+    prompt = build_import_candidates_prompt(
+        window="Mina bought a yellow dress on May 2.", locale="en", policy=policy)
+    assert "One candidate = one supported fact or concrete event" in prompt
+    assert "one durable fact" not in prompt
+    if policy == "curated_archive":
+        # Curated's keep-all filter is unchanged, but its shared opening/rules
+        # also change. Test the rendered prompt rather than one constant.
+        assert policies.HISTORY_IMPORT_OPENING_RUBRIC in prompt
+        assert policies.KEEP_ALL_MAP_SUFFIX in prompt
+        assert policies.HISTORY_IMPORT_FILTER_RUBRIC not in prompt
+
+
+def test_curated_archive_keep_all_filter_is_untouched():
     assert "Preserve EVERY candidate fact" in policies.KEEP_ALL_MAP_SUFFIX
     assert "DO keep the concrete specifics" not in policies.KEEP_ALL_MAP_SUFFIX
 

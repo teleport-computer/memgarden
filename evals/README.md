@@ -63,6 +63,27 @@ python evals/run.py --with-model    # 全部；缺少模型凭据时退出失败
 所以 ② 会把「误杀真卡」单独标红。同理，① 对召回率下降容忍两个百分点的抖动，
 但**违反禁忌一次都不容忍**。
 
+## 具体细节保留：Capture / Dream 小型真实模型对照
+
+`specifics.py` 使用7条合成材料（中英 Capture、纯闲聊、未采纳的助手建议、价格更正、Dream 合并/厚化）。不读取用户数据或宿主数据库，不修改记忆库。复用 `capture.py` 的模型调用，temperature=0、每次请求180秒超时、无自动重试；`--repeat` 为1–3，最多21次调用/条件。模型 ID 必须显式提供，凭据只从相应环境变量读取。
+
+用**同一个新评测脚本和同一份语料**测试两个源码版本，避免把语料变化当作效果改善：
+
+```bash
+git worktree add --detach ../memgarden-specifics-baseline v0.22.0
+# 在安全环境配置 OPENROUTER_API_KEY，MODEL_ID 使用账号实际可用的模型 ID。
+uv run python evals/specifics.py --provider openrouter --model "$MODEL_ID" \
+  --source-root ../memgarden-specifics-baseline --repeat 2 > specifics-before.json
+uv run python evals/specifics.py --provider openrouter --model "$MODEL_ID" \
+  --source-root . --repeat 2 > specifics-after.json
+```
+
+也支持 `--provider deepseek` / `openai`，分别读取 `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`。缺凭据直接非零退出，不给绿色 SKIP。请求失败、解析失败、张数不符、缺少具体值、Dream 未执行指定合并/厚化或目标不符也返回非零。失败案例保留在结果里，不从分母剔除；报告记录源码 SHA、dirty 状态、模型、语料/提示词哈希与模型生成的合成卡片。
+
+这是一组回归探针，**关键词检查通过不等于事实正确**。结果固定标记 `manual_review_required=true`：逐条核对说话人、购买与建议、时间先后、否定和更正（例如27元是更正后的价格，72元不能仍作为当前价格）、来源之外的新增事实。合法同义表达可能导致漏词判负，人工核查后记录原因，不为了变绿静默放宽断言。Dream 的 prompt 保留指令不是确定性的防丢保证。
+
+合并验收应同时记录 before/after 原始结果、全部失败、逐条人工结论和未覆盖项；不要只报总通过率，也不要用导入 A/B 代替 Capture/Dream 的证据。7条合成案例不证明跨模型或线上质量。普通离线测试只验证评测判据会抓到丢值、错目标、错误空结果，不调用模型。结果状态见 [STATUS](../docs/STATUS.md)。
+
 ## 宿主要多跑一层
 
 ③ 测的是**算法**（给定这些桶，结论该是什么）。

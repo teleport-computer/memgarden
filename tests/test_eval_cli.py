@@ -11,6 +11,7 @@ import pytest
     (["evals/capture.py"], 0, "SKIP:"),
     (["evals/capture.py", "--require-key"], 1, "ERROR:"),
     (["evals/run.py", "--with-model"], 1, "未通过"),
+    (["evals/specifics.py", "--provider", "deepseek", "--model", "synthetic-unused"], 1, "ERROR:"),
 ])
 def test_missing_model_key_has_truthful_exit_status(args, exit_code, marker):
     environment = {**os.environ, "DEEPSEEK_API_KEY": ""}
