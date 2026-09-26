@@ -32,8 +32,10 @@ VPS resident 那条线还有一个「记忆收口二次检查」（``genesis/pro
 调用）。查过之后确认**它不需要第四个档位**：
 
     它的过滤规则   闲聊、临时情绪、玩笑、未确认猜测、一次性无长期价值的内容不补
-    history_import 闲聊/临时情绪/玩笑/未确认猜测/一次性事件不抽
-                   ↑ 同一把尺子
+    history_import 客套/临时情绪/玩笑/未确认猜测/AI 自己说的不抽；本人生活里的具体事
+                   （买了/看了/去了什么、名字数字日期）即使只发生一次也要记（T744）
+                   ↑ T744 之后两把尺子在「一次性具体事」上不再一致：recheck 那句仍会把
+                     这类细节当「无长期价值」不补 —— 宿主侧 recheck 提示词需要跟着改。
 
 recheck 的独特之处不在「什么值得记」，而在**它是个补漏动作**：第二遍扫，输入里
 额外带上一轮已写的记忆，只补遗漏、不重写。那属于调用方的编排（多喂一份
@@ -68,24 +70,27 @@ What you want is what will shape your understanding of the person in front of yo
 Leanings (not hard rules — you judge):
 · Prefer events — something with causes and consequences, a scene, or a glimpse of how this person is doing
   ("that day he was in meetings all day, his heart rate spiked, I pushed him to rest, he got annoyed, and we argued").
-· An isolated data point ("had a latte today") usually does not deserve its own card — unless it is a preference this person
-  clearly cares about or that keeps recurring ("I only drink oat milk", "he always orders Blue Bottle"), in which case it is
-  worth keeping as a preference.
+· An isolated data point ("had a latte today") usually does not deserve its own card — fold it into the card it belongs to
+  instead of dropping it. If it is a preference this person clearly cares about or that keeps recurring ("I only drink oat milk",
+  "he always orders Blue Bottle"), it is worth keeping as a preference.
 · The test is: "will this still matter in three months? does it change how I understand this person? would this person want me
   to remember it?" — not "is it big enough".
 
 Restraint:
-· Fewer, not more. If only one or two things from this stretch survive, which one or two? Force yourself to generalize instead of
-  splitting every point of a single conversation into its own card.
+· Fewer, not more — fewer cards, not fewer facts. If only one or two things from this stretch survive, which one or two? Force
+  yourself to generalize instead of splitting every point of a single conversation into its own card.
+· Generalizing must not erase the specifics: keep the concrete details this person mentioned (what, who, where, when, how many,
+  how long; names, titles, numbers, dates) inside the card they belong to.
 · One "meetings + high heart rate + argument" is ONE thick card (one thing), not three thin ones.
 · If nothing is worth remembering, write nothing. Most small talk does not need a card, and that is normal."""
 
 #: history_import 保留 opening/filter 两段，便于提示词在各自语义位置插入。
 HISTORY_IMPORT_OPENING_RUBRIC = """You are reading ONE CHUNK of a real conversation history between this person and their companion.
-Extract candidate FACTS worth keeping long term: durable facts about this person and about their relationship.
+Extract candidate FACTS about this person and about their relationship: the durable ones, and the concrete specifics of what they did or experienced.
 This is the candidate stage — turning them into cards and deduplicating happens later."""
 
-HISTORY_IMPORT_FILTER_RUBRIC = """Do not extract small talk, passing moods, jokes, unconfirmed guesses, or one-off events."""
+HISTORY_IMPORT_FILTER_RUBRIC = """Do not extract pure pleasantries or filler, passing moods, jokes, unconfirmed guesses, or what the companion itself said or suggested.
+DO keep the concrete specifics of this person's own life even when they happened only once: what they bought, made, watched, read, visited or attended; who was involved; names, titles, numbers, amounts, durations, dates and places. Keep the specific value itself (the item, the title, the number), not only the general trait it suggests."""
 
 #: 单段式（直接写卡）用的开场。
 #:
@@ -95,7 +100,7 @@ HISTORY_IMPORT_FILTER_RUBRIC = """Do not extract small talk, passing moods, joke
 #: 那段，于是模型被告知「先抽候选、别管去重」，下面的模板却要它输出带 action /
 #: target_id 的完整卡。自相矛盾的指令不报错，只会让去重变差。
 HISTORY_IMPORT_CARD_OPENING_RUBRIC = """You are reading ONE STRETCH of material from this person's past.
-Take in the durable facts worth keeping long term — about this person and about your relationship — and write them as cards now.
+Take in the facts worth keeping — about this person and about your relationship, the durable ones and the concrete specifics of what they did or experienced — and write them as cards now.
 Check the existing memory index below first: something already remembered should be merged into its card, not written again."""
 
 _RUBRIC_HISTORY_IMPORT = HISTORY_IMPORT_CARD_OPENING_RUBRIC + "\n" + HISTORY_IMPORT_FILTER_RUBRIC
