@@ -2,7 +2,7 @@
 
 发布记录以 Git tag、GitHub Release 和 PyPI 为准；这里按版本记录对接入方可见的变化。
 
-## Unreleased
+## 0.23.0 — 2026-09-28
 
 - Capture and history-import prompts now preserve a person's concrete details, including supported one-time experiences, rather than generalizing away names, items, amounts, dates and places. Dream merge/thicken prompts explicitly ask to retain source values; this is model guidance, not a deterministic no-loss guarantee.
 - The two-pass candidate rule now accepts a supported fact or concrete event, resolving the remaining durable-only instruction. `curated_archive` keeps its existing keep-all filter, but its shared two-pass opening and candidate rule also change; its full prompt is not byte-identical.
