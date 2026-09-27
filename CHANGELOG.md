@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Capture and history-import prompts now preserve a person's concrete details, including supported one-time experiences, rather than generalizing away names, items, amounts, dates and places. Dream merge/thicken prompts explicitly ask to retain source values; this is model guidance, not a deterministic no-loss guarantee.
+- The two-pass candidate rule now accepts a supported fact or concrete event, resolving the remaining durable-only instruction. `curated_archive` keeps its existing keep-all filter, but its shared two-pass opening and candidate rule also change; its full prompt is not byte-identical.
+- Add a credential-required synthetic Capture/Dream real-model A/B runner and offline tests of its failure detection. Paired synthetic evidence and limitations are recorded in `evals/evidence/pr10-specifics/README.md`; default Capture card limits, storage and public APIs are unchanged.
+- Explicitly prohibit inventing missing years (including in retrieval cues) or unstated motives in Capture. A real-model probe caught an invented year; the evaluator now checks that regression. This guidance is not a factuality guarantee: qualified motive speculation persists in both baseline and revised outputs.
+
 ## 0.22.0 — 2026-09-19
 
 - `retrieval.select_context` accepts optional host-supplied vectors and an explicit calibrated `min_cosine`: gated BM25 and cosine ranks are combined using weighted RRF. No query vector keeps the lexical path unchanged; active search and default SDK/JSON Lines/DSH policies do not automatically enable embeddings. No new runtime dependency or vector storage is included.

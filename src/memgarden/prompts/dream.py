@@ -56,6 +56,7 @@ In the raw conversation that has piled up, look only for these high-value things
    The test is not just textual similarity: "wants to see the autumn leaves in Kyoto" and "already booked the Kyoto flights" are the same plan progressing, and should merge; whereas "keeps up the cycling" and "not sleeping well lately" are two separate things even though both are health. Merely sharing a bucket — life, health, work — does not make two things the same thing. Every proposal must carry a rationale spelling out the continuity.
 2. thicken: fold scattered small mentions into the card they belong to, making it more complete.
    For old cards without retrieval_cues, a thicken proposal may keep the full factual body intact and add 3-5 grounded search hints: keywords, actual aliases, answerable questions, and known event time (never the consolidation date). Do not invent missing dates or facts. State this metadata repair in the rationale; preserve every source fact.
+   Whenever you merge or thicken, keep every concrete value from the source cards — names, titles, items, numbers, amounts, durations, dates and places. A merged card must never be vaguer than the cards it replaces.
 3. supersede: when things contradict, let the new one replace the old (mark the old card superseded, do NOT delete it).
    When you are unsure, do not decide on your own — write it into questions_to_ask and raise it with this person at a suitable moment.
 
