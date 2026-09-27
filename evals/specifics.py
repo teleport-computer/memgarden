@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -40,9 +41,17 @@ def judge(case: dict, cards: list[dict], error: str | None) -> dict:
     missing = [group for group in case["required"]
                if not any(term.casefold() in folded for term in group)]
     lo, hi = case["count"]
+    # A narrow synthetic-corpus guard, not a general factuality classifier.
+    # Include cues: the first live probe invented 2025 only in retrieval_cues.
+    year_pattern = r"(?<!\d)(?:19|20)\d{2}(?!\d)"
+    source = case.get("window", "") + json.dumps(case.get("cards", []), ensure_ascii=False)
+    generated = json.dumps(cards, ensure_ascii=False)
+    invented_years = sorted(set(re.findall(year_pattern, generated)) -
+                            set(re.findall(year_pattern, source)))
     checks = {"parsed": error is None, "count": lo <= len(cards) <= hi,
-              "concrete_values": not missing}
-    return {"checks": checks, "missing": missing, "parse_error": error}
+              "concrete_values": not missing, "grounded_years": not invented_years}
+    return {"checks": checks, "missing": missing, "parse_error": error,
+            "invented_years": invented_years}
 
 
 def build_prompt(case: dict) -> str:
@@ -85,9 +94,16 @@ def main() -> int:
     ap.add_argument("--source-root", type=Path, default=ROOT,
                     help="Repository tree whose prompts/parsers to test; corpus always comes from this runner")
     ap.add_argument("--repeat", type=int, choices=(1, 2, 3), default=1)
+    ap.add_argument("--case", action="append", dest="case_ids",
+                    help="Explicit supplemental case ID; preserve original failed report separately")
     ap.add_argument("--max-output-tokens", type=int, default=4096)
     ap.add_argument("--openrouter-provider", help="Pin routing, disable fallback/reasoning; cap USD/M input=2 output=5")
     args = ap.parse_args()
+    cases = [json.loads(line) for line in CORPUS.read_text().splitlines() if line.strip()]
+    if args.case_ids:
+        if set(args.case_ids) - {c["id"] for c in cases}:
+            ap.error("unknown --case ID")
+        cases = [c for c in cases if c["id"] in args.case_ids]
     if not 1 <= args.max_output_tokens <= 4096:
         ap.error("--max-output-tokens must be 1..4096 for this small probe")
     if args.openrouter_provider and args.provider != "openrouter":
@@ -111,7 +127,6 @@ def main() -> int:
                                   text=True, timeout=10).strip()
     dirty = bool(subprocess.check_output(
         ["git", "-C", str(source), "status", "--porcelain"], text=True, timeout=10).strip())
-    cases = [json.loads(line) for line in CORPUS.read_text().splitlines() if line.strip()]
     results = []
     for repeat in range(args.repeat):
         for case in cases:

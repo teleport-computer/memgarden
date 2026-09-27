@@ -34,7 +34,9 @@ CAPTURE_EDITS = [
      '''· Fewer, not more — fewer cards, not fewer facts. If only one or two things from this stretch survive, which one or two? Force
   yourself to generalize instead of splitting every point of a single conversation into its own card.
 · Generalizing must not erase the specifics: keep the concrete details this person mentioned (what, who, where, when, how many,
-  how long; names, titles, numbers, dates) inside the card they belong to.'''),
+  how long; names, titles, numbers, dates) inside the card they belong to.
+  Keep partial dates partial: never supply a missing year, including in retrieval_cues. Do not infer unstated motives or reasons
+  to make the card thicker; preserve what was actually said and leave unknown details unknown.'''),
 ]
 
 

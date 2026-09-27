@@ -23,3 +23,11 @@ def test_missing_model_key_has_truthful_exit_status(args, exit_code, marker):
     assert result.returncode == exit_code, result.stdout + result.stderr
     assert marker in result.stdout
     assert "✅ 全部通过" not in result.stdout
+
+
+def test_specifics_rejects_unknown_case_instead_of_running_zero_requests():
+    result = subprocess.run(
+        [sys.executable, "evals/specifics.py", "--provider", "openrouter", "--model", "unused",
+         "--case", "typo"], cwd=Path(__file__).resolve().parents[1],
+        text=True, capture_output=True, timeout=20)
+    assert result.returncode == 2 and "unknown --case ID" in result.stderr

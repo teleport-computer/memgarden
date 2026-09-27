@@ -38,6 +38,17 @@ def test_nonempty_smalltalk_or_unaccepted_suggestion_fails():
         assert not result["checks"]["count"]
 
 
+def test_year_invented_only_in_retrieval_cues_fails():
+    case = cases()["capture-book-zh"]
+    card = {"summary": "买书", "content": case["window"],
+            "retrieval_cues": ["2025年9月12日"]}
+    result = judge(case, [card], None)
+    assert result["invented_years"] == ["2025"]
+    assert not result["checks"]["grounded_years"]
+    card["retrieval_cues"] = ["9月12日"]
+    assert judge(case, [card], None)["checks"]["grounded_years"]
+
+
 def test_dream_probe_catches_lost_value_wrong_target_and_noop():
     case = cases()["dream-merge-en"]
     content = " ".join(c["content"] for c in case["cards"])

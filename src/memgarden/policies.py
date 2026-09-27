@@ -81,6 +81,8 @@ Restraint:
   yourself to generalize instead of splitting every point of a single conversation into its own card.
 · Generalizing must not erase the specifics: keep the concrete details this person mentioned (what, who, where, when, how many,
   how long; names, titles, numbers, dates) inside the card they belong to.
+  Keep partial dates partial: never supply a missing year, including in retrieval_cues. Do not infer unstated motives or reasons
+  to make the card thicker; preserve what was actually said and leave unknown details unknown.
 · One "meetings + high heart rate + argument" is ONE thick card (one thing), not three thin ones.
 · If nothing is worth remembering, write nothing. Most small talk does not need a card, and that is normal."""
 
