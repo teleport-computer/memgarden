@@ -13,9 +13,25 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = Path(__file__).parent / "corpus" / "specifics.jsonl"
+
+
+def ask(url: str, key: str, model: str, prompt: str, *, max_tokens: int,
+        route: str | None) -> dict:
+    body = {"model": model, "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0, "max_tokens": max_tokens}
+    if route:
+        body["provider"] = {"only": [route], "allow_fallbacks": False,
+                            "require_parameters": True,
+                            "max_price": {"prompt": 2, "completion": 5}}
+        body["reasoning"] = {"enabled": False}
+    req = urllib.request.Request(url, data=json.dumps(body).encode(), headers={
+        "Content-Type": "application/json", "Authorization": f"Bearer {key}"})
+    with urllib.request.urlopen(req, timeout=180) as response:
+        return json.load(response)
 
 
 def judge(case: dict, cards: list[dict], error: str | None) -> dict:
@@ -69,7 +85,13 @@ def main() -> int:
     ap.add_argument("--source-root", type=Path, default=ROOT,
                     help="Repository tree whose prompts/parsers to test; corpus always comes from this runner")
     ap.add_argument("--repeat", type=int, choices=(1, 2, 3), default=1)
+    ap.add_argument("--max-output-tokens", type=int, default=4096)
+    ap.add_argument("--openrouter-provider", help="Pin routing, disable fallback/reasoning; cap USD/M input=2 output=5")
     args = ap.parse_args()
+    if not 1 <= args.max_output_tokens <= 4096:
+        ap.error("--max-output-tokens must be 1..4096 for this small probe")
+    if args.openrouter_provider and args.provider != "openrouter":
+        ap.error("--openrouter-provider requires --provider openrouter")
     source = args.source_root.resolve()
     if not (source / "src" / "memgarden").is_dir():
         ap.error("--source-root must contain src/memgarden")
@@ -78,7 +100,7 @@ def main() -> int:
     from memgarden.prompts import capture, dream  # noqa: F401
 
     sys.path.insert(0, str(ROOT))
-    from evals.capture import _ENDPOINTS, _ask
+    from evals.capture import _ENDPOINTS
 
     url, env = _ENDPOINTS[args.provider]
     key = os.environ.get(env, "")
@@ -97,8 +119,14 @@ def main() -> int:
             result = {"id": case["id"], "repeat": repeat + 1,
                       "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest()}
             try:
-                reply = _ask(url, key, args.model, prompt)
+                response = ask(url, key, args.model, prompt,
+                               max_tokens=args.max_output_tokens, route=args.openrouter_provider)
+                choice = response["choices"][0]
+                reply = choice["message"]["content"]
+                result.update(usage=response.get("usage"), model=response.get("model"),
+                              provider=response.get("provider"), finish_reason=choice.get("finish_reason"))
                 result.update(evaluate(case, reply))
+                result["checks"]["complete"] = choice.get("finish_reason") == "stop"
             except Exception as exc:
                 # Do not print response bodies, headers or credentials on failure.
                 result.update(checks={"request": False}, error_type=type(exc).__name__)
@@ -108,6 +136,9 @@ def main() -> int:
     failed = sum(not all(r["checks"].values()) for r in results)
     print(json.dumps({"provider": args.provider, "model": args.model, "temperature": 0,
                       "source_sha": sha, "source_dirty": dirty,
+                      "max_output_tokens": args.max_output_tokens,
+                      "openrouter_provider": args.openrouter_provider,
+                      "reasoning_enabled": False if args.openrouter_provider else "provider default",
                       "corpus_sha256": hashlib.sha256(CORPUS.read_bytes()).hexdigest(),
                       "failed": failed, "manual_review_required": True, "results": results},
                      ensure_ascii=False, indent=2))

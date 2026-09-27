@@ -65,7 +65,9 @@ python evals/run.py --with-model    # 全部；缺少模型凭据时退出失败
 
 ## 具体细节保留：Capture / Dream 小型真实模型对照
 
-`specifics.py` 使用7条合成材料（中英 Capture、纯闲聊、未采纳的助手建议、价格更正、Dream 合并/厚化）。不读取用户数据或宿主数据库，不修改记忆库。复用 `capture.py` 的模型调用，temperature=0、每次请求180秒超时、无自动重试；`--repeat` 为1–3，最多21次调用/条件。模型 ID 必须显式提供，凭据只从相应环境变量读取。
+`specifics.py` 使用7条合成材料（中英 Capture、纯闲聊、未采纳的助手建议、价格更正、Dream 合并/厚化）。不读取用户数据或宿主数据库，不修改记忆库。沿用 `capture.py` 的服务地址，temperature=0、每次请求180秒超时、无自动重试；`--repeat` 为1–3，最多21次调用/条件。模型 ID 必须显式提供，凭据只从相应环境变量读取。
+
+本小型探针默认并最多允许4096个输出 tokens（`--max-output-tokens` 可降低）；截断回复不能通过验收。OpenRouter 可用 `--openrouter-provider deepseek` 固定提供商、禁用 fallback 和 reasoning，并限制路由单价不高于输入 $2/M、输出 $5/M；参数由 OpenRouter provider routing 合同约束，不是产品存储限制。before/after 必须使用相同设置。响应中的实际 model/provider/usage/cost 和 finish_reason 写入报告；缺少 usage 时不能把费用当成0。
 
 用**同一个新评测脚本和同一份语料**测试两个源码版本，避免把语料变化当作效果改善：
 

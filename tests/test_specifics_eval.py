@@ -1,7 +1,24 @@
 """Test the eval's failure detection, not the model's memory quality."""
+import io
 import json
 
-from evals.specifics import CORPUS, build_prompt, evaluate, judge
+from evals.specifics import CORPUS, ask, build_prompt, evaluate, judge
+
+
+def test_openrouter_probe_bounds_output_and_records_usage(monkeypatch):
+    def respond(request, *, timeout):
+        body = json.loads(request.data)
+        assert timeout == 180 and body["max_tokens"] == 4096
+        assert body["provider"]["only"] == ["deepseek"]
+        assert body["provider"]["allow_fallbacks"] is False
+        assert body["provider"]["max_price"] == {"prompt": 2, "completion": 5}
+        assert body["reasoning"] == {"enabled": False}
+        return io.BytesIO(b'{"usage":{"cost":0.001},"choices":[]}')
+
+    monkeypatch.setattr("urllib.request.urlopen", respond)
+    response = ask("https://openrouter.ai/api/v1/chat/completions", "synthetic", "model", "prompt",
+                   max_tokens=4096, route="deepseek")
+    assert response["usage"]["cost"] == 0.001
 
 
 def cases():
