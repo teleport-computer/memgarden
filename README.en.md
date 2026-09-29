@@ -10,11 +10,19 @@ Bring your model, trusted user identity, and storage. Garden supplies Capture, r
 
 Python ≥ 3.10 · Zero third-party runtime dependencies · Apache-2.0 · Python SDK / JSON Lines / bundled DSH Adapter
 
+## Current release and readiness
+
+**0.23.0** provides an independently usable Capture → storage → recall → Dream workflow, not just interface definitions. This release asks models to preserve concrete names, items, amounts and dates. It does not guarantee lossless extraction or factual accuracy.
+
+**The working source includes unreleased closure fixes.** Snapshot consistency, request-level Capture replay, explicit re-saving, full-card reading and incremental Dream have been added. The published 0.23.0 wheel does not include them. Still Beta; see [validation and remaining limits](docs/STATUS.md).
+
 ## What makes it different
 
 A transcript records what was said. Garden maintains what may be useful to remember.
 
 If someone says “spicy food hurts my stomach” and later adds “a little spice is fine now,” remembering well means retaining the reason, distinguishing updates from contradictions, and recalling the relevant detail at dinner. Garden provides that workflow; model judgment still needs evaluation on your data.
+
+Likewise, “bought Nora a yellow dress for $48 on May 2” should not become only “buys family gifts.” Card bodies preserve concrete experiences; broader interpretations must not replace those details. **Storing detail and delivering it to the Agent are separate steps**: recall starts with summaries, then `memory_read` retrieves full details by ID without injecting the entire garden.
 
 | Design | What it enables |
 |---|---|
@@ -23,7 +31,7 @@ If someone says “spicy food hurts my stomach” and later adds “a little spi
 | Automatic capture separate from tools | Invoke Capture after a turn without waiting for the Agent to choose `memory_write`; tools remain available |
 | Evolving memories | Merge, thicken, or supersede cards; retain supersession history while keeping user deletion distinct from archival |
 | Replaceable retrieval policy | Compose stages, opt into relevance-gated soft quotas, or supply vectors for hybrid retrieval |
-| Explicit persistence semantics | Scoped ownership, idempotency, revision checks, atomic card/maintenance-ledger commits, and honest failure receipts |
+| Explicit persistence semantics | Scoped ownership, idempotency, revision checks and atomic card/maintenance-ledger commits; see current status for the repair and validation scope |
 
 This is not a vector database, transcript backup, full Agent runtime, or universal facade over other memory products. Replacing storage does not replace Garden's own memory-editing behavior.
 
@@ -71,7 +79,13 @@ for block in context.blocks:
 # Pass these blocks to your Agent as memory context before its next reply.
 ```
 
-Expected output: `Avoids spicy food`. Default context blocks contain summaries, not the full card body. The body remains in storage; fetch it within the same authorized scope when more detail is needed. Reopening the database preserves cards, and replaying the same business request does not duplicate the write. Stores maintain `created_at` and `updated_at`; `occurred_at` is the separately sourced event time.
+Expected output: `Avoids spicy food`. Reopening the database preserves cards, and replaying this fixed-response example does not duplicate the write. The working source checks committed original-request receipts before calling the model again; changed input with the same key still conflicts. This example does not establish crash recovery for every external host. Stores maintain `created_at` and `updated_at`; `occurred_at` is the separately sourced event time.
+
+### Summary recall is not a full-card read
+
+`context_for_turn` returns summaries and IDs; `search` returns IDs and scores; `memory_search` exposes summaries with IDs. Use `memory_read(record_id, cursor?)` for details, or SDK `read_record` / wire `records.get`. Chunks contain serialized JSON; concatenate `text` and follow `next_cursor` until empty. Default: 5000 Unicode characters per chunk, configurable to 1–20000 in SDK/wire. Edits invalidate the cursor; restart the read. Authorization and active lifecycle filtering apply.
+
+Explicit history remains available through scoped, paginated `export`. The bundled DSH Adapter registers `memory_read` from the service's tool list. All tool output is untrusted memory data, not instructions.
 
 ## Connect your runtime
 
@@ -115,6 +129,7 @@ uv run python examples/retrieval_runtime.py
 
 - Plaintext throughout; no encryption/decryption or key management. Databases, outboxes, and some retrieval traces contain private data.
 - SQLite currently reads owner-level collections; response pagination is not database pagination or a cross-request export snapshot.
+- Dream examines at most 60 cards per pass by default, combining pending cards with related older cards. Versioned progress survives restarts; the host must schedule subsequent passes to finish the backlog. Insufficient budgets return an explicit error rather than marking unseen cards reviewed.
 - Card deletion does not cascade to host transcripts, backups, vector caches, or other derived cards. The host coordinates those layers.
 - The default model-less DSH service supports host-driven Capture/Maintenance, but no History Import/Migrate management lane. Runtime `manifest.get` reports actual capabilities.
 - Do not share a DSH outbox directory between concurrent processes; it is not a complete transcript backup.

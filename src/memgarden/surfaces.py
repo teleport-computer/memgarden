@@ -51,9 +51,10 @@ CAPABILITIES: tuple[str, ...] = (
     "capture",          # 对话后判断什么值得记并写入
     "turn_context",     # 每轮自动想起
     "search",           # 主动搜索：只返回真实命中
+    "record_read",      # 按 ID 分段读取完整卡片
     "related",          # 取回卡时的一跳关联
     "maintenance",      # 整理（Dream）
-    "model_tools",      # 给对话模型的 memory_search / memory_write
+    "model_tools",      # 给对话模型的 memory_search / memory_read / memory_write
     "curated_write",    # 用户明说要记
     "browse",
     "export",
@@ -72,6 +73,7 @@ SDK_BACKING: dict[str, tuple[tuple[str, ...], ...]] = {
                 ("prepare_capture", "store_capture_result")),
     "turn_context": (("context_for_turn",),),
     "search": (("search",),),
+    "record_read": (("read_record",),),
     "related": (("related",),),
     "maintenance": (("check_maintenance", "run_and_store_maintenance"),
                     ("check_maintenance", "prepare_maintenance",

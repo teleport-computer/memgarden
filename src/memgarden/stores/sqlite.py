@@ -43,7 +43,7 @@ from ..storage import (
 
 #: schema 版本。**加字段/加表就要 +1**,并在 _migrate 里补上对应的升级动作 ——
 #: 只改 _SCHEMA 里的 CREATE TABLE IF NOT EXISTS 对旧库一点作用都没有。
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 #: 这个 store 自己分配的 id 形状。宿主塞进来的 id 不长这样,也不该被计数器管。
 _NUMERIC_ID = re.compile(r"m_(\d+)")
@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS applied (
     key      TEXT NOT NULL,
     result   TEXT NOT NULL,
     digest   TEXT,
+    request_digest TEXT,
     PRIMARY KEY (tenant, owner, key)
 );
 -- 只增不减的 id 计数器。**不要**改回「数 cards 的行数」——
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS maintenance_state (
     revision        TEXT NOT NULL DEFAULT '',
     updated_at      TEXT NOT NULL DEFAULT '',
     schema_version  INTEGER NOT NULL DEFAULT 1,
+    reviewed_versions TEXT NOT NULL DEFAULT '{}',
     PRIMARY KEY (tenant, owner, mount)
 );
 -- 原始 seed 的只增水位。hard delete 只删卡和正文，不让计数回退；否则删除
@@ -170,6 +172,11 @@ class SqliteStore:
     def _migrate_steps(self, conn: sqlite3.Connection) -> None:
         """实际的升级动作。由 :meth:`_migrate` 包在事务里调用。"""
 
+        ledger_cols = {r[1] for r in conn.execute("PRAGMA table_info(maintenance_state)")}
+        if "reviewed_versions" not in ledger_cols:
+            conn.execute("ALTER TABLE maintenance_state ADD COLUMN reviewed_versions "
+                         "TEXT NOT NULL DEFAULT '{}'")
+
         # ① 补 applied.digest。旧行的 digest 留 NULL —— 幂等检查会把 NULL
         #    当作「没记过摘要」，退回到「同键即命中」的旧行为,而不是误报冲突。
         cols = {r[1] for r in conn.execute("PRAGMA table_info(applied)")}
@@ -238,6 +245,10 @@ class SqliteStore:
                 f"INSERT INTO {table}__v2 ({cols_new}) SELECT {select} FROM {table}")
             conn.execute(f"DROP TABLE {table}")
             conn.execute(f"ALTER TABLE {table}__v2 RENAME TO {table}")
+
+        applied_cols = {r[1] for r in conn.execute("PRAGMA table_info(applied)")}
+        if "request_digest" not in applied_cols:
+            conn.execute("ALTER TABLE applied ADD COLUMN request_digest TEXT")
 
         # ③ 给每个已有卡片、但还没有计数行的 (tenant, owner) 播种计数器。
         #    从**已有 id 的最大编号**往后接,而不是从 1 开始。
@@ -322,6 +333,9 @@ class SqliteStore:
     def load(self, tenant: str, *, owner: str, **filters) -> Snapshot:
         tenant, owner = _scope(tenant, owner)
         with self._lock, self._connect() as conn:
+            # Cards, generations and CAS revision must describe one snapshot,
+            # including when another Store instance writes through a second connection.
+            conn.execute("BEGIN")
             cards = list(self._cards_of(conn, tenant, owner).values())
             if not filters.get("include_archived"):
                 cards = [c for c in cards if not c.get("archived")]
@@ -347,7 +361,7 @@ class SqliteStore:
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 "SELECT signature, seed_card_count, revision, updated_at, "
-                "schema_version FROM maintenance_state "
+                "schema_version, reviewed_versions FROM maintenance_state "
                 "WHERE tenant=? AND owner=? AND mount=?",
                 (tenant, owner, mount),
             ).fetchone()
@@ -355,9 +369,24 @@ class SqliteStore:
             return {}
         return {"signature": row[0], "seed_card_count": int(row[1]),
                 "revision": row[2], "updated_at": row[3],
-                "schema_version": int(row[4]), "mount": mount}
+                "schema_version": int(row[4]), "mount": mount,
+                "reviewed_versions": json.loads(row[5])}
 
     # -- 写 -------------------------------------------------------------- #
+
+    def request_receipt(self, tenant: str, *, owner: str, idempotency_key: str,
+                        request_digest: str) -> ApplyResult | None:
+        tenant, owner = _scope(tenant, owner)
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT result, request_digest FROM applied "
+                               "WHERE tenant=? AND owner=? AND key=?",
+                               (tenant, owner, idempotency_key)).fetchone()
+        if row is None:
+            return None
+        if row[1] != request_digest:
+            raise IdempotencyConflict(idempotency_key)
+        payload = json.loads(row[0])
+        return ApplyResult(results=payload["results"], revision=payload["revision"])
 
     def apply(
         self,
@@ -368,6 +397,7 @@ class SqliteStore:
         idempotency_key: str,
         expected_revision: str | None = None,
         maintenance_state: dict | None = None,
+        request_digest: str | None = None,
     ) -> ApplyResult:
         tenant, owner = _scope(tenant, owner)
         with self._lock, self._connect() as conn:
@@ -377,12 +407,13 @@ class SqliteStore:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 cached = conn.execute(
-                    "SELECT result, digest FROM applied "
+                    "SELECT result, digest, request_digest FROM applied "
                     "WHERE tenant=? AND owner=? AND key=?",
                     (tenant, owner, idempotency_key),
                 ).fetchone()
                 if cached:
-                    if cached[1] and cached[1] != digest:
+                    from ..capture_identity import same_request
+                    if not same_request(cached[2], request_digest, cached[1], digest):
                         raise IdempotencyConflict(idempotency_key)
                     payload = json.loads(cached[0])
                     conn.execute("COMMIT")
@@ -435,15 +466,17 @@ class SqliteStore:
                         (tenant, owner, int(new_rev)),
                     )
                 conn.execute(
-                    "INSERT INTO applied(tenant, owner, key, result, digest) "
-                    "VALUES(?,?,?,?,?)",
+                    "INSERT INTO applied(tenant, owner, key, result, digest, request_digest) "
+                    "VALUES(?,?,?,?,?,?)",
                     (tenant, owner, idempotency_key,
                      json.dumps({"results": results, "revision": new_rev},
                                 ensure_ascii=False),
-                     digest),
+                     digest, request_digest),
                 )
                 # 🔴 账本和卡改动同一个事务。见 maintenance_state 表上的注释。
                 if maintenance_state is not None:
+                    from ..maintenance_progress import committed_progress
+                    maintenance_state = committed_progress(maintenance_state, mutations, results, staged)
                     self._put_ledger(conn, tenant, owner, maintenance_state, new_rev)
                 conn.execute("COMMIT")
             except Exception:
@@ -467,20 +500,21 @@ class SqliteStore:
 
         conn.execute(
             "INSERT INTO maintenance_state(tenant, owner, mount, signature, "
-            "seed_card_count, revision, updated_at, schema_version) "
-            "VALUES(?,?,?,?,?,?,?,?) "
+            "seed_card_count, revision, updated_at, schema_version, reviewed_versions) "
+            "VALUES(?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(tenant, owner, mount) DO UPDATE SET "
             "signature=excluded.signature, "
             "seed_card_count=excluded.seed_card_count, "
             "revision=excluded.revision, updated_at=excluded.updated_at, "
-            "schema_version=excluded.schema_version",
+            "schema_version=excluded.schema_version, reviewed_versions=excluded.reviewed_versions",
             (tenant, owner, str(state.get("mount") or "agent-private"),
              str(state.get("signature") or ""),
              int(state.get("seed_card_count") or 0),
              revision,
              str(state.get("updated_at")
                  or datetime.now(timezone.utc).isoformat(timespec="seconds")),
-             int(state.get("schema_version") or 1)),
+             int(state.get("schema_version") or 1),
+             json.dumps(state.get("reviewed_versions", {}), sort_keys=True)),
         )
 
     def _put(self, conn: sqlite3.Connection, tenant: str, owner: str,

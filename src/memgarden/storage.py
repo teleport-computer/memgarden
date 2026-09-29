@@ -119,6 +119,11 @@ class Capabilities:
     hard delete 会把水位倒退，后续新卡可能被静默漏掉，因此只能关闭整理能力。
     """
 
+    supports_incremental_maintenance: bool = False
+    """Persists reviewed_versions and stamps Dream outputs atomically with mutations."""
+    supports_request_receipts: bool = False
+    """Looks up original-request receipts and commits them atomically with Capture."""
+
 
 #: 全部支持 —— 官方参考实现和大多数关系库适配器都能达到这一档。
 FULL_CAPABILITIES = Capabilities(
@@ -130,6 +135,8 @@ FULL_CAPABILITIES = Capabilities(
     supports_owner_scoping=True,
     supports_maintenance_state=True,
     supports_monotonic_seed_generation=True,
+    supports_incremental_maintenance=True,
+    supports_request_receipts=True,
 )
 
 #: 缺了就必须拒绝对应操作的能力（不是「降级后继续」）。
@@ -137,6 +144,8 @@ CORRECTNESS_CRITICAL = frozenset({
     "supports_supersede", "supports_atomic_batch",
     "supports_hard_delete", "supports_owner_scoping",
     "supports_maintenance_state", "supports_monotonic_seed_generation",
+    "supports_incremental_maintenance",
+    "supports_request_receipts",
 })
 
 
@@ -363,6 +372,12 @@ _CRITICAL_REASONS: dict[str, str] = {
     "supports_monotonic_seed_generation": (
         "缺少只增不减的原始卡水位，hard delete 后会静默漏掉后续新增卡"
     ),
+    "supports_incremental_maintenance": (
+        "缺少逐卡内容版本与整理产物的原子进度登记，会漏处理或自触发"
+    ),
+    "supports_request_receipts": (
+        "缺少原始请求回执，模型输出变化会破坏Capture重放语义"
+    ),
 }
 
 
@@ -442,6 +457,12 @@ _USER_FACING_CRITICAL: dict[str, str] = {
     ),
     "supports_monotonic_seed_generation": (
         "这个记忆库不能可靠区分新增记忆与已删除记忆，因此后台记忆整理会被关闭"
+    ),
+    "supports_incremental_maintenance": (
+        "这个记忆库不能可靠保存逐卡整理进度，因此增量整理会被关闭"
+    ),
+    "supports_request_receipts": (
+        "这个记忆库没有原始请求回执，因此不能安全重放标准Capture请求"
     ),
 }
 
@@ -564,6 +585,15 @@ class StoragePort(Protocol):
         """
         ...
 
+    def request_receipt(self, tenant: str, *, owner: str, idempotency_key: str,
+                        request_digest: str) -> ApplyResult | None:
+        """Return the committed original-request outcome, or conflict on reuse.
+
+        Required only when supports_request_receipts is true. Store only hashes,
+        IDs and revision, never raw input or card bodies in durable receipts.
+        """
+        ...
+
     def apply(
         self,
         tenant: str,
@@ -573,6 +603,7 @@ class StoragePort(Protocol):
         idempotency_key: str,
         expected_revision: Any,
         maintenance_state: dict | None = None,
+        request_digest: str | None = None,
     ) -> ApplyResult:
         """把一批 mutation 作为一个原子单位写入。
 
@@ -581,6 +612,11 @@ class StoragePort(Protocol):
         纯新增（不依赖旧快照）可以传 ``None``。
 
         ``idempotency_key`` 保证同一批重放不产生第二份。
+
+        When request_digest is supplied, identity is the original Capture request,
+        not nondeterministic generated mutations. Look it up inside the same write
+        transaction before CAS; matching input returns the original receipt.
+        Without it, retain the strict mutation + maintenance-state digest check.
 
         卡片写入时间由存储维护，不由模型猜测：新增时补齐缺失的
         ``created_at`` / ``updated_at``；实际修改（含归档、取代、提升）更新

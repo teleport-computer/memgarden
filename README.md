@@ -10,11 +10,19 @@ Memory Garden（Python 包名 `memgarden`）是可嵌入 Agent Runtime 的记忆
 
 Python ≥ 3.10 · 运行包零第三方依赖 · Apache-2.0 · 支持 Python SDK / JSON Lines / DeepSeek Harness Adapter
 
+## 当前版本与适用范围
+
+当前发布为 **0.23.0**：已有可独立接入的 Capture → 存储 → 召回 → Dream 工作流，不再是只有接口定义的拆分草稿。0.23.0 进一步要求模型保留具体经历中的名字、物品、金额和日期；这不是无损抽取或事实正确性的保证。
+
+**当前源码包含尚未发布的收尾修复。** 已补并发快照、Capture 请求级重放、重新保存、全文读取和增量整理；`pip install memgarden` 的0.23.0不包含这些修改。仍是 Beta，真实宿主和模型联调边界见[当前状态](docs/STATUS.md)。
+
 ## 为什么是 Garden
 
 对话日志记录“说过什么”；Garden 维护“以后值得记住什么”。
 
 例如，一次对话里提到“我不吃辣，因为吃辣会胃疼”，以后又补充“微辣现在可以接受”：系统需要保留原因，辨别补充与矛盾，并在聊晚饭时带回相关记忆，而不是每轮追加一份摘要。Garden 为这条工作流提供以下能力，模型判断的实际质量仍需用你的场景评测。
+
+同样，“5月2日花48美元给 Nora 买了一条黄色连衣裙”不应只剩“会给家人买礼物”。卡片正文用于保留具体经历；概括性的理解不能替代这些细节。**存下细节和把细节交给 Agent 是两步**：默认先召回摘要，再用 `memory_read` 按 ID 读取正文；无需把整座花园塞进上下文。
 
 | 特点 | 对 Agent 的意义 |
 |---|---|
@@ -23,7 +31,7 @@ Python ≥ 3.10 · 运行包零第三方依赖 · Apache-2.0 · 支持 Python SD
 | **自动记忆与主动工具分开** | Runtime 在轮末调用 Capture，不必等模型主动执行 `memory_write`；模型仍可主动搜索或写入 |
 | **记忆会整理，不只会增加** | Maintenance / Dream 可以合并、补充、取代旧卡；旧卡关系可追溯，用户删除与整理归档分开 |
 | **召回策略可换** | 可以组合现有策略、使用有相关性门槛的软配额，或由宿主提供向量做混合检索；不为凑名额强塞无关卡 |
-| **写入有可靠性语义** | 两个内置 Store 支持 owner 隔离、幂等、并发版本检查；整理结果和账本原子提交，失败不会冒充“已经记住” |
+| **写入有明确语义** | 两个内置 Store 提供 owner 隔离、幂等、并发版本检查及卡片/整理账本原子提交；修复与验收范围见状态页 |
 
 Garden 保留自己的记忆判断能力。它不是把其他记忆产品统一成 CRUD 的通用门面，也不是向量数据库、完整 Agent Runtime 或聊天记录备份系统。
 
@@ -83,7 +91,13 @@ for block in context.blocks:
 # Pass these blocks to your Agent as memory context before its next reply.
 ```
 
-你应该看到 `Avoids spicy food` 这条记忆摘要。默认上下文块是摘要，不是整张厚卡；正文仍保存在 Store，需要更多细节时由宿主按返回的 ID 在授权范围内读取。重新打开同一个 SQLite 文件仍可读到卡片；相同业务请求重放不重复写入。`created_at` 和 `updated_at` 由 Store 自动维护，`occurred_at` 单独表示素材中的事情发生时间。
+你应该看到 `Avoids spicy food` 这条记忆摘要。重新打开同一个 SQLite 文件仍可读到卡片；这个固定回复示例可重放而不重复写入。当前源码会按原始请求的稳定身份查询已提交回执，再决定是否调用模型；同一 key 换输入仍报冲突。这不代表任意宿主都已完成崩溃恢复接线。`created_at` 和 `updated_at` 由 Store 自动维护，`occurred_at` 单独表示素材中的事情发生时间。
+
+### 摘要召回不等于全文读取
+
+`context_for_turn` 返回摘要块和 `record_ids`；`search` 返回命中 ID 与分数；`memory_search` 给摘要和 ID。需要细节时调用 `memory_read(record_id, cursor?)`；SDK 为 `read_record`，wire 为 `records.get`。
+
+完整卡片被序列化为 JSON，按 Unicode 字符分段返回；顺序拼接 `text`，续读 `next_cursor` 直到为空。默认每段5000字符，SDK/wire可配置1–20000字符；读取途中卡片修改则要求从头重读。只读当前 Scope 的有效卡，历史记录走显式 export。DSH 随工具列表自动注册 `memory_read`。
 
 从源码运行完整的落卡→召回→工具→整理→重开数据库演示：
 
@@ -126,7 +140,8 @@ SDK、JSON Lines 与 DSH Adapter 接通的能力**并不相同**（例如 DSH Ad
 
 - 全链路明文，不包含加解密或密钥管理。数据库、待办和部分检索 trace 都可能含私密内容。
 - `InMemoryStore` 用于测试；`SqliteStore` 是可直接使用的参考存储，但当前会读取 owner 的卡片集合。响应分页不等于数据库分页或快照导出。
-- 新 relevant / hybrid 策略是主动选择的功能，不会自动替换既有策略。Hybrid 不生成或存储向量。
+- 默认 `RelevanceStage` 和主动搜索使用 BM25；自动上下文仍须显式配置 `selection_policy`。向量混合检索需要宿主主动接线，Garden 不生成或存储向量。
+- Dream 默认每批最多60张卡：待处理卡与相关旧卡共同参与，按内容版本持久化进度。单批完成不代表全库完成；Runtime 后续继续调度，才能覆盖存量。预算不足明确返回错误，不会把未读卡标成已完成。
 - 默认 DSH 服务使用宿主模型，只接通 Capture / Maintenance 的 begin/feed；没有 History Import / Migrate 的管理入口。安装后需检查运行时 `manifest.get`，不能只看静态 CLI 声明。
 - 指定卡删除不自动删除宿主原始材料、备份、向量缓存和其他派生卡。DSH outbox 不应被多进程共用。
 - 真实模型和 DSH 结果绑定具体 commit、模型和宿主版本；“单元测试通过”不代表“所有模型效果已验证”。见[验收状态](docs/STATUS.md)。

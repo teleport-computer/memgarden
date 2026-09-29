@@ -536,13 +536,9 @@ def test_maintenance_begin_passes_the_render_budgets_through():
     capped = _ok(service, "maintenance.begin", scope=ALICE, locale="zh-Hans",
                  cards_limit=3, card_body_chars=10, card_summary_chars=50,
                  cards_budget_chars=100_000)
-    assert capped["status"] == "needs_model"
-    assert "TRUNCATED" in capped["next_prompt"]
-    assert capped["next_prompt"].count("BODY") == 3
-    done = _ok(service, "maintenance.feed", session_id=capped["session_id"],
-               reply=json.dumps({"operations": []}))
-    assert done["status"] == "completed"
-    trace = done["result"]["trace"]
+    assert capped["status"] == "completed"
+    assert capped["result"]["error"] == "maintenance_budget_too_small"
+    trace = capped["result"]["trace"]
     assert trace["cards_rendered"] == 3 and trace["cards_truncated"] == 3
 
 

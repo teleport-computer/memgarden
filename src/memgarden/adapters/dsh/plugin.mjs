@@ -4,7 +4,7 @@
  * 只做三件事，都走 DSH 的正式扩展点，**不改 DSH 任何代码**：
  *   agent/pre-step      每轮自动带上相关记忆
  *   agent/turn-stopping 轮末自动落卡
- *   ctx.tools.register  注册 memory_search / memory_write
+ *   ctx.tools.register  注册 memory_search / memory_read / memory_write
  *
  * 判断全部回到 Python 那边（memgarden serve），这里只翻译和接线。
  */

@@ -452,11 +452,17 @@ class _MaintenancePlan:
                         last_signature=request.last_signature),
             min_new_cards=owner._min_new_cards,
         )
+        if request.pending_ids is not None:
+            from .dreaming import DreamVerdict
+            verdict = DreamVerdict(bool(request.pending_ids),
+                                   "pending_cards" if request.pending_ids else "already_reviewed",
+                                   max(0, snapshot.seed_card_count - request.last_seed_card_count))
         self.verdict = verdict
         if not verdict.needed or request.dry_run:
             self.rejected = MaintenanceResult(
                 needed=verdict.needed,
                 trace={"reason": verdict.reason, "new_cards": verdict.new_cards,
+                       "pending_cards": len(request.pending_ids or ()),
                        "signature": snapshot.signature,
                        "seed_card_count": snapshot.seed_card_count},
             )
@@ -472,6 +478,13 @@ class _MaintenancePlan:
             body_chars=request.card_body_chars,
             total_chars=request.cards_budget_chars,
         )
+        if request.pending_ids is not None:
+            complete = set(self.rendered.rendered_ids) - set(self.rendered.truncated_ids)
+            if not complete.intersection(request.pending_ids):
+                self.rejected = MaintenanceResult(
+                    needed=True, error="maintenance_budget_too_small",
+                    trace={"pending_cards": len(request.pending_ids), **self._render_trace()})
+                return
         # 墓碑卡守卫至少覆盖模型真正见过的卡；宿主另给的 id 一并保留。
         self.known_ids = frozenset(request.known_ids) | frozenset(
             self.rendered.rendered_ids)
@@ -488,6 +501,7 @@ class _MaintenancePlan:
         if r is None:
             return {}
         return {"cards_rendered": len(r.rendered_ids),
+                "reviewed_card_ids": [rid for rid in r.rendered_ids if rid not in r.truncated_ids],
                 "cards_truncated": len(r.truncated_ids),
                 "cards_omitted": r.omitted,
                 "truncated_card_ids": list(r.truncated_ids)}
@@ -1128,12 +1142,20 @@ class GardenComponent:
         return [
             ToolDefinition(
                 name="memory_search",
-                description="Search the user's durable memories by keyword or topic.",
+                description="Search durable memory summaries and IDs. Use memory_read for factual details.",
                 parameters={
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
                     "required": ["query"],
                 },
+            ),
+            ToolDefinition(
+                name="memory_read",
+                description=("Read a memory by record_id from search. Returns JSON fragments; "
+                             "follow next_cursor until empty to retrieve the complete record."),
+                parameters={"type": "object", "properties": {
+                    "record_id": {"type": "string"}, "cursor": {"type": "string"}},
+                    "required": ["record_id"]},
             ),
             ToolDefinition(
                 name="memory_write",
@@ -1171,6 +1193,8 @@ class GardenComponent:
             # 搜索要读库，而库在宿主手里 —— 这个入口没有候选，给不出结果，只能明说。
             # 宿主自己取候选时调 :meth:`search`；接了存储的用 MountedGarden.invoke_tool。
             return ToolResult(ok=False, error="search_requires_host_store")
+        if call.name == "memory_read":
+            return ToolResult(ok=False, error="read_requires_host_store")
         return ToolResult(ok=False, error=f"unknown_tool:{call.name}")
 
     # -- 内部 ------------------------------------------------------------ #

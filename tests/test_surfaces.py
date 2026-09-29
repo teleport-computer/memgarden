@@ -29,6 +29,7 @@ EXPECTED = {
     "capture":        (True, True, True),
     "turn_context":   (True, True, True),
     "search":         (True, True, False),
+    "record_read":    (True, True, False),
     "related":        (True, True, False),
     "maintenance":    (True, True, True),
     "model_tools":    (True, True, True),

@@ -2,6 +2,15 @@
 
 发布记录以 Git tag、GitHub Release 和 PyPI 为准；这里按版本记录对接入方可见的变化。
 
+## Unreleased
+
+- Add scoped full-card reads: SDK `read_record`, JSON Lines `records.get`, and `memory_read`; search tools now expose IDs. Reads return bounded JSON fragments with version-bound cursors, without truncating stored data.
+- Mounted maintenance now tracks reviewed content versions, draining pending cards fairly alongside thread/BM25-related old cards. Persist progress atomically with mutations; Dream output does not trigger itself. Insufficient context budgets fail explicitly. Component-only seed gating stays compatible.
+- Capture checks durable original-request receipts before model invocation, including successful empty decisions. New StoragePort capabilities and SQLite schema 4 support request digests and incremental progress. Legacy receipts cannot retroactively prove original input identity.
+- Tool writes accept a trusted invocation idempotency key; omitted keys mean independent calls. Fix explicit re-saving after deletion, SQLite torn reads, nested mutable aliases, nondefault-mount deletion, mounted Capture relevance/budgets and reference Host pagination.
+- Tighten fact-grounding prompts for Capture and Dream, remove the contradictory instruction assigning speculative insights to Dream. This is guidance, not a deterministic factuality guarantee.
+- Pre-merge review: report the committed empty Capture decision correctly under concurrency; require the preparation revision at prepared SDK commits; exclude deleted/retired/unknown lifecycle rows from Capture/Dream model inputs.
+
 ## 0.23.0 — 2026-09-28
 
 - Capture and history-import prompts now preserve a person's concrete details, including supported one-time experiences, rather than generalizing away names, items, amounts, dates and places. Dream merge/thicken prompts explicitly ask to retain source values; this is model guidance, not a deterministic no-loss guarantee.
