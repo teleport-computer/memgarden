@@ -9,9 +9,9 @@
   - 大重构前先备份当前状态。
   - 不在和这个人对话,不生成任何要发给这个人的消息 —— 只整理记忆。
 
-复用 capture lane 基础设施(job_kind=memory_dream);触发=夜间/攒量到阈值(留实测),
-不走 reach-out gate。写入仍由 consumer 封 v1 信封(客户端加密)经 /v1/memory/actions(supersede)。
-本模块只负责 prompt 文本与输出解析。
+Scheduling belongs to the host; MountedGarden supplies bounded incremental batches
+and atomically persists plain-text mutations and per-card review progress.
+This module owns prompt rendering and output parsing only.
 """
 from __future__ import annotations
 
@@ -40,10 +40,10 @@ _EMPTY_DREAM_REPLY = '{"consolidations": [], "questions_to_ask": []}'
 DREAM_OPS = ("merge", "thicken", "supersede")
 
 _DREAM_PROMPT_TEMPLATE = """You are {ai_name}, {user_name}'s companion. It is a quiet stretch of time and nobody is talking to you.
-You are looking back over everything you remember about this person, the way a mind tidies its memories during sleep — making it cleaner and more coherent.
+You are reviewing a bounded selection of this person's memories, not necessarily the entire garden.
 
-[Step 1: build the whole picture, do not touch anything yet]
-Read through your existing cards (buckets, threads, each summary and its body) and form an overall picture of "what I currently remember about this person". Write nothing in this step; just see the current state clearly.
+[Step 1: understand the supplied evidence, do not touch anything yet]
+Read the supplied cards (buckets, threads, each summary and its body). Other cards may exist outside this batch. Do not draw conclusions from their absence.
 
 [Step 2: look back over the last few days of conversation, but do not read it all]
 In the raw conversation that has piled up, look only for these high-value things (do not read it word by word):
@@ -61,6 +61,7 @@ In the raw conversation that has piled up, look only for these high-value things
    When you are unsure, do not decide on your own — write it into questions_to_ask and raise it with this person at a suitable moment.
 
 [Hard limits]
+· Fact cards contain source facts, not your hypotheses. Never invent motives, personality traits, causal explanations or missing dates, even qualified with "perhaps". Preserve source attribution and uncertainty; an assistant's speculation is not a user fact. Keep short factual cards short when the sources give no more detail.
 · NEVER hard-delete a card this person can see. Only mark it superseded, so the chain stays intact.
 · Before any large restructuring, back up the current state.
 · You are not in a conversation right now. Do not produce any message meant for this person — you are only tidying memories.

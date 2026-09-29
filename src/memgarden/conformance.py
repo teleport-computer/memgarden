@@ -1121,9 +1121,15 @@ class ReferenceHost:
         return None
 
     def _export(self, owner: str, *, include_archived: bool) -> list[dict]:
-        page = self.garden.export(self._scope(owner), include_archived=include_archived,
-                                  limit=self.garden.MAX_PAGE)
-        return [self._view(r) for r in page.records]
+        result, cursor = [], ""
+        while True:
+            page = self.garden.export(
+                self._scope(owner), include_archived=include_archived,
+                limit=self.garden.MAX_PAGE, cursor=cursor)
+            result.extend(self._view(r) for r in page.records)
+            cursor = page.next_cursor
+            if not cursor:
+                return result
 
     def fetch(self, owner, ids, *, include_history=False):
         wanted = set(ids)
@@ -1131,8 +1137,15 @@ class ReferenceHost:
                 if v["id"] in wanted]
 
     def index(self, owner):
-        page = self.garden.browse(self._scope(owner), limit=self.garden.MAX_PAGE)
-        return [{"id": item.record_ref, "summary": item.display_text} for item in page]
+        result, cursor = [], ""
+        while True:
+            page = self.garden.browse(
+                self._scope(owner), limit=self.garden.MAX_PAGE, cursor=cursor)
+            result.extend({"id": item.record_ref, "summary": item.display_text}
+                          for item in page)
+            cursor = page.next_cursor
+            if not cursor:
+                return result
 
     def search(self, owner, query):
         return list(self.garden.search(self._scope(owner), query).record_ids)

@@ -21,8 +21,12 @@ CAPTURE_KW = dict(ai_name="Aster", user_name="Mina", buckets="Pets", threads="Mo
                   window="2024-03-02 Mina: Mochi pushed the cup off the table again",
                   cards="- m_1: [Pets] a cat named Mochi")
 
-#: (v0.22.0 text, new text) for the only two capture passages this change touches.
+#: (v0.22.0 text, new text) for the explicitly reviewed capture passages.
 CAPTURE_EDITS = [
+    ('content: a "thick" body, the way you would hold the whole thing in your own mind — what happened, what led to it and what followed, what it means for this person, the feeling in the moment. Not a one-line title.',
+     'content: preserve the full factual account, including concrete details. Include causes, consequences, feelings and personal meaning ONLY when explicitly stated by this person or directly evidenced in the source. A short factual card is better than an embellished "thick" one. Never add inferred motives, personality traits, causal links or missing dates, even qualified with "perhaps". An assistant\'s speculation is not a user fact; preserve attribution and uncertainty of actual source statements.'),
+    ('never insight/reflection (those belong to dreaming).',
+     'never insight/reflection. Dream also reorganizes facts, not hypotheses; speculative insights require a separate future feature.'),
     ('''· An isolated data point ("had a latte today") usually does not deserve its own card — unless it is a preference this person
   clearly cares about or that keeps recurring ("I only drink oat milk", "he always orders Blue Bottle"), in which case it is
   worth keeping as a preference.''',
@@ -41,7 +45,7 @@ CAPTURE_EDITS = [
 
 
 @pytest.mark.parametrize("locale", ["en", "zh-Hans"])
-def test_capture_prompt_differs_from_v0_22_0_only_in_the_two_restraint_passages(locale):
+def test_capture_prompt_differs_from_v0_22_0_only_in_reviewed_passages(locale):
     """The golden was rendered from the untouched v0.22.0 source."""
     now = build_capture_prompt(**CAPTURE_KW, policy="conversation_capture", locale=locale)
     before = (GOLDEN / f"capture_conversation_v0_22_0_{locale}.txt").read_text()

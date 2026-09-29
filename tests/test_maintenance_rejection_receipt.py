@@ -29,7 +29,7 @@ def test_all_unsafe_proposals_preserve_cards_and_ledger(kind, tmp_path):
     before = garden.maintenance_ledger(scope)
     receipt = garden.run_and_store_maintenance(
         scope, MaintenanceRequest(locale="en", card_body_chars=20))
-    assert receipt.error == "maintenance_targets_rejected"
+    assert receipt.error == "maintenance_budget_too_small"
     assert not receipt.written
     assert garden.maintenance_ledger(scope) == before
     assert len(store.load("t", owner="a").cards) == 15

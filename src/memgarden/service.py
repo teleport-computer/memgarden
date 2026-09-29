@@ -230,6 +230,7 @@ class Service:
             "capture.cancel": self._capture_cancel,
             "context.get": self._context,
             "records.search": self._search,
+            "records.get": self._get_record,
             "records.related": self._related,
             "maintenance.check": self._maintenance_check,
             "maintenance.run": self._maintenance_run,
@@ -284,7 +285,7 @@ class Service:
         storage_capabilities = {
             "capture", "turn_context", "maintenance", "model_tools", "tools",
             "browse", "export", "delete", "curated_write", "promote", "migrate",
-            "history_import", "search", "related", "import_session",
+            "history_import", "search", "related", "import_session", "record_read",
         }
         try:
             store_caps = self.garden._store.capabilities()
@@ -305,10 +306,13 @@ class Service:
             if not getattr(store_caps, "supports_atomic_batch", False):
                 disabled.update({"capture", "maintenance", "migrate",
                                  "history_import", "import_session"})
+            if not getattr(store_caps, "supports_request_receipts", False):
+                disabled.add("capture")
             if not getattr(store_caps, "supports_supersede", False):
                 disabled.update({"capture", "maintenance", "history_import",
                                  "import_session"})
             if (not getattr(store_caps, "supports_maintenance_state", False)
+                    or not getattr(store_caps, "supports_incremental_maintenance", False)
                     or not getattr(
                         store_caps, "supports_monotonic_seed_generation", False)):
                 disabled.add("maintenance")
@@ -404,6 +408,9 @@ class Service:
         # 🔴 和 capture.run 走**同一条** store-aware 准备路径。
         # 分两份写的话，DSH 这条路看不到已有记忆，于是永远只 add ——
         # 表现是「DSH 上记的东西和别处不一样」，而且不报错。
+        replay = self.garden._capture_replay(scope, request)
+        if replay is not None:
+            return {"status": "completed", "result": replay}
         prepared, revision = self.garden.prepare_capture(scope, request)
         session = self.garden.component.capture_session(prepared)
         prompt = session.next_prompt()
@@ -921,11 +928,18 @@ class Service:
             include_archived=bool(p.get("include_archived", True)),
             limit=p.get("limit"), cursor=str(p.get("cursor") or ""))
 
+    def _get_record(self, p: dict) -> Any:
+        from .reading import DEFAULT_READ_CHARS
+        return self.garden.read_record(
+            _scope_from(p), str(p.get("record_id") or ""),
+            cursor=str(p.get("cursor") or ""), limit=p.get("limit", DEFAULT_READ_CHARS))
+
     def _invoke(self, p: dict) -> Any:
         # 🔴 scope 用请求里的可信作用域，工具参数里的 actor/mounts 一概不读。
         return self.garden.invoke_tool(_scope_from(p), ToolCall(
             name=str(p.get("name") or ""),
-            arguments=dict(p.get("arguments") or {})))
+            arguments=dict(p.get("arguments") or {}),
+            idempotency_key=str(p.get("idempotency_key") or "")))
 
     def _require_model(self) -> None:
         if not self._model_available:

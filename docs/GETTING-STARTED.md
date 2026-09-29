@@ -4,6 +4,8 @@
 
 目标是一条可核验的闭环：**读到记忆 → 给 Agent 使用 → 本轮结束后判断是否该记 → 检查写入回执 → 下轮仍能读到**。Garden 不接管你的 Agent 主循环。
 
+版本注意：当前源码含未发布的全文读取、请求回执和增量整理修复，0.23.0发行包没有这些变更。请核对[当前状态](STATUS.md)，不要把固定模型示例当作真实模型恢复验收。
+
 ## 1. 安装与选择入口
 
 需要 Python 3.10 或以上。安装运行包不需要模型 SDK 或向量数据库：
@@ -82,6 +84,18 @@ if receipt.error:
 - 无 error 且 `written=False`：可能是合法的“无需记忆”；检查 `reason`，不要假造卡片。
 
 `idempotency_key` 标识同一份业务输入，例如会话＋turn 的稳定 ID。重试不能生成新 key；同一个 key 也不能拿来写不同材料。原始对话由 Runtime 先持久保存，Garden 的卡片不替代原始材料备份。
+
+当前源码在调用模型前查询已提交的原始请求回执（包括无需落卡的成功结果）。原输入不变会返回原回执，输入改变则冲突。并发的首次调用可能都调到模型，但只允许一次写入。旧0.23.0回执没有原输入指纹，不能自动证明其请求身份：遇到冲突应核对原回执，不能随意换 key 重写。
+
+`ToolCall.idempotency_key` / `tool.invoke.params.idempotency_key` 由可信 Runtime 设置，不能放在模型 arguments 中。原工具调用重试沿用 key，用户新的保存行为使用新 key；不传时视为每次独立调用，不承诺重试去重；相同规则也适用于明确保存等没有提供业务key的写操作。删除不会清除旧请求回执，重放不会复活已删卡。
+
+### 按需读取完整正文
+
+搜索结果含 ID，模型调用 `memory_read(record_id, cursor?)`。SDK 用 `read_record(scope, record_id, cursor=...)`，wire 用 `records.get`。把每段 `text` 依次拼接成 JSON；`next_cursor` 非空就继续读。默认每段5000 Unicode字符，不是5000 token。途中修改会报 `record_changed`，必须从头读；删除、其他 owner/mount 与不存在统一返回 `record_not_found`。只读当前有效卡，历史走 export。
+
+### 增量整理的调度
+
+每次 `maintenance.check` 只判断是否存在待处理内容版本，不调用模型。Runtime 决定什么时候运行、每天预算和失败退避；每次 `run` 或 `begin/feed` 处理一个有界批次。完成后仍有 pending 是正常情况，之后继续调度。不要为了清空队列在单个用户回合内无界循环。`maintenance_budget_too_small` 表示现有预算不能完整审阅待处理卡，应调整预算后重试，不要无限重试同一配置。
 
 ### 维护、明确保存和管理
 

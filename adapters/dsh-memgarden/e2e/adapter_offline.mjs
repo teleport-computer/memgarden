@@ -481,7 +481,7 @@ async function toolsAreRegisteredBeforeApplyReturns() {
   })
   // 不 await、不让出事件循环：DSH 下一步可能就是组装首个请求。
   assert.deepEqual(registered.map((t) => t.name).sort(),
-                   ['memgarden_memory_search', 'memgarden_memory_write'])
+                   ['memgarden_memory_read', 'memgarden_memory_search', 'memgarden_memory_write'])
   const write = registered.find((t) => t.name === 'memgarden_memory_write')
   assert.deepEqual(write.parameters.required, ['summary', 'content'])
   await ctx.hooks.get('dispose')()

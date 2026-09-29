@@ -2,11 +2,14 @@
 
 本文描述当前源码的接入和存储行为。初次接入请先读 [Getting started](GETTING-STARTED.md)，选卡与向量接线见 [Retrieval](RETRIEVAL.md)。完成度与验证基线只在 [STATUS](STATUS.md) 维护；本文不重复阶段性审查记录。
 
+版本边界：本文描述当前未发布源码；0.23.0发行包不包含本轮请求回执、增量整理和全文读取。可靠性修复证据见 [STATUS](STATUS.md)。
+
 ## 1. Runtime 需要接的路径
 
 | 时机 | SDK / wire 入口 | 宿主处理结果 |
 |---|---|---|
 | 对话前召回 | `context_for_turn` / `context.get` | 把 `blocks` 注入本轮上下文，保留 `record_ids` 供追溯 |
+| 按ID读取完整卡 | `read_record` / `records.get`；模型工具 `memory_read` | 序列化 JSON 的有界字符片段；拼接 `text`、续读 `next_cursor`。只读已授权有效卡，版本变化要求从头读 |
 | 主动搜索 | `search` / `records.search` | 只返回真实命中（`record_ids` + `hits` + `ranking`），无命中为空；不经过挑卡策略，不补最近卡 |
 | 取回卡时的关联提示 | `related` / `records.related`（纯函数 `memgarden.related.one_hop`） | 把返回的一跳邻居（id、摘要、关系、是否历史版本）附在取回结果旁；要读全文由宿主在同一 Scope 再取。见 [Retrieval §7](RETRIEVAL.md#7-关联读取一跳邻居) |
 | 对话后记忆 | `capture_and_store` / `capture.run` | 检查业务回执，再标记这段素材已处理 |
@@ -32,7 +35,7 @@ Python 模型接口是 `complete(prompt, *, purpose="") -> str`。凭据、超�
 
 Capture 与 Maintenance 的 SDK / 宿主驱动入口分别共用各自的内核状态机。成功调用却返回空白正文时，会按现有重试预算请求一次格式修正（默认最多额外一次）；连续空白明确失败，不当作“无需记忆／整理”，也不推进处理进度或整理账本。非空但没有 JSON 的纯文本仍按原策略报解析失败。截断、格式修正共享同一预算，provider 明确报错不伪装成空正文。SDK 可接既有 `{text, truncated}` 回复信封；宿主驱动时将正文和 `truncated` 分开传入 feed。
 
-Dream（整理）提示词里的卡片**带正文**：按 `MaintenanceRequest.cards` 的顺序渲染 id、bucket、threads、occurred_at、summary、retrieval_cues 和 content。上限由请求字段控制——`cards_limit`（默认60张）、`cards_budget_chars`（卡片区总字符，默认60000，按整张卡累加，放不下下一张就停，不切半张也不跳着塞短卡）、`card_body_chars`（单卡正文，默认5000）、`card_summary_chars`（单卡摘要，默认2000）。被截断的卡在卡头和正文处标 `TRUNCATED`，提示词禁止把这种卡放进 `card_ids`；模型仍然放了的话，组件在出口丢掉这一条整理建议（`mutations` 与 `consolidations` 一起过滤，同一次整理的其他建议照收），指向没渲染进提示词的卡的建议同样丢掉，trace 记 `dropped_truncated_targets` / `dropped_unrendered_targets`。trace 另记 `cards_rendered` / `cards_truncated` / `cards_omitted` / `truncated_card_ids`。`MountedGarden`（含 wire `maintenance.run` / `maintenance.begin`）按 `created_at` 新的在前（同一时刻按 id）排好再渲染：花园超过 `cards_limit` 时，触发这次整理的新卡在提示词里，最老的卡让位。墓碑卡守卫的 `known_ids` 自动并入实际渲染的卡。宿主要把最该整理的卡排在前面；读字段只认 `summary` / `content` 等规范名，旧标题字段先翻译。wire 的 `maintenance.run` / `maintenance.begin` 接受同名的四个字段（都要 ≥1，不传用默认值）；这四个字段和 `naming_rule` 是新加的请求字段，请求 schema 允许额外字段，**旧版服务会静默忽略它们**——依赖它们的宿主启动时先核对 manifest 的 `component_version` 不低于带这些字段的版本。称呼规则 `MaintenanceRequest.naming_rule` 与 Capture / 导入同义：不传按 `user_name` + `locale` 生成默认规则，宿主给的串原样进提示词；给 Capture 传了自己规则的宿主，Dream 也要传同一份，否则整理时换回默认规则重写卡片。wire 的 `maintenance.run` / `maintenance.begin` 与 `history.import` / `history.import_begin` 接受可选的 `naming_rule`（不传或 `null` = 默认规则；导入时给了才进续传指纹）。
+Dream（整理）提示词里的卡片**带正文**：按 `MaintenanceRequest.cards` 的顺序渲染 id、bucket、threads、occurred_at、summary、retrieval_cues 和 content。上限由请求字段控制——`cards_limit`（默认60张）、`cards_budget_chars`（卡片区总字符，默认60000，按整张卡累加，放不下下一张就停，不切半张也不跳着塞短卡）、`card_body_chars`（单卡正文，默认5000）、`card_summary_chars`（单卡摘要，默认2000）。被截断的卡在卡头和正文处标 `TRUNCATED`，提示词禁止把这种卡放进 `card_ids`；模型仍然放了的话，组件在出口丢掉这一条整理建议（`mutations` 与 `consolidations` 一起过滤，同一次整理的其他建议照收），指向没渲染进提示词的卡的建议同样丢掉，trace 记 `dropped_truncated_targets` / `dropped_unrendered_targets`。trace 另记 `cards_rendered` / `cards_truncated` / `cards_omitted` / `truncated_card_ids`。`MountedGarden`（含 wire `maintenance.run` / `maintenance.begin`）按逐卡版本选择待处理批次与相关旧卡，公平推进存量，规则见下文。无法完整容纳任何待处理卡时返回 `maintenance_budget_too_small`，不调模型、不推进账本。墓碑卡守卫的 `known_ids` 自动并入实际渲染的卡。宿主要把最该整理的卡排在前面；读字段只认 `summary` / `content` 等规范名，旧标题字段先翻译。wire 的 `maintenance.run` / `maintenance.begin` 接受同名的四个字段（都要 ≥1，不传用默认值）；这四个字段和 `naming_rule` 是新加的请求字段，请求 schema 允许额外字段，**旧版服务会静默忽略它们**——依赖它们的宿主启动时先核对 manifest 的 `component_version` 不低于带这些字段的版本。称呼规则 `MaintenanceRequest.naming_rule` 与 Capture / 导入同义：不传按 `user_name` + `locale` 生成默认规则，宿主给的串原样进提示词；给 Capture 传了自己规则的宿主，Dream 也要传同一份，否则整理时换回默认规则重写卡片。wire 的 `maintenance.run` / `maintenance.begin` 与 `history.import` / `history.import_begin` 接受可选的 `naming_rule`（不传或 `null` = 默认规则；导入时给了才进续传指纹）。
 
 Capture 的「已有记忆索引」决定模型能不能把新信息并进旧卡：索引为空时模型只能 add，同一件事说两次就是两张卡。宿主自己调模型（`capture_session` / `capture`）时，推荐把这个人现有的、可见的卡交给 `CaptureRequest.existing_cards`（明文，至少 `id` + `summary`，`bucket` / `importance` 有就用），而不是自己渲染 `cards` 串：组件按这段对话挑索引（与导入同一把尺子，相关的排前面；卡数没超过张数上限时也排序，字数预算从最不相关的一端截），受 `index_cards_limit`（默认 60 张）、`index_budget_chars`（默认 16000 字）、`index_summary_chars`（单张摘要，默认 400 字，压成一行）约束；并且 merge/supersede 的 `target_id` 必须是 `existing_cards` 里的一张（对全部现有卡校验，不只对进了索引的那几张），不是就重问一次，仍不是只丢那一张（`Step` 的 `dropped` / `why="unknown_target"`，trace 的 `dropped_unknown_target`）。宿主同时给了 `cards` 串时，提示词用宿主的串，校验照做。不给 `existing_cards`（默认 `None`）时行为不变，`target_id` 是否存在留给宿主的写库校验。`MountedGarden.capture_and_store`（及 wire `capture.run` / `capture.begin`、DSH）自己从 Store 渲染索引，并**总是**把这次 Store 快照作为 `existing_cards` 交给组件校验 `target_id`（宿主另给的 `existing_cards` 被快照替换；CAS 冲突重算时跟着重读）：模型编造的 id 重问一次、仍不对只丢那一张，同窗口的好卡照常落库。
 
@@ -95,6 +98,22 @@ JSON Lines 每行一个请求与响应，stdout 承载协议。示例请求：
 
 不在清单里的模块（`prompts.capture`、`prompts.dream`、`scoring.*`、`rendering`、`importing` 的其余名字等）是内部零件：可以读、可以在测试里用，但不承诺兼容。宿主应在自己仓库加一条「只 import 公开 API」的守卫，以 `STABLE_MODULES` 和各模块 `__all__` 为准；`tests/test_public_api_surface.py` 在本仓库对这两样做快照。
 
+### 增量整理与回执的补充契约（未发布）
+
+- `MountedGarden` 以卡片内容版本识别待处理项，包括新增卡、修改过的卡和升级前未审阅存量。版本覆盖正文、摘要、分类、threads、发生时间、retrieval_cues、重要度、pulse、source、supersedes；读取次数与引用时间不会触发。
+- 每批至少一半名额给最老的待处理项，其余优先同thread和BM25相关卡（复用组件分词器；与写卡索引一样关闭面向回答的覆盖率门槛），不够再补待处理项。只把完全渲染且判断成功的卡版本记为已审阅；LLM预算仍由 MaintenanceRequest 管理。全库索引扫描发生在本地，不是把全库发送给模型；当前 Store 的全量load成本仍存在。
+- `reviewed_versions` 为 `{record_id: content_hash}`，与改卡同事务保存。删除/退休卡从后续进度中剔除；新 Dream 产物在写入时标记为已审阅，后续修改仍会重新进入队列。
+- `new_cards` 仍表示seed新增量，`pending_cards` 表示未审阅内容版本数；两者不是同一个计数。完成回执提供 `pending_remaining`（按本次快照计算；并发新写入可能使下一次check更多）。
+- 没有待处理项则不调模型。已声明增量能力的 MountedGarden 不再依赖“新增数量达到阈值”才能发现旧卡修改；低层 `GardenComponent` 未传增量进度时保留原seed门槛，兼容自行编排的宿主。
+- 这是自动相关邻居回顾，不是全库两两比较，也没有单独的“手动按主题重跑”API。覆盖每张卡不保证发现所有语义关系。
+- 标准 Capture（SDK run、wire run/begin/feed、prepare后store）比较原输入与可信scope，先查回执再调模型，成功空结果也留回执。原输入不同仍冲突。直接将未prepare的request和人工mutations交给 `store_capture_result` 时，保留mutation级幂等语义。
+- SDK使用prepare/commit两步入口时，提交必须携带prepare返回的expected_revision；缺失时返回expected_revision_required，不能丢掉快照约束。并发相同Capture的空结果若先提交，其他执行返回该空结果，不能把自己的未执行写卡建议报成已写入。
+- Capture索引与Dream候选沿用读取路径的生命周期判定：deleted、archived、superseded和未知状态不进入模型。
+- Store 的 `request_digest` 与原子mutation一起提交，重复原请求返回最初ID和revision；它不保存原对话/正文副本。无request_digest的普通apply仍严格比较mutation+ledger内容。旧无原请求指纹回执不能冒充新请求级回执。
+- 原请求重放返回的是“当时已提交”的证据，不证明对应卡此刻仍然存在。删除后需要重新记住同样事实，必须是新的业务请求。
+- 原始请求和回执查询故障显式失败；并发首次Capture仍可能产生重复模型调用，但不能产生重复提交。此版本不增加跨进程模型调用锁。
+- 事实卡不添加推测性动机、性格或缺失日期；Dream只重组有来源的事实。提示词约束不是可证明的事实验证器，仍需模型评测与人工复核。
+
 ## 2. 归属与权限
 
 | 字段 | 含义 | 当前约束 |
@@ -119,7 +138,7 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 | `content` | 正文，字符串 | 完整记忆内容；不会因当前上下文预算而裁短已存正文 |
 | `bucket` | 分类，字符串 | Garden 分类与整理；由 locale 和素材决定 |
 | `threads` | 线索，字符串数组 | 关联记忆与检索 |
-| `retrieval_cues` | 可选搜索线索，字符串数组 | Capture/Dream 可生成；正式 Card、schema、typed mutation、Store/导出与 FieldMap 保留。宿主显式纳入 search_text 或 embedding 投影才用于检索 |
+| `retrieval_cues` | 可选搜索线索，字符串数组 | Capture/Dream 可生成；正式 Card、schema、typed mutation、Store/导出与 FieldMap 保留。默认 BM25 的 search text 已包含 cues；只有宿主自定义 search_text / embedding 投影时才需要自己纳入，旧打分不读 cues |
 | `type` | Capture 类型字符串 | 当前解析器产出 `event` / `fact` / `quote` / `moment`；平铺卡可包含，`Card` 类型未单独声明 |
 | `importance` / `pulse` | 重要度 / 情绪激活度，数值 | 供判断或策略使用；importance_level 1–5在解析时映射为既有importance 0.2–1.0，存储仍为0–1 |
 | `occurred_at` | 事情发生时间，字符串 | 历史导入/人工档案按 `keep_dates=True` 保留；对话档 `keep_dates=False` 不传递；空值不推定日期 |
@@ -181,18 +200,18 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 
 ## 4. SQLite 实际有哪些表
 
-以下是参考实现，不要求外部数据库照抄表名。当前 SQLite schema 版本为 **3**，存于 `PRAGMA user_version`；协议与记录的 schema 版本仍为 **1**，不要混用。
+以下是参考实现，不要求外部数据库照抄表名。当前 SQLite schema 版本为 **4**，存于 `PRAGMA user_version`；协议与记录的 schema 版本仍为 **1**，不要混用。
 
 | 表 | 主键 | 其他字段 | 作用 |
 |---|---|---|---|
 | `cards` | `tenant, owner, id` | `doc TEXT` | 明文 JSON 卡，含当前有效及归档/被取代记录 |
 | `revisions` | `tenant, owner` | `revision INTEGER` | owner 级并发版本 |
-| `applied` | `tenant, owner, key` | `result TEXT, digest TEXT` | 幂等结果及内容指纹，非原始对话仓库 |
+| `applied` | `tenant, owner, key` | `result TEXT, digest TEXT, request_digest TEXT` | 幂等结果、mutation指纹及可选原请求指纹，非原始对话仓库 |
 | `id_counters` | `tenant, owner` | `next_id INTEGER` | 生成 ID 的只增计数，删除不回退 |
-| `maintenance_state` | `tenant, owner, mount` | `signature, seed_card_count, revision, updated_at, schema_version` | 最近已提交的整理进度 |
+| `maintenance_state` | `tenant, owner, mount` | `signature, seed_card_count, revision, updated_at, schema_version, reviewed_versions` | 最近已提交的整理进度 |
 | `seed_generations` | `tenant, owner, mount` | `generation INTEGER` | 原始卡新增水位，不因删除下降，不把整理产物重新计入 |
 
-表定义、升级逻辑见 [sqlite.py](../src/memgarden/stores/sqlite.py)。维护账本与对应卡片 mutation 在同一事务提交；失败要一起回滚。v2→v3 初始化水位时考虑现有卡和旧账本，避免删除历史造成水位倒退。
+表定义、升级逻辑见 [sqlite.py](../src/memgarden/stores/sqlite.py)。维护账本与对应卡片 mutation 在同一事务提交；失败要一起回滚。v2→v3 初始化水位时考虑现有卡和旧账本，避免删除历史造成水位倒退。v3→v4 新增请求指纹与逐卡版本进度，旧卡不会被默认视为已审阅；迁移不补造历史审阅证据。
 
 没有独立的原始对话表、历史导入任务表、全量审计表、逐字段版本表或向量表。`InMemoryStore` 提供对应行为但只存进程内，重启即丢失，不适合作为持久库。
 
@@ -226,7 +245,7 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 
 ## 6. 自定义存储必须满足什么
 
-实现 [StoragePort](../src/memgarden/storage.py)：`capabilities()`、`load(tenant, *, owner, **filters)`、`apply(tenant, mutations, *, owner, idempotency_key, expected_revision, maintenance_state=None)`、`maintenance_state(tenant, *, owner, mount)`。
+实现 [StoragePort](../src/memgarden/storage.py)：`capabilities()`、`load(tenant, *, owner, **filters)`、`apply(tenant, mutations, *, owner, idempotency_key, expected_revision, maintenance_state=None, request_digest=None)`、`maintenance_state(tenant, *, owner, mount)`；支持请求级回执时增加 `request_receipt(tenant, *, owner, idempotency_key, request_digest)`。
 
 | 能力声明 | 缺少时的处理 |
 |---|---|
@@ -236,10 +255,12 @@ metadata 指描述一条记忆的辅助属性，例如来源、分类、时间�
 | `supports_hard_delete` | 关闭删除，不能降级为归档 |
 | `supports_maintenance_state` | 关闭整理；账本须与卡片原子提交 |
 | `supports_monotonic_seed_generation` | 关闭整理；删除不能使新增水位倒退 |
+| `supports_incremental_maintenance` | 关闭增量整理；须保存 reviewed_versions，并在同一事务给本次 Dream 新卡登记内容版本，避免自触发 |
+| `supports_request_receipts` | SDK拒绝带业务key的标准Capture，wire关闭capture能力；须按原请求指纹查询和原子提交回执，包括成功空结果 |
 | `supports_custom_fields` | 由外部 Adapter 映射字段，报告信息损失/检索代价 |
 | `supports_metadata_sort` | 可由上层本地排序，但须报告读量与性能代价 |
 
-后加的两个 Maintenance 能力默认 false，外部 Store 须主动实现和声明。相同幂等键和内容重放不能重复写；同键不同内容报冲突；CAS 冲突必须重读重算。继承的旧 SQLite 回执若无 digest，保留兼容的同键命中语义，不能称为完整的历史内容冲突检测。
+新增能力默认 false，外部 Store 须主动实现和声明，不得直接照抄 FULL_CAPABILITIES。相同幂等键和内容重放不能重复写；同键不同内容报冲突；CAS 冲突必须重读重算。继承的旧 SQLite 回执若无 digest，保留兼容的同键命中语义，不能称为完整的历史内容冲突检测。
 
 复用 [共享 Store 契约测试](../tests/test_store_contract.py)，并为真实外部数据库补事务、重启、并发和隔离测试。能力声明本身不能替代这些证据。
 

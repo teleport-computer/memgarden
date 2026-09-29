@@ -28,6 +28,7 @@ from typing import Any
 
 from .contracts import SCHEMA_VERSION
 from .records import RECORD_SCHEMA_VERSION
+from .reading import MAX_READ_CHARS
 
 #: mutation 线上格式的版本。**加字段不动它，改语义才动。**
 MUTATION_SCHEMA_VERSION = 1
@@ -835,12 +836,31 @@ def method_schemas() -> dict[str, Any]:
                         "additionalProperties": True},
             "response": _ok_envelope(receipt),
         },
+        "records.get": {
+            "request": {"type": "object", "required": ["scope", "record_id"],
+                        "properties": {"scope": _scope_ref(), "record_id": _STR,
+                                       "cursor": _OPT_STR,
+                                       "limit": {"type": "integer", "minimum": 1,
+                                                 "maximum": MAX_READ_CHARS}}},
+            "response": _ok_envelope({"oneOf": [
+                {"type": "object", "required": ["record_id", "text", "format", "offset",
+                                                   "total_chars", "next_cursor"],
+                 "properties": {"record_id": _STR, "text": _STR,
+                                "format": {"const": "json_fragment"},
+                                "offset": {"type": "integer", "minimum": 0},
+                                "total_chars": {"type": "integer", "minimum": 0},
+                                "next_cursor": _STR}, "additionalProperties": False},
+                {"type": "object", "required": ["error"],
+                 "properties": {"error": {"const": "record_not_found"}},
+                 "additionalProperties": False}]}),
+        },
         "tool.list": {"request": {"type": "object"},
                       "response": _ok_envelope({"type": "array"})},
         "tool.invoke": {
             "request": {"type": "object", "required": ["scope", "name"],
                         "properties": {"scope": _scope_ref(), "name": _STR,
-                                       "arguments": {"type": "object"}},
+                                       "arguments": {"type": "object"},
+                                       "idempotency_key": _OPT_STR},
                         "additionalProperties": True},
             "response": _ok_envelope({"$ref": "#/schemas/ToolResult"}),
         },
@@ -878,6 +898,7 @@ def schemas() -> dict[str, Any]:
 #: 就直接报错。以前两边各写一份，于是 manifest 声明的能力和实际能调的方法
 #: 长期不一致，而测试拿 manifest 和另一个 manifest 比，稳定地锁住了错误答案。
 WIRE_OPERATIONS: tuple[str, ...] = (
+    "records.get",
     "manifest.get", "schema.get", "health.get",
     "capture.run", "capture.begin", "capture.feed", "capture.cancel",
     "context.get",
@@ -902,6 +923,7 @@ _CAPABILITY_BACKING: dict[str, tuple[tuple[str, ...], ...]] = {
     #: 主动搜索（只返回真实命中）。模型工具 memory_search 走的是同一个实现，
     #: 但它只给文本；要 id / 分数 / 排序版本的宿主用 records.search。
     "search": (("records.search",),),
+    "record_read": (("records.get",),),
     #: 关联读取（一跳邻居）。owner / 挂载点 / 生命周期由服务按可信 scope 过滤。
     "related": (("records.related",),),
     #: check 是两条 lane 共用的调度入口：宿主靠它决定要不要排整理。

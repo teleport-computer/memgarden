@@ -159,6 +159,7 @@ class CaptureRequest:
     idempotency_key: str = ""
 
     schema_version: int = SCHEMA_VERSION
+    _input_digest: str = field(default="", repr=False, compare=False)
 
 
 @dataclass
@@ -485,6 +486,10 @@ class MaintenanceRequest:
     dry_run: bool = False
     idempotency_key: str = ""
     schema_version: int = SCHEMA_VERSION
+    #: MountedGarden supplies per-card coverage; None retains the pure component's
+    #: legacy seed-count gate. Callers of MountedGarden cannot override progress.
+    reviewed_versions: dict[str, str] | None = None
+    pending_ids: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -609,6 +614,9 @@ class ToolCall:
     actor: Actor = field(default_factory=Actor)
     mounts: tuple[Mount, ...] = (DEFAULT_MOUNT,)
     schema_version: int = SCHEMA_VERSION
+    #: Trusted runtime invocation identity; never taken from model arguments.
+    #: Reuse on retry. Empty means a new independent invocation, not content dedup.
+    idempotency_key: str = ""
 
 
 @dataclass
