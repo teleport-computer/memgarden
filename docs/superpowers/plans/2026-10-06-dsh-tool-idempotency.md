@@ -27,4 +27,4 @@
 
 - [x] Run adapter, core idempotency, and full repository verification from the final tree.
 - [x] Record the user-visible before/after, failure/retry/concurrency behavior, and remaining real-DSH boundary in a closure report.
-- [ ] Commit and push the isolated branch, then open a stacked PR against `fix/0.23-memory-closure` for owner review.
+- [x] Commit and push the isolated branch, then open stacked PR #13 against `fix/0.23-memory-closure` for owner review.

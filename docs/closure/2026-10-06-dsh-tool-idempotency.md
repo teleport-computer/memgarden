@@ -1,5 +1,7 @@
 # DSH tool idempotency closure report
 
+Delivery: stacked PR [#13](https://github.com/teleport-computer/memgarden/pull/13), based on PR #12's `fix/0.23-memory-closure` branch. It is intentionally not merged by this change.
+
 ## User-visible result
 
 Before:
