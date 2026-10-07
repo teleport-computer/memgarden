@@ -343,6 +343,19 @@ function sessionIdOf(agent) {
   try { return String(agent?.session?.id || '') } catch { return '' }
 }
 
+/**
+ * DSH 是工具操作身份的 owner：session 标识会话，callId 标识会话里的调用。
+ * 用 JSON 编码 tuple，避免 id 自己含 `:` 时字符串拼接产生碰撞。
+ */
+function toolOperationKey(exec) {
+  const sessionId = sessionIdOf(exec?.agent)
+  const callId = String(exec?.callId || '')
+  if (!sessionId || !callId) {
+    throw new Error('memory_write 缺少 DSH session/callId，拒绝无幂等身份的写入')
+  }
+  return JSON.stringify(['dsh-tool-v1', sessionId, callId])
+}
+
 function agentIdOf(agent) {
   try { return String(agent?.options?.name || agent?.name || 'dsh') }
   catch { return 'dsh' }
@@ -696,12 +709,16 @@ export function apply(ctx, config) {
           schema: { type: 'string' },
           render: (_args, value) => [{ type: 'text', text: String(value ?? '') }],
         },
-        async execute(args) {
+        async execute(args, exec) {
           // 🔴 作用域用插件配置里的 scope，**不读 args 里的任何身份字段**。
           // args 是模型生成的 —— 读它等于让模型自己决定能看谁的记忆。
-          const out = await client.request('tool.invoke', {
-            scope, name: t.name, arguments: args,
-          })
+          const params = { scope, name: t.name, arguments: args }
+          // memory_write 的操作身份由 DSH 在最早决策点给出。Garden 只负责
+          // 原子执行/重放 receipt；不按内容、时间或调用顺序猜「是不是同一次」。
+          if (t.name === 'memory_write') {
+            params.idempotency_key = toolOperationKey(exec)
+          }
+          const out = await client.request('tool.invoke', params)
           if (!out.ok) throw new Error(out.error || 'tool failed')
           return out.content || ''
         },
