@@ -73,9 +73,19 @@ class InMemoryStore:
     def maintenance_state(self, tenant: str, *, owner: str, mount: str) -> dict:
         """上一次整理留下的账本。没有就返回空 dict。"""
         with self._lock:
-            return dict(self._ledger.get((*_key(tenant, owner), mount)) or {})
+            return copy.deepcopy(self._ledger.get((*_key(tenant, owner), mount)) or {})
 
     # -- 写 -------------------------------------------------------------- #
+
+    def request_receipt(self, tenant: str, *, owner: str, idempotency_key: str,
+                        request_digest: str) -> ApplyResult | None:
+        with self._lock:
+            cached = self._applied.get(_key(tenant, owner), {}).get(idempotency_key)
+            if cached is None:
+                return None
+            if cached[2] != request_digest:
+                raise IdempotencyConflict(idempotency_key)
+            return copy.deepcopy(cached[1])
 
     def apply(
         self,
@@ -86,26 +96,30 @@ class InMemoryStore:
         idempotency_key: str,
         expected_revision: str | None = None,
         maintenance_state: dict | None = None,
+        request_digest: str | None = None,
     ) -> ApplyResult:
         key = _key(tenant, owner)
         with self._lock:
+            mutations = copy.deepcopy(mutations)
+            maintenance_state = copy.deepcopy(maintenance_state)
             # 幂等：同一个 key 重放，原样返回上次的结果，不重复写。
             # 但**必须是同一批内容** —— 同 key 不同内容不是重放，是撞了 key，
             # 静默返回旧结果会让第二批改动凭空消失。
             digest = apply_digest(mutations, maintenance_state)
             cached = self._applied.get(key, {}).get(idempotency_key)
             if cached is not None:
-                prev_digest, prev_result = cached
-                if prev_digest != digest:
+                from ..capture_identity import same_request
+                prev_digest, prev_result, prev_request = cached
+                if not same_request(prev_request, request_digest, prev_digest, digest):
                     raise IdempotencyConflict(idempotency_key)
-                return prev_result
+                return copy.deepcopy(prev_result)
 
             if expected_revision is not None and expected_revision != self._rev(key):
                 raise RevisionConflict(expected_revision, self._rev(key))
 
             bucket = self._cards.setdefault(key, {})
             # 原子：先在副本上做完，全部成功才落回去。
-            staged = dict(bucket)
+            staged = copy.deepcopy(bucket)
             next_id = self._reserved_next_id(key, mutations)
 
             def allocate() -> str:
@@ -117,6 +131,11 @@ class InMemoryStore:
             results = apply_ops(staged, mutations, new_id=allocate,
                                 written_at=self._clock.now_iso())
 
+            # Deriving/validating progress can fail too. Do it before publishing
+            # any staged card, counter or revision, just like the SQL transaction.
+            if maintenance_state is not None:
+                from ..maintenance_progress import committed_progress
+                maintenance_state = committed_progress(maintenance_state, mutations, results, staged)
             seed_mounts = new_seed_mounts(
                 mutations, before=bucket, staged=staged)
             self._cards[key] = staged
@@ -137,8 +156,8 @@ class InMemoryStore:
                 self._ledger[(*key, mount)] = {
                     **dict(maintenance_state), "revision": self._rev(key)}
             out = ApplyResult(results=results, revision=self._rev(key))
-            self._applied.setdefault(key, {})[idempotency_key] = (digest, out)
-            return out
+            self._applied.setdefault(key, {})[idempotency_key] = (digest, out, request_digest)
+            return copy.deepcopy(out)
 
     # -- 内部 ------------------------------------------------------------ #
 

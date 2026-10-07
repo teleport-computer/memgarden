@@ -481,10 +481,56 @@ async function toolsAreRegisteredBeforeApplyReturns() {
   })
   // 不 await、不让出事件循环：DSH 下一步可能就是组装首个请求。
   assert.deepEqual(registered.map((t) => t.name).sort(),
-                   ['memgarden_memory_search', 'memgarden_memory_write'])
+                   ['memgarden_memory_read', 'memgarden_memory_search', 'memgarden_memory_write'])
   const write = registered.find((t) => t.name === 'memgarden_memory_write')
   assert.deepEqual(write.parameters.required, ['summary', 'content'])
   await ctx.hooks.get('dispose')()
+  rmSync(dir, { recursive: true, force: true })
+}
+
+/**
+ * DSH owns a tool operation's durable identity. Replaying the same
+ * (session, callId) must return the first write receipt; an identical write
+ * from a different callId is a distinct user-visible operation.
+ */
+async function toolWriteReplayUsesDshOperationIdentity() {
+  const bin = process.env.MEMGARDEN_BIN
+  assert.ok(bin, '需要 MEMGARDEN_BIN 指向真实 memgarden CLI')
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'memgarden-adapter-tool-idempotency-'))
+  const storage = `sqlite:///${path.join(dir, 'garden.db')}`
+  const scope = realScope('tool-idempotency')
+  const registered = []
+  const ctx = {
+    ...fakeContext(),
+    tools: { register(tool) { registered.push(tool); return () => {} } },
+  }
+  const { apply } = await loadPlugin()
+  apply(ctx, {
+    bin, storage, tenant: scope.tenant_id,
+    memoryOwner: scope.memory_owner_id, stateDir: path.join(dir, 'state'),
+  })
+  const write = registered.find((tool) => tool.name === 'memgarden_memory_write')
+  assert.ok(write, 'Adapter 应同步注册 memory_write')
+  const args = { summary: '同一事实', content: '这是同一次工具调用的重放。' }
+  const execution = (callId, sessionId = 'session-tool-idempotency') => ({
+    callId,
+    agent: { session: { id: sessionId } },
+    signal: new AbortController().signal,
+  })
+
+  await assert.rejects(() => write.execute(args), /缺少 DSH session\/callId/,
+                       '没有权威操作身份时不得退化成非幂等写入')
+  await write.execute(args, execution('call-1'))
+  await write.execute(args, execution('call-1'))
+  await write.execute(args, execution('call-2'))
+  await write.execute(args, execution('call-1', 'session-tool-idempotency-2'))
+  await ctx.hooks.get('dispose')()
+
+  const [exported] = serviceRpc(bin, storage, [
+    { method: 'records.export', params: { scope } },
+  ])
+  assert.equal(exported.items?.records?.length, 3,
+               '同一 DSH 操作重放只能写一次，不同 session/callId 仍是独立写入')
   rmSync(dir, { recursive: true, force: true })
 }
 
@@ -564,6 +610,7 @@ async function brokenServiceBinaryStillLetsHostStart() {
 
 await disposeRightAfterFailedSpawnDoesNotSignalHostGroup()
 await toolsAreRegisteredBeforeApplyReturns()
+await toolWriteReplayUsesDshOperationIdentity()
 await runningServiceWinsWhenToolDefinitionsDrift()
 await brokenServiceBinaryStillLetsHostStart()
 await registrationFailureIsNotReportedAsFetchFailure()

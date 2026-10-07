@@ -23,6 +23,8 @@ from typing import Any, Sequence
 
 from . import timestamps
 from .component import GardenComponent
+from .capture_identity import input_digest
+from .reading import DEFAULT_READ_CHARS
 from .contracts import (
     Actor,
     CaptureRequest,
@@ -35,7 +37,7 @@ from .contracts import (
     ToolResult,
 )
 from .records import UnknownMutation, required_capabilities, validate_mutations
-from .rendering import render_buckets, render_card_index, render_threads
+from .rendering import render_buckets, render_threads
 from .storage import (IdempotencyConflict, MutationRejected, PartialFailure,
                       RevisionConflict)
 
@@ -243,15 +245,17 @@ class MountedGarden:
         cards = [
             card for card in self._visible(scope, snapshot.cards)
             if str(card.get("mount") or DEFAULT_MOUNT) == target_mount
+            and _lifecycle_status(card) == "active"
         ]
         prepared = replace(
             request,
+            _input_digest=input_digest(scope, request),
             # actor 只能来自 Runtime 的可信 Scope，不能接受模型/调用参数覆盖。
             actor=scope.actor,
             mount=target_mount,
-            # 调用方已经渲染过就尊重它（宿主可能有更好的身份信息）；
-            # 没给才由我们从库里填 —— 但**不能两边都空着**。
-            cards=request.cards or render_card_index(cards),
+            # Explicit indexes remain supported. Otherwise the component selects
+            # relevant existing_cards and enforces the request's index budget.
+            cards=request.cards,
             buckets=request.buckets or render_buckets(cards),
             threads=request.threads or render_threads(cards),
             # Store 是事实源：merge/supersede 的 target_id 只许指向这次快照里的卡。
@@ -272,14 +276,19 @@ class MountedGarden:
         判断由内核做，写库这一步仍然归这里 —— 否则每个宿主又要自己实现一遍
         mount 校验、typed mutation 关口、能力检查、幂等和 CAS。
 
-        ``expected_revision`` 来自 :meth:`prepare_capture`。给了就走 CAS：
+        prepared 请求必须带上 :meth:`prepare_capture` 返回的 ``expected_revision``：
         判断期间别人写过，这次提交会被拒，调用方需要重新走一遍准备+判断。
         """
+        replay = self._capture_replay(scope, request) if request._input_digest else None
+        if replay is not None:
+            return replay
         if getattr(result, "error", None):
             return OperationReceipt(error=result.error,
                                     trace=dict(getattr(result, "trace", {}) or {}))
+        if request._input_digest and expected_revision is None:
+            return OperationReceipt(error="expected_revision_required")
         mutations = list(getattr(result, "mutations", []) or [])
-        if not mutations:
+        if not mutations and not request.idempotency_key:
             return OperationReceipt(reason="nothing_worth_keeping",
                                     trace=dict(getattr(result, "trace", {}) or {}))
         return self._apply(
@@ -287,6 +296,8 @@ class MountedGarden:
             idempotency_key=request.idempotency_key,
             trace=dict(getattr(result, "trace", {}) or {}),
             expected_revision=expected_revision,
+            request_digest=request._input_digest
+            if request.idempotency_key and request._input_digest else None,
         )
 
     # -- 想起 ------------------------------------------------------------ #
@@ -415,28 +426,31 @@ class MountedGarden:
         """
         mount = scope.check(request.mount or DEFAULT_MOUNT)
         self._require_maintenance_storage()
-        snapshot = self._snapshot(
-            scope, include_archived=True, include_superseded=True)
+        # Ledger and cards must refer to the same owner revision. The StoragePort
+        # exposes separate reads, so bracket the ledger read and retry boundedly.
+        for _ in range(self.MAX_RECOMPUTE):
+            snapshot = self._snapshot(scope, include_archived=True, include_superseded=True)
+            ledger = self.maintenance_ledger(scope, mount=mount)
+            confirmed = self._snapshot(scope, include_archived=True, include_superseded=True)
+            if confirmed.revision == snapshot.revision:
+                break
+        else:
+            raise MaintenanceStorageError("concurrent changes while reading maintenance progress")
         all_visible = [
             c for c in self._visible(scope, snapshot.cards)
             if str(c.get("mount") or DEFAULT_MOUNT) == mount
         ]
         active = [
             c for c in all_visible
-            if not c.get("archived") and not c.get("superseded_by")
-            and str(c.get("lifecycle") or "active") == "active"
+            if _lifecycle_status(c) == "active"
         ]
-        # Dream 按 ``cards`` 的顺序渲染、预算满了就停（默认 60 张）。Store 读出来的顺序
-        # 不保证任何东西（SQLite 的 SELECT 没有 ORDER BY，实际是插入顺序），于是卡一多，
-        # 提示词里永远是最老的 60 张 —— 刚写进来、正是它们触发了这次整理的新卡模型看不到，
-        # 水位线和签名却照样推进，这批新卡再也不会被整理。
-        #
-        # 取**新的在前**（created_at 倒序，同时刻按 id 升序）：触发整理的正是水位线之后的
-        # 新卡，按时间取不需要知道「哪些是新的」（真删会让计数和具体卡对不上）。代价是
-        # 超出预算的老卡这次看不到 —— 预算本来就只能装下一部分，宁可让新卡和最近的邻居同框。
-        active.sort(key=lambda c: str(c.get("id") or ""))
-        active.sort(key=lambda c: timestamps.sort_key(c.get("created_at")), reverse=True)
-        ledger = self.maintenance_ledger(scope, mount=mount)
+        from .maintenance_progress import pending_cards, select_batch
+        active_ids = {str(c["id"]) for c in active}
+        reviewed = {rid: version for rid, version in ledger.get("reviewed_versions", {}).items()
+                    if rid in active_ids}
+        pending = pending_cards(active, reviewed)
+        selected = select_batch(active, pending, limit=request.cards_limit,
+                                tokenizer=self.component._tokenizer) if pending else []
         generations = getattr(snapshot, "seed_generations", {}) or {}
         seed_rows = sum(
             str(card.get("source") or "") != "memory_dream"
@@ -453,9 +467,11 @@ class MountedGarden:
             request,
             actor=scope.actor,
             mount=mount,
-            cards=active,
+            cards=selected,
             all_cards=all_visible,
             known_ids=tuple(str(c.get("id") or "") for c in active),
+            reviewed_versions=reviewed,
+            pending_ids=tuple(str(c["id"]) for c in pending),
             current_seed_generation=int(generations.get(mount, 0)),
             last_seed_card_count=(
                 request.last_seed_card_count
@@ -540,8 +556,12 @@ class MountedGarden:
         trace = dict(getattr(result, "trace", {}) or {})
         if getattr(result, "error", None):
             return OperationReceipt(error=result.error, trace=trace)
+        if request.dry_run:
+            return OperationReceipt(reason="dry_run", trace=trace)
         if not getattr(result, "needed", False):
             return OperationReceipt(reason="not_needed", trace=trace)
+        if request.reviewed_versions is not None and expected_revision is None:
+            return OperationReceipt(error="expected_revision_required", trace=trace)
 
         mutations = list(getattr(result, "mutations", []) or [])
         # 模型判断“该整理”但没有可合并项时，也要原子推进账本；否则每次 check
@@ -555,18 +575,23 @@ class MountedGarden:
         # 最终 Store key。同一个前缀遇到新快照时必须形成新键；否则两次都产出
         # no_op 时 Store 会把第二次误判成第一次的重放，账本永远不再推进。
         key_prefix = request.idempotency_key or "maintenance"
-        store_key = f"{key_prefix}:{mount}:{signature}"
+        store_key = f"{key_prefix}:{mount}:{signature}:{expected_revision}"
+        state = {"mount": mount, "signature": signature,
+                 "seed_card_count": seed_count, "schema_version": 2}
+        if request.reviewed_versions is not None:
+            from .maintenance_progress import card_version
+            reviewed = dict(request.reviewed_versions)
+            complete = set(trace.get("reviewed_card_ids", []))
+            reviewed.update({str(c["id"]): card_version(c) for c in request.cards
+                             if str(c["id"]) in complete})
+            state["reviewed_versions"] = reviewed
+            trace["pending_remaining"] = len(set(request.pending_ids or ()) - complete)
         return self._apply(
             scope, mount, mutations,
             idempotency_key=store_key,
             trace=trace,
             expected_revision=expected_revision,
-            maintenance_state={
-                "mount": mount,
-                "signature": signature,
-                "seed_card_count": seed_count,
-                "schema_version": 1,
-            },
+            maintenance_state=state,
         )
 
     def maintenance_ledger(self, scope: Scope, *, mount: str | None = None) -> dict:
@@ -596,6 +621,7 @@ class MountedGarden:
             "supports_atomic_batch",
             "supports_maintenance_state",
             "supports_monotonic_seed_generation",
+            "supports_incremental_maintenance",
         ) if not getattr(store_caps, name, False)]
         if missing:
             raise MaintenanceStorageError(
@@ -873,7 +899,7 @@ class MountedGarden:
             return OperationReceipt(error="record_id_required")
         if not str(requested_by or "").strip():
             return OperationReceipt(error="requested_by_required")
-        mount = scope.check(DEFAULT_MOUNT)
+        mount = scope.check(scope.mounts()[0])
         # 不在这里先做 existence preflight：第一次删除成功、回包丢失后，重试
         # 必须能命中 Store 的幂等回执。Store 自身按 owner 分区，所以直接提交
         # 不会碰到别人的卡；不存在的目标统一映射成 record_not_found。
@@ -889,6 +915,21 @@ class MountedGarden:
 
     def tools(self):
         return self.component.tools()
+
+    def read_record(self, scope: Scope, record_id: str, *,
+                    cursor: str = "", limit: int = DEFAULT_READ_CHARS) -> dict:
+        """Read one active, authorized record losslessly in bounded JSON chunks.
+
+        Archived/superseded cards remain available through explicit history export,
+        not through the default model tool. Missing and unauthorized IDs look alike.
+        """
+        from .reading import record_chunk
+
+        _mounts, cards = self._scoped_cards(scope)
+        card = next((c for c in cards if str(c.get("id") or "") == record_id), None)
+        if card is None:
+            return {"error": "record_not_found"}
+        return record_chunk(card, cursor=cursor, limit=limit)
 
     def invoke_tool(self, scope: Scope, call: ToolCall) -> ToolResult:
         """执行工具 —— **真查库、真写库**。
@@ -914,8 +955,21 @@ class MountedGarden:
                 card = by_id.get(rid) or {}
                 text = str(card.get("summary") or "").strip()
                 if text:
-                    lines.append(f"- {text}")
+                    lines.append(f"- [{rid}] {text}")
             return ToolResult(ok=True, content="\n".join(lines))
+
+        if call.name == "memory_read":
+            import json
+            args = call.arguments or {}
+            try:
+                result = self.read_record(
+                    scope, str(args.get("record_id") or ""),
+                    cursor=str(args.get("cursor") or ""))
+            except ValueError as exc:
+                return ToolResult(ok=False, error=str(exc))
+            if result.get("error"):
+                return ToolResult(ok=False, error=result["error"])
+            return ToolResult(content=json.dumps(result, ensure_ascii=False))
 
         if call.name == "memory_write":
             args = call.arguments or {}
@@ -930,7 +984,7 @@ class MountedGarden:
                 "card": {"summary": summary, "content": content,
                          "bucket": str(args.get("bucket") or ""),
                          "source": "model_tool"},
-            }], idempotency_key="", trace={})
+            }], idempotency_key=call.idempotency_key, trace={})
             if receipt.error:
                 return ToolResult(ok=False, error=receipt.error)
             # 「已经写进去了」和「建议这么写」对调用方是两回事,回执必须说清楚。
@@ -989,20 +1043,12 @@ class MountedGarden:
         """
         last: OperationReceipt | None = None
         for attempt in range(self.MAX_RECOMPUTE):
+            replay = self._capture_replay(scope, request)
+            if replay is not None:
+                return replay
             prepared, revision = self.prepare_capture(scope, request)
             result = judge(prepared)
-            if getattr(result, "error", None):
-                return OperationReceipt(error=result.error,
-                                        trace=dict(result.trace or {}))
-            if not getattr(result, "mutations", None):
-                return OperationReceipt(reason="nothing_worth_keeping",
-                                        trace=dict(result.trace or {}))
-            receipt = self._apply(
-                scope, mount, result.mutations,
-                idempotency_key=request.idempotency_key,
-                trace=dict(result.trace or {}),
-                expected_revision=revision,
-            )
+            receipt = self.store_capture_result(scope, prepared, result, expected_revision=revision)
             if receipt.error != "revision_conflict":
                 return receipt
             last = receipt
@@ -1010,6 +1056,26 @@ class MountedGarden:
         # 重算到顶还在冲突 —— 如实报出去。调用方可以退避后再来，
         # 但**不能**把这当成成功。
         return last or OperationReceipt(error="revision_conflict")
+
+    def _capture_replay(self, scope: Scope, request: CaptureRequest) -> OperationReceipt | None:
+        if not request.idempotency_key:
+            return None
+        scope.check(request.mount or DEFAULT_MOUNT)
+        if self._missing_capabilities({"supports_request_receipts", "supports_owner_scoping"}):
+            return OperationReceipt(error="storage_lacks_capabilities:supports_request_receipts")
+        try:
+            cached = self._store.request_receipt(
+                scope.tenant_id, owner=scope.owner(), idempotency_key=request.idempotency_key,
+                request_digest=request._input_digest or input_digest(scope, request))
+        except IdempotencyConflict:
+            return OperationReceipt(error="idempotency_conflict")
+        except Exception as exc:
+            return OperationReceipt(error=f"storage_failed:{type(exc).__name__}")
+        if cached is None:
+            return None
+        ids = tuple(str(r["id"]) for r in cached.results if r.get("id"))
+        return OperationReceipt(written=bool(ids), record_ids=ids, revision=str(cached.revision),
+                                reason="" if ids else "nothing_worth_keeping", trace={"replayed": True})
 
     def _snapshot(
         self, scope: Scope, *, include_archived: bool = False,
@@ -1129,6 +1195,7 @@ class MountedGarden:
         idempotency_key: str, trace: dict,
         expected_revision: Any = None,
         maintenance_state: dict | None = None,
+        request_digest: str | None = None,
     ) -> OperationReceipt:
         stamped = []
         for m in mutations:
@@ -1210,12 +1277,13 @@ class MountedGarden:
             applied = self._store.apply(
                 scope.tenant_id, stamped,
                 owner=scope.owner(),
-                idempotency_key=idempotency_key or _digest_key(scope, stamped),
+                idempotency_key=idempotency_key or _new_operation_key(),
                 # 🔴 基于旧状态做的判断**必须**带着读到的 revision 回来。
                 # 以前这里写死 None —— Store 支持 CAS，主链路却从不使用，
                 # 于是并发下后写的那次会盖掉先写的判断，且不报错。
                 expected_revision=effective_revision,
                 maintenance_state=maintenance_state,
+                **({"request_digest": request_digest} if request_digest else {}),
             )
         except RevisionConflict as exc:
             # 让调用方重读重算,而不是覆盖别人刚写的东西。
@@ -1251,7 +1319,11 @@ class MountedGarden:
                 trace={**trace, "detail": str(exc)[:200]})
         ids = tuple(str(r.get("id") or "") for r in applied.results
                     if r.get("id"))
-        return OperationReceipt(written=True, record_ids=ids,
+        # Concurrent requests can propose different mutations for the same input.
+        # The Store's committed result, not this caller's proposal, is authoritative.
+        written = bool(ids) if request_digest else bool(stamped)
+        return OperationReceipt(written=written, record_ids=ids,
+                                reason="" if written else "nothing_worth_keeping",
                                 revision=str(applied.revision), trace=trace)
 
 
@@ -1276,20 +1348,10 @@ def _lifecycle_status(card: dict) -> str:
     return status
 
 
-def _digest_key(scope: Scope, mutations: list[dict]) -> str:
-    """调用方没给幂等键时，从内容算一个。
-
-    比「每次都生成新键」强：同一批内容重放不会写第二遍。但**调用方自己给的
-    键更好** —— 它知道「同一个 turn」这种业务边界，内容摘要不知道。
-    """
-    import hashlib
-    import json
-
-    payload = json.dumps(
-        [scope.tenant_id, scope.owner(), mutations], sort_keys=True,
-        ensure_ascii=False, default=str,
-    )
-    return "auto-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+def _new_operation_key() -> str:
+    """No caller identity means a new operation, never permanent content dedup."""
+    from uuid import uuid4
+    return f"invocation:{uuid4()}"
 
 
 def _mutation_targets(mutation: dict) -> tuple[str, ...]:

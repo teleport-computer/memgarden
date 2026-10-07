@@ -53,7 +53,7 @@ memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans
 |---|---|
 | 每次模型调用前 | `agent/pre-step` waterfall，先保留其他插件处理结果，再查询并注入记忆 |
 | 一轮结束 | `agent/turn-stopping`，记录待办，执行 Capture，再检查是否需要 Maintenance |
-| 模型主动查/写 | `apply()` 返回前用同一个 `memgarden tools` 同步注册 `memgarden_memory_search` / `memgarden_memory_write`（DSH 在 pre-step 之前就快照工具列表，晚注册的工具首个请求里没有），握手后用 `tool.list` 对账；经可信 Scope 调用服务 |
+| 模型主动查/写 | `apply()` 返回前用同一个 `memgarden tools` 同步注册 `memgarden_memory_search` / `memgarden_memory_read` / `memgarden_memory_write`（DSH 在 pre-step 之前就快照工具列表，晚注册的工具首个请求里没有），握手后用 `tool.list` 对账；经可信 Scope 调用服务 |
 | 重启 | 从 outbox 重放未完成 Capture，沿用业务幂等键 |
 
 轮末 hook 等待其 Promise 完成，因此记忆处理会增加 turn 收尾时间。自动召回和 Capture 不依赖模型主动调用工具。
@@ -65,7 +65,7 @@ capture.begin     → DSH llm.stream → capture.feed
 maintenance.begin → DSH llm.stream → maintenance.feed
 ```
 
-服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。该默认服务的 manifest 会关闭需要服务侧模型的 `history_import`（一次性）与 `migrate`。服务虽然提供宿主驱动的 `history.import_*`、`records.related`、`records.search` 等方法，**这个 Adapter 没有接它们**：DSH 上接通的只有轮末 Capture、每轮召回、Maintenance 和模型工具（主动搜索与写卡经 `memgarden_memory_search` / `memgarden_memory_write`）。各接入面的能力表见[数据参考](../../docs/INTEGRATION-AND-DATA.md#各接入面接通了什么)，`tests/test_surfaces.py` 核对这张表与插件实际发出的请求一致。
+服务启动时不带模型，不能直接调用 `capture.run` / `maintenance.run`；这些会返回 `model_not_configured`。该默认服务的 manifest 会关闭需要服务侧模型的 `history_import`（一次性）与 `migrate`。服务虽然提供宿主驱动的 `history.import_*`、`records.related`、`records.search` 等方法，**这个 Adapter 没有接它们**：DSH 上接通的只有轮末 Capture、每轮召回、Maintenance 和模型工具（主动搜索与写卡经 `memgarden_memory_search` / `memgarden_memory_read` / `memgarden_memory_write`）。各接入面的能力表见[数据参考](../../docs/INTEGRATION-AND-DATA.md#各接入面接通了什么)，`tests/test_surfaces.py` 核对这张表与插件实际发出的请求一致。
 
 ## 窗口预算与恢复
 

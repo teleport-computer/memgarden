@@ -1,0 +1,430 @@
+{
+  "provider": "openrouter",
+  "model": "deepseek/deepseek-v4-pro-0813",
+  "temperature": 0,
+  "source_sha": "fc872478354d32646d45f4bebae74e51945726a3",
+  "source_dirty": true,
+  "max_output_tokens": 2048,
+  "openrouter_provider": "CoreWeave",
+  "reasoning_enabled": false,
+  "corpus_sha256": "a41f97d21373190c987863fa454099ce277ab1609249c2765c5f3f8c5811b51c",
+  "failed": 0,
+  "manual_review_required": true,
+  "results": [
+    {
+      "id": "capture-gift-en",
+      "repeat": 1,
+      "prompt_sha256": "1b3fc3577da7fffbf2dca13992cd8bdf4a281114b4c259494e029e4e11afdf65",
+      "usage": {
+        "prompt_tokens": 1939,
+        "completion_tokens": 176,
+        "total_tokens": 2115,
+        "cost": 0.00323705,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00323705,
+          "upstream_inference_prompt_cost": 0.00254009,
+          "upstream_inference_completions_cost": 0.00069696
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "cards": [
+        {
+          "action": "add",
+          "type": "event",
+          "target_id": null,
+          "bucket": "Family",
+          "threads": [
+            "Nora",
+            "gift-giving"
+          ],
+          "summary": "Mina bought her sister Nora a yellow dress for $48 for her birthday on May 2.",
+          "content": "On May 2, Mina bought her sister Nora a yellow dress for $48 as a birthday gift. Mina asked me to remember what she gave Nora.",
+          "retrieval_cues": [
+            "Nora birthday gift",
+            "yellow dress $48",
+            "May 2",
+            "what did Mina give Nora"
+          ],
+          "importance": 0.4,
+          "pulse": 0.3
+        }
+      ]
+    },
+    {
+      "id": "capture-book-zh",
+      "repeat": 1,
+      "prompt_sha256": "b642e9abac22a22e627187fceb67bd3f83ee4927b2f5eff083650461adbaf8b4",
+      "usage": {
+        "prompt_tokens": 1995,
+        "completion_tokens": 198,
+        "total_tokens": 2193,
+        "cost": 0.00339753,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00339753,
+          "upstream_inference_prompt_cost": 0.00261345,
+          "upstream_inference_completions_cost": 0.00078408
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "cards": [
+        {
+          "action": "add",
+          "type": "event",
+          "target_id": null,
+          "bucket": "家庭",
+          "threads": [
+            "Nora",
+            "生日礼物",
+            "书籍"
+          ],
+          "summary": "Mina 在青禾书店买了《长日将尽》送给姐姐 Nora 作为生日礼物，花了 68 元",
+          "content": "9月12日，Mina 在青禾书店买了《长日将尽》，花了 68 元，是送给姐姐 Nora 的生日礼物。",
+          "retrieval_cues": [
+            "Nora 生日礼物",
+            "青禾书店",
+            "长日将尽",
+            "68元",
+            "9月12日"
+          ],
+          "importance": 0.4,
+          "pulse": 0.2
+        }
+      ]
+    },
+    {
+      "id": "capture-smalltalk",
+      "repeat": 1,
+      "prompt_sha256": "1580f9c618f06f671f48fc8663f3cd54f1d4a0e38dfdce31a6911f3bcc750204",
+      "usage": {
+        "prompt_tokens": 1935,
+        "completion_tokens": 6,
+        "total_tokens": 1941,
+        "cost": 0.00255861,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00255861,
+          "upstream_inference_prompt_cost": 0.00253485,
+          "upstream_inference_completions_cost": 0.00002376
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "cards": []
+    },
+    {
+      "id": "capture-unaccepted-advice",
+      "repeat": 1,
+      "prompt_sha256": "9e50c91e2a5847ef67b5d8aba8d7bf090988f3220f80e366861bd5e144185dc4",
+      "usage": {
+        "prompt_tokens": 1953,
+        "completion_tokens": 6,
+        "total_tokens": 1959,
+        "cost": 0.000637614,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.000637614,
+          "upstream_inference_prompt_cost": 0.000613854,
+          "upstream_inference_completions_cost": 0.00002376
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "cards": []
+    },
+    {
+      "id": "capture-correction",
+      "repeat": 1,
+      "prompt_sha256": "a833a9cccb0a2806bd2d1b5e836bf99dfc256d6f07d0572b4d3c9d8b59b264fa",
+      "usage": {
+        "prompt_tokens": 1945,
+        "completion_tokens": 144,
+        "total_tokens": 2089,
+        "cost": 0.001173614,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 1536,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.001173614,
+          "upstream_inference_prompt_cost": 0.000603374,
+          "upstream_inference_completions_cost": 0.00057024
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "cards": [
+        {
+          "action": "add",
+          "type": "fact",
+          "target_id": null,
+          "bucket": "Interests",
+          "threads": [
+            "Glass Harbor"
+          ],
+          "summary": "Mina corrected the ticket price for Glass Harbor from $72 to $27.",
+          "content": "Mina said the ticket for the play Glass Harbor cost 72 dollars, but read the receipt wrong. It actually cost 27 dollars. Mina asked to remember the correction.",
+          "retrieval_cues": [
+            "Glass Harbor ticket price",
+            "play ticket cost",
+            "27 dollars"
+          ],
+          "importance": 0.2,
+          "pulse": 0.1
+        }
+      ]
+    },
+    {
+      "id": "dream-merge-en",
+      "repeat": 1,
+      "prompt_sha256": "deaa5981bb3f705743afa0818e3ab4b492e933f23052307f66a4b3c4b6214780",
+      "usage": {
+        "prompt_tokens": 1851,
+        "completion_tokens": 271,
+        "total_tokens": 2122,
+        "cost": 0.00349797,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 0,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.00349797,
+          "upstream_inference_prompt_cost": 0.00242481,
+          "upstream_inference_completions_cost": 0.00107316
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "targets": true,
+        "operations": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "consolidations": [
+        {
+          "op": "merge",
+          "card_ids": [
+            "gift_a",
+            "gift_b"
+          ],
+          "rationale": "These two cards describe the same birthday gift for Nora at different stages: the purchase on May 2 and the delivery on May 5. Merging them into one card preserves the full continuity of the event without losing any concrete values.",
+          "result": {
+            "bucket": "Family",
+            "threads": [
+              "Nora's birthday",
+              "gift giving"
+            ],
+            "summary": "Mina bought and gave her sister Nora a yellow dress for her birthday.",
+            "content": "Mina bought her sister Nora a yellow dress at Cedar Shop on May 2 for 48 dollars. She gave that same yellow dress to Nora on May 5, wrapped in a blue box. Nora wore it to dinner at Lake Cafe.",
+            "retrieval_cues": [
+              "Nora birthday gift",
+              "yellow dress Cedar Shop",
+              "May 2 purchase",
+              "May 5 delivery",
+              "Lake Cafe dinner"
+            ],
+            "importance": 0.6,
+            "pulse": 0
+          }
+        }
+      ],
+      "questions_to_ask": []
+    },
+    {
+      "id": "dream-thicken-zh",
+      "repeat": 1,
+      "prompt_sha256": "30d89d2909207c9257d09640a2af23713ab290699ea27b2ca4cfda4ba3bf3b29",
+      "usage": {
+        "prompt_tokens": 1872,
+        "completion_tokens": 244,
+        "total_tokens": 2116,
+        "cost": 0.002770368,
+        "is_byok": false,
+        "prompt_tokens_details": {
+          "cached_tokens": 512,
+          "cache_write_tokens": 0,
+          "audio_tokens": 0,
+          "video_tokens": 0
+        },
+        "cost_details": {
+          "upstream_inference_cost": 0.002770368,
+          "upstream_inference_prompt_cost": 0.001804128,
+          "upstream_inference_completions_cost": 0.00096624
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0,
+          "image_tokens": 0,
+          "audio_tokens": 0
+        }
+      },
+      "model": "deepseek/deepseek-v4-pro-0813",
+      "provider": "CoreWeave",
+      "finish_reason": "stop",
+      "checks": {
+        "parsed": true,
+        "count": true,
+        "concrete_values": true,
+        "grounded_years": true,
+        "targets": true,
+        "operations": true,
+        "complete": true
+      },
+      "missing": [],
+      "parse_error": null,
+      "invented_years": [],
+      "consolidations": [
+        {
+          "op": "thicken",
+          "card_ids": [
+            "move_a"
+          ],
+          "rationale": "Mina补充了9月12日搬家的一个细节：最后一箱书晚上8点送到。这是同一事件的新增事实，应并入原卡，保留原有搬家信息并补充送达时间。",
+          "result": {
+            "bucket": "地点与旅行",
+            "threads": [
+              "搬家",
+              "上海"
+            ],
+            "summary": "Mina于9月12日从成都搬到上海，最后一箱书晚上8点送到",
+            "content": "Mina于9月12日从成都搬到上海，搬家公司是青禾搬家，费用1800元，用了6小时。最后一箱书于晚上8点送到。",
+            "retrieval_cues": [
+              "9月12日搬家",
+              "成都到上海",
+              "青禾搬家",
+              "最后一箱书几点送到"
+            ],
+            "importance": 0.4,
+            "pulse": 0
+          }
+        }
+      ],
+      "questions_to_ask": []
+    }
+  ]
+}

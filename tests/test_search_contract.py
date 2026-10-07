@@ -143,7 +143,7 @@ def test_tool_search_with_recent_stage_in_policy_returns_nothing_on_no_hit():
 def test_tool_search_returns_only_real_matches():
     garden = _mounted(_seeded())
     out = garden.invoke_tool(ALICE, ToolCall(name="memory_search", arguments={"query": "JIRA-4821"}))
-    assert out.ok and out.content == "- JIRA-4821 线上事故复盘"
+    assert out.ok and out.content == "- [jira] JIRA-4821 线上事故复盘"
 
 
 def test_another_owner_cannot_search():

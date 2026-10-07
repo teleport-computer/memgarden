@@ -41,7 +41,7 @@ _CAPTURE_PROMPT_TEMPLATE = """{framing}
 2. Choose an action:
 {action_block}
 3. Write the card:
-   · content: a "thick" body, the way you would hold the whole thing in your own mind — what happened, what led to it and what followed, what it means for this person, the feeling in the moment. Not a one-line title.
+   · content: preserve the full factual account, including concrete details. Include causes, consequences, feelings and personal meaning ONLY when explicitly stated by this person or directly evidenced in the source. A short factual card is better than an embellished "thick" one. Never add inferred motives, personality traits, causal links or missing dates, even qualified with "perhaps". An assistant's speculation is not a user fact; preserve attribution and uncertainty of actual source statements.
    · summary: one line, so that a future you knows at a glance what this card is.
    · retrieval_cues: 3-5 short search hints grounded in this card: keywords, real aliases, questions it can answer, and the event time if known. Use the event time, not capture time. Do not invent dates, aliases or facts; omit unknown time. Hints are retrieval pointers, not additional evidence.
    · bucket: one main bucket. Short, reuse an existing one, do not mint near-synonyms.
@@ -79,10 +79,10 @@ _CAPTURE_PROMPT_TEMPLATE = """{framing}
   ]
 }}
 
-About type: something that happened, with causes and consequences → event; a preference, habit, or stable fact → fact; this person's own words worth keeping → quote; any other fragment worth remembering → moment. Capture only produces these four — never insight/reflection (those belong to dreaming)."""
+About type: something that happened, with causes and consequences → event; a preference, habit, or stable fact → fact; this person's own words worth keeping → quote; any other fragment worth remembering → moment. Capture only produces these four — never insight/reflection. Dream also reorganizes facts, not hypotheses; speculative insights require a separate future feature."""
 
 
-# 落卡只产这四类;insight/reflection 是做梦(Dream)/Inner Thought 的事,需要 anchor。
+# Capture/Dream 只整理有来源的事实；推测性 insight/reflection 不属于当前链路。
 CAPTURE_TYPES = ("event", "fact", "quote", "moment")
 _DEFAULT_CAPTURE_TYPE = "event"
 

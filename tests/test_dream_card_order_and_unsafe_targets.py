@@ -1,4 +1,4 @@
-"""Dream：Store 路径先给最新的卡；截断卡、没渲染的卡不许被改写（发布前复审）。
+"""Dream：Store 路径逐批覆盖存量；截断卡、没渲染的卡不许被改写。
 
 两个缺陷都不报错：
 
@@ -66,7 +66,7 @@ def _marks(prompt: str) -> set[int]:
 
 
 @pytest.mark.parametrize("kind", ["memory", "sqlite"])
-def test_store_path_dream_sees_the_newest_cards_first(kind):
+def test_store_path_dream_eventually_covers_entire_backlog(kind):
     store = _store(kind)
     _seed(store, 75)
     model = Recorder()
@@ -76,11 +76,15 @@ def test_store_path_dream_sees_the_newest_cards_first(kind):
     assert len(model.prompts) == 1
     seen = _marks(model.prompts[0])
     assert len(seen) == 60
-    assert seen == set(range(15, 75)), "最新的 60 张（15–74）进提示词，最老的 15 张让位"
+    assert garden.check_maintenance(ALICE).needed
+    second = garden.run_and_store_maintenance(ALICE, MaintenanceRequest(locale="zh-Hans"))
+    assert second.error is None
+    assert seen | _marks(model.prompts[1]) == set(range(75))
+    assert not garden.check_maintenance(ALICE).needed
 
 
 @pytest.mark.parametrize("kind", ["memory", "sqlite"])
-def test_wire_maintenance_run_sees_the_newest_cards_first(kind):
+def test_wire_maintenance_run_keeps_omitted_cards_pending(kind):
     store = _store(kind)
     _seed(store, 70)
     model = Recorder()
@@ -88,7 +92,8 @@ def test_wire_maintenance_run_sees_the_newest_cards_first(kind):
     out = service.handle({"id": "m", "method": "maintenance.run", "params": {
         "scope": {"tenant_id": "t", "memory_owner_id": "alice"}, "locale": "zh-Hans"}})
     assert out["ok"], out
-    assert 69 in _marks(model.prompts[0]) and 0 not in _marks(model.prompts[0])
+    assert len(_marks(model.prompts[0])) == 60
+    assert service.garden.check_maintenance(ALICE).needed
 
 
 def test_same_created_at_ties_break_by_id_deterministically():
