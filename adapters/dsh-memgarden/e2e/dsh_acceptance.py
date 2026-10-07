@@ -51,6 +51,27 @@ def _acceptance_model() -> str:
     return model
 
 
+def _acceptance_provider() -> str:
+    provider = os.environ.get(
+        "MEMGARDEN_ACCEPTANCE_PROVIDER", "deepseek-official",
+    ).strip()
+    if not provider:
+        raise ValueError("MEMGARDEN_ACCEPTANCE_PROVIDER must not be blank")
+    return provider
+
+
+def _acceptance_dsh_patches() -> tuple[str, ...]:
+    raw = os.environ.get("MEMGARDEN_ACCEPTANCE_DSH_PATCH", "").strip()
+    if not raw:
+        return ()
+    patch = pathlib.Path(raw).expanduser().resolve()
+    if not patch.is_file():
+        raise ValueError(
+            f"MEMGARDEN_ACCEPTANCE_DSH_PATCH does not exist: {patch}"
+        )
+    return (str(patch),)
+
+
 def check(ok: bool, name: str, detail: str = "") -> bool:
     RESULTS.append((ok, name, detail))
     print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f" — {detail}" if detail else ""))
@@ -95,7 +116,9 @@ class Env:
                         '--tenant', self.tenant, '--owner', self.owner,
                         '--bin', bin_path,
                         '--storage', str(self.garden),
-                        '--state-dir', str(self.state_dir)],
+                        '--state-dir', str(self.state_dir),
+                        '--provider', _acceptance_provider(),
+                        '--model', _acceptance_model()],
                        check=True, stdout=subprocess.DEVNULL)
 
         # 验收必须验「真安装出来的配置」。以前这里 install 后又
@@ -105,16 +128,18 @@ class Env:
         installed = patch.read_text(encoding="utf-8")
         assert f"memoryOwner: '{self.owner}'" in installed
         assert f"stateDir: '{self.state_dir}'" in installed
+        assert f"provider: '{_acceptance_provider()}'" in installed
+        assert f"model: '{_acceptance_model()}'" in installed
 
     def harness(self) -> Any:
         os.environ["MEMGARDEN_DEBUG_LOG"] = str(self.log)
         if _HARNESS_CLASS is None:
             raise RuntimeError("deepseek_harness SDK 尚未通过环境校验")
         return _HARNESS_CLASS(
-            provider="deepseek-official", model=_acceptance_model(),
+            provider=_acceptance_provider(), model=_acceptance_model(),
             max_tokens=4096, cwd=str(self.workspace),
             dsh_home=str(self.home), dsh_bin=str(self.dsh_bin),
-            profile="sdk-minimal",
+            profile="sdk-minimal", patches=_acceptance_dsh_patches(),
         )
 
     def cards(self) -> list[dict]:
@@ -605,14 +630,15 @@ def main(argv: list[str] | None = None) -> int:
     global _HARNESS_CLASS
     # 先交给 argparse：`--help` 应当在没有 key / SDK / DSH 的机器上也能看。
     groups = _selected_groups(argv)
-    if not os.environ.get("DEEPSEEK_API_KEY"):
-        print("需要 DEEPSEEK_API_KEY")
-        return 2
-
     try:
-        _acceptance_model()
+        provider = _acceptance_provider()
+        model = _acceptance_model()
+        _acceptance_dsh_patches()
     except ValueError as exc:
         print(f"验收环境不满足：{exc}")
+        return 2
+    if provider == "deepseek-official" and not os.environ.get("DEEPSEEK_API_KEY"):
+        print("需要 DEEPSEEK_API_KEY")
         return 2
 
     try:
@@ -635,7 +661,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print("=" * 66)
-    print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden; model=" + _acceptance_model())
+    print("DSH 验收 —— dsh 0.1.2-alpha.4 + memgarden; provider="
+          + provider + "; model=" + model)
     print("=" * 66)
 
     for group in groups:
