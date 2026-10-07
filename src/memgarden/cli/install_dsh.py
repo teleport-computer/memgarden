@@ -42,7 +42,17 @@ _ENTRY = """- insert:
         memoryOwner: '{owner}'
         locale: '{locale}'
         stateDir: '{state_dir}'
+{routing}
 """
+
+
+def _routing_lines(provider: str, model: str) -> str:
+    """Render only routing facts the caller explicitly owns."""
+    lines = []
+    for key, value in (("provider", provider), ("model", model)):
+        if value:
+            lines.append(f"        {key}: '{value.replace(chr(39), chr(39) * 2)}'")
+    return "\n".join(lines)
 
 
 def add_parser(sub) -> None:
@@ -68,6 +78,10 @@ def add_parser(sub) -> None:
     p.add_argument("--bin", default=_own_bin())
     p.add_argument("--storage", default="")
     p.add_argument("--locale", default="zh-Hans")
+    p.add_argument("--provider", default="",
+                   help="DSH 已注册的模型 provider；留空使用 Adapter 默认值")
+    p.add_argument("--model", default="",
+                   help="该 provider 下的模型；留空使用 Adapter 默认值")
     p.add_argument("--state-dir", default="",
                    help="落卡待办本放哪（崩溃后靠它把那一轮补回来）")
     p.set_defaults(func=run)
@@ -97,6 +111,8 @@ def run(args) -> int:
 
     storage = args.storage or str(home / "memgarden.db")
     state_dir = args.state_dir or str(home / "memgarden-state")
+    routing = _routing_lines(getattr(args, "provider", ""),
+                             getattr(args, "model", ""))
     patch = profile_dir / "cordis.patch.yml"
     existing = patch.read_text("utf-8") if patch.exists() else ""
     if "id: memgarden" in existing:
@@ -112,7 +128,8 @@ def run(args) -> int:
                          + _ENTRY.format(bin=args.bin, storage=storage,
                                          tenant=args.tenant, owner=args.owner,
                                          locale=args.locale,
-                                         state_dir=state_dir),
+                                         state_dir=state_dir,
+                                         routing=routing),
                          encoding="utf-8")
         print(f"✅ 已写入 {patch}")
     print(f"✅ 插件已装到 {target}")

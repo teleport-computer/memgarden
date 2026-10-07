@@ -17,7 +17,8 @@ python -m pip install memgarden
 export DSH_BIN=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js
 export DSH_HOME=/absolute/path/to/dsh-home
 "$DSH_BIN" --profile sdk-minimal --dump-default-config
-memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans
+memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans \
+  --provider deepseek-official --model deepseek-v4-flash
 "$DSH_BIN" --profile sdk-minimal
 ```
 
@@ -41,6 +42,8 @@ memgarden install-dsh --tenant example --owner user-42 --locale zh-Hans
         memoryOwner: 'user-42'
         locale: 'zh-Hans'
         stateDir: '/durable/dsh-state'
+        provider: 'deepseek-official'
+        model: 'deepseek-v4-flash'
 ```
 
 `tenant`、`memoryOwner` 来自可信宿主配置。owner 必须稳定，不可用 session 替代；缺 owner 时插件不启动记忆服务。一个配置绑定一座花园，不能把示例固定 owner 用于所有用户。
@@ -133,6 +136,8 @@ uv sync --project /absolute/path/to/deepseek-harness/python/sdk --group test
 export DSH_BIN=/absolute/path/to/deepseek-harness/apps/cli/lib/bin.js
 export MEMGARDEN_BIN=/absolute/path/to/memgarden-venv/bin/memgarden
 export DEEPSEEK_API_KEY=...
+# Provider 默认是 deepseek-official；接其他 DSH provider 时显式覆盖。
+export MEMGARDEN_ACCEPTANCE_PROVIDER=deepseek-official
 # 显式指定账号当前可用的模型；不设置时保留历史 deepseek-v4-flash 基线。
 # 替换成可用模型 ID，并把所用模型记录在验收结果中，不能算旧模型复测。
 export MEMGARDEN_ACCEPTANCE_MODEL=your-available-model-id
@@ -144,6 +149,19 @@ uv run --project /absolute/path/to/deepseek-harness/python/sdk \
 uv run --project /absolute/path/to/deepseek-harness/python/sdk \
   python /absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/dsh_acceptance.py --group E
 ```
+
+验收目标是 MemGarden 与 DSH 的宿主合同，不绑定某一家模型服务。比如使用
+DSH `llm-pi-ai` 的 OpenAI route 时，保留同一个 pinned DSH，只替换显式环境事实：
+
+```bash
+export OPENAI_API_KEY=...
+export MEMGARDEN_ACCEPTANCE_PROVIDER=openai
+export MEMGARDEN_ACCEPTANCE_MODEL=gpt-5.4-mini
+export MEMGARDEN_ACCEPTANCE_DSH_PATCH=/absolute/path/to/memgarden/adapters/dsh-memgarden/e2e/openai.patch.yml
+```
+
+结果必须记录实际 provider/model；替代 provider 的通过结果证明通用宿主链路，
+不冒充历史 `deepseek-official/deepseek-v4-flash` 基线复测。
 
 这一 source-mode 步骤来自官方该 commit 的
 [`python/development.md`](https://github.com/deepseek-ai/deepseek-harness/blob/4e84901e6471b79ec0338099867ebb4606d12bb5/python/development.md)

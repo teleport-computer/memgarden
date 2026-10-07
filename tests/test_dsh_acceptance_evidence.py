@@ -33,6 +33,41 @@ def test_acceptance_model_override_is_explicit_and_reaches_harness(monkeypatch, 
         acceptance._acceptance_model()
 
 
+def test_acceptance_provider_and_patch_reach_harness(monkeypatch, tmp_path):
+    patch = tmp_path / "provider.patch.yml"
+    patch.write_text("[]\n", encoding="utf-8")
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_PROVIDER", "openai")
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_DSH_PATCH", str(patch))
+    monkeypatch.setenv("MEMGARDEN_DEBUG_LOG", "")
+    monkeypatch.setattr(acceptance, "_HARNESS_CLASS", lambda **kwargs: kwargs)
+    env = SimpleNamespace(log=tmp_path / "log", workspace=tmp_path,
+                          home=tmp_path, dsh_bin=tmp_path / "dsh")
+    configured = acceptance.Env.harness(env)
+    assert configured["provider"] == "openai"
+    assert configured["patches"] == (str(patch.resolve()),)
+
+
+def test_acceptance_provider_defaults_and_rejects_blank(monkeypatch):
+    monkeypatch.delenv("MEMGARDEN_ACCEPTANCE_PROVIDER", raising=False)
+    assert acceptance._acceptance_provider() == "deepseek-official"
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_PROVIDER", "  ")
+    with pytest.raises(ValueError, match="must not be blank"):
+        acceptance._acceptance_provider()
+
+
+def test_main_reports_blank_provider_as_environment_error(monkeypatch, capsys):
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_PROVIDER", "  ")
+    assert acceptance.main([]) == 2
+    assert "验收环境不满足" in capsys.readouterr().out
+
+
+def test_acceptance_patch_must_exist(monkeypatch, tmp_path):
+    missing = tmp_path / "missing.patch.yml"
+    monkeypatch.setenv("MEMGARDEN_ACCEPTANCE_DSH_PATCH", str(missing))
+    with pytest.raises(ValueError, match="does not exist"):
+        acceptance._acceptance_dsh_patches()
+
+
 def test_generic_dinner_advice_does_not_prove_recall():
     assert not acceptance._recall_is_proven("召回 0 条\n", "建议吃清淡、不辣的食物", [])
     assert not acceptance._recall_is_proven("召回 1 条\n", "建议避免辣味", [])
