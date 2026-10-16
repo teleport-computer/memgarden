@@ -2,6 +2,10 @@
 
 发布记录以 Git tag、GitHub Release 和 PyPI 为准；这里按版本记录对接入方可见的变化。
 
+## Unreleased
+
+- Capture and Dream now count a consumed format/semantic retry before evaluating truncation. Mixed retry reasons share the configured retry limit instead of allowing an extra model call.
+
 ## 0.23.1 — 2026-10-08
 
 - Add scoped full-card reads: SDK `read_record`, JSON Lines `records.get`, and `memory_read`; search tools now expose IDs. Reads return bounded JSON fragments with version-bound cursors, without truncating stored data.
