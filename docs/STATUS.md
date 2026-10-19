@@ -10,6 +10,20 @@ an upgrade to 0.23.1. Candidate validation and publication are separate gates;
 no host installation or production rollout is implied. The bundled npm manifest
 uses `0.23.0+post.1`, the SemVer build-metadata equivalent identifying this bundle.
 
+## Unreleased Dream parser candidate
+
+Dream alone may recover after its first balanced block fails JSON decoding when
+that block is a non-JSON prose annotation followed by a newline and exactly one
+complete Dream object. Recovery accepts only a restricted prose envelope without
+JSON container/string punctuation, fences or angle-bracket tags; it never scans
+inside a later wrapper or array. It is limited to 65,536 input characters, rejects
+duplicate keys and malformed row structure, and retains the normal content and
+ID-leak gates. Capture, Migrate, successful first-object selection and shared
+retry/deadline policies are unchanged. Unclosed prose braces remain unresolved.
+Existing successful parsing of some unfinished thinking blocks and trailing
+conflicting objects is **not** tightened by this candidate. This local synthetic
+fix is not evidence of the cause of any production job and is not yet published.
+
 ## 当前能力与本轮范围
 
 0.23.0 收录 PR #10 的具体细节保留与审查补丁：日常 Capture、历史导入和 Dream 的提示词更明确保留名字、物品、金额和日期。存储结构、公开 API、默认检索和运行依赖不变；提示词变化及小样本验收限制见下文。Python 包和随包 DSH Adapter 的版本同步为0.23.0，实际发布状态以 Release / PyPI 为准，宿主不会自动升级。
