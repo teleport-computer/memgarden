@@ -60,3 +60,20 @@ gh attestation verify <downloaded-wheel.whl> --repo teleport-computer/memgarden
 ```
 
 attestation 绑定仓库、构建流程、commit 与产物摘要，证明产物来源；它不替代代码审核或功能验收。
+
+## 0.23 maintenance branch
+
+The scoped 0.23.0.post1 maintenance candidate is based on tag v0.23.0 rather than
+current main, to preserve host prompt/storage/API compatibility. Review the
+maintenance branch and its exact tree independently; do not merge main's newer
+features into it or merge it over main as a downgrade. Publication still requires
+the normal review and release gates and a new matching tag on the approved commit.
+PEP 440 post-release versions use `.postN`; bundled DSH package.json uses SemVer
+`+post.N` build metadata. There is no separate npm publication or npm ordering
+promise. The installer copies this manifest beside the unchanged plugin; plugin
+handshake compatibility is determined by protocol_version, not this metadata.
+Both versions, uv.lock and explicit tag context are checked by
+scripts/check_version_consistency.py. A branch CI ref is not a release tag;
+release workflow supplies MEMGARDEN_RELEASE_TAG for both tag push and dispatch.
+For this maintenance artifact hosts must explicitly pin `memgarden==0.23.0.post1`;
+normal latest-version resolution can select the higher 0.23.1 series instead.

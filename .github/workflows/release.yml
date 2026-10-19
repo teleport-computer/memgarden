@@ -53,6 +53,8 @@ jobs:
       - name: tag / pyproject / uv.lock 三者一致
         # 对不上就是「发出去的版本号和锁文件说的不是一回事」，
         # 事后查问题时会指向错误的代码。
+        env:
+          MEMGARDEN_RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: uv run --extra dev python scripts/check_version_consistency.py
 
   build:

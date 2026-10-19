@@ -2,6 +2,14 @@
 
 更新：2026-09-28。发布状态以 [Releases](https://github.com/teleport-computer/memgarden/releases) 和 PyPI 为准；代码合入与生产宿主升级是不同步骤。
 
+## 0.23.0.post1 maintenance candidate
+
+Unreleased backport of the shared Capture/Dream retry-budget fix onto exact 0.23.0.
+Prompts, storage, API and DSH runtime behavior remain at that baseline. This is not
+an upgrade to 0.23.1. Candidate validation and publication are separate gates;
+no host installation or production rollout is implied. The bundled npm manifest
+uses `0.23.0+post.1`, the SemVer build-metadata equivalent identifying this bundle.
+
 ## 当前能力与本轮范围
 
 0.23.0 收录 PR #10 的具体细节保留与审查补丁：日常 Capture、历史导入和 Dream 的提示词更明确保留名字、物品、金额和日期。存储结构、公开 API、默认检索和运行依赖不变；提示词变化及小样本验收限制见下文。Python 包和随包 DSH Adapter 的版本同步为0.23.0，实际发布状态以 Release / PyPI 为准，宿主不会自动升级。

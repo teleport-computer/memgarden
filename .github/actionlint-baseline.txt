@@ -1,0 +1,12 @@
+# Structural GitHub Actions lint contract for this component repository.
+# ShellCheck and Pyflakes are disabled explicitly; this is not a claim that
+# their diagnostics (including existing release SC2129) are absent.
+@version 1.7.12
+@cwd ./
+@flag -no-color
+@flag -shellcheck=
+@flag -pyflakes=
+@flag -oneline
+@target .github/workflows/*.yml
+@target .github/workflows/*.yaml
+@max 0
