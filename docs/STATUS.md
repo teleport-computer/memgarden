@@ -2,6 +2,20 @@
 
 更新：2026-10-08。本轮收尾修复收录于0.23.1；实际发布状态以对应 tag、Release 与 PyPI 为准。没有升级IO或生产宿主。
 
+## Unreleased Dream parser candidate
+
+Dream alone may recover after its first balanced block fails JSON decoding when
+that block is a non-JSON prose annotation followed by a newline and exactly one
+complete Dream object. Recovery accepts only a restricted prose envelope without
+JSON container/string punctuation, fences or angle-bracket tags; it never scans
+inside a later wrapper or array. It is limited to 65,536 input characters, rejects
+duplicate keys and malformed row structure, and retains the normal content and
+ID-leak gates. Capture, Migrate, successful first-object selection and shared
+retry/deadline policies are unchanged. Unclosed prose braces remain unresolved.
+Existing successful parsing of some unfinished thinking blocks and trailing
+conflicting objects is **not** tightened by this candidate. This local synthetic
+fix is not evidence of the cause of any production job and is not yet published.
+
 ## 本轮结论
 
 用户已确认：必须提供按ID完整读取；Dream以新增/修改+相关旧卡增量整理，最终覆盖存量，但不每次全库喂模型；事实卡不混入未经支持的推测。当前实现遵循这些边界。
