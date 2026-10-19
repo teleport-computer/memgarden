@@ -2,13 +2,28 @@
 
 更新：2026-09-28。发布状态以 [Releases](https://github.com/teleport-computer/memgarden/releases) 和 PyPI 为准；代码合入与生产宿主升级是不同步骤。
 
-## 0.23.0.post1 maintenance candidate
+## 0.23.0.post2 maintenance candidate
 
-Unreleased backport of the shared Capture/Dream retry-budget fix onto exact 0.23.0.
-Prompts, storage, API and DSH runtime behavior remain at that baseline. This is not
-an upgrade to 0.23.1. Candidate validation and publication are separate gates;
-no host installation or production rollout is implied. The bundled npm manifest
-uses `0.23.0+post.1`, the SemVer build-metadata equivalent identifying this bundle.
+Unreleased candidate based on published `v0.23.0.post1` (source `eb98ae7`).
+It retains the shared Capture/Dream retry-budget fix and adds only the scoped
+Dream parser recovery below plus release metadata. Prompts, storage, API and DSH
+runtime remain at the post1 baseline; this is not an upgrade to 0.23.1. Python
+version is `0.23.0.post2`, bundled manifest `0.23.0+post.2`. Publication and host
+installation remain separate gates; neither is implied by this candidate.
+
+## Unreleased Dream parser candidate
+
+Dream alone may recover after its first balanced block fails JSON decoding when
+that block is a non-JSON prose annotation followed by a newline and exactly one
+complete Dream object. Recovery accepts only a restricted prose envelope without
+JSON container/string punctuation, fences or angle-bracket tags; it never scans
+inside a later wrapper or array. It is limited to 65,536 input characters, rejects
+duplicate keys and malformed row structure, and retains the normal content and
+ID-leak gates. Capture, Migrate, successful first-object selection and shared
+retry/deadline policies are unchanged. Unclosed prose braces remain unresolved.
+Existing successful parsing of some unfinished thinking blocks and trailing
+conflicting objects is **not** tightened by this candidate. This local synthetic
+fix is not evidence of the cause of any production job and is not yet published.
 
 ## 当前能力与本轮范围
 

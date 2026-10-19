@@ -2,7 +2,13 @@
 
 发布记录以 Git tag、GitHub Release 和 PyPI 为准；这里按版本记录对接入方可见的变化。
 
-## 0.23.0.post1 — maintenance candidate (unreleased)
+## 0.23.0.post2 — maintenance candidate (unreleased)
+
+- Recover a single standalone Dream JSON reply after a balanced non-JSON prose annotation, under a bounded, strict envelope and structure check. Existing semantic guards remain in force; unmatched braces remain unsupported.
+- Preserve the published 0.23.0.post1 retry-budget fix, prompts, storage and host API behavior. This is not an upgrade to 0.23.1. Existing successful parsing and model-call budgets are unchanged.
+- Python/host pin: `0.23.0.post2`; bundled DSH metadata: `0.23.0+post.2`. No independent adapter publication. Synthetic parser evidence does not identify production job root causes.
+
+## 0.23.0.post1 — maintenance release
 
 - Backport the shared retry-budget fix: a format/semantic retry that truncates has already consumed its retry slot. Capture and Dream stop instead of issuing an extra model call.
 - Based on 0.23.0; prompts, storage and public APIs retain that baseline. This maintenance release does not include 0.23.1 features. Hosts must pin it explicitly.

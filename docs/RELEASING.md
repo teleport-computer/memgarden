@@ -77,3 +77,14 @@ scripts/check_version_consistency.py. A branch CI ref is not a release tag;
 release workflow supplies MEMGARDEN_RELEASE_TAG for both tag push and dispatch.
 For this maintenance artifact hosts must explicitly pin `memgarden==0.23.0.post1`;
 normal latest-version resolution can select the higher 0.23.1 series instead.
+
+### 0.23.0.post2 candidate
+
+Build from the reviewed maintenance tree rooted at published `v0.23.0.post1`,
+not from main 0.23.1. The only runtime-source delta is the scoped Dream parser
+recovery; the shared retry-budget fix and all other runtime files must remain
+identical to post1 (except bundled version metadata). Review the new version tree
+and build/install the exact wheel before release. Use a new `v0.23.0.post2` tag
+only after release authorization; do not overwrite post1. Hosts must pin
+`memgarden==0.23.0.post2` and regenerate artifact hashes from actual published
+files. A locally built wheel digest is not a substitute for the published digest.
