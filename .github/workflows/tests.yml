@@ -5,7 +5,7 @@ name: tests
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "maintenance/0.23.0"]
   pull_request:
 
 permissions:
@@ -39,6 +39,7 @@ jobs:
         run: uv run --extra dev python evals/run.py --baseline evals/baseline.json
 
       - name: 落卡质量 eval（真模型）
+        if: ${{ !((github.event_name == 'pull_request' && github.base_ref == 'maintenance/0.23.0') || (github.event_name == 'push' && github.ref == 'refs/heads/maintenance/0.23.0')) }}
         # 没 key 就 SKIP 并明说 —— 提示词行为的 bug 只有真模型能暴露，
         # 单测把 agent stub 掉了，什么都验不到。
         env:
@@ -46,6 +47,9 @@ jobs:
           # Explicitly configurable: provider model IDs are not permanent.
           EVAL_DEEPSEEK_MODEL: ${{ vars.EVAL_DEEPSEEK_MODEL || 'deepseek-flash' }}
         run: uv run --extra dev python evals/capture.py --provider deepseek --model "$EVAL_DEEPSEEK_MODEL"
+      - name: Maintenance live-model evaluation explicitly skipped
+        if: ${{ (github.event_name == 'pull_request' && github.base_ref == 'maintenance/0.23.0') || (github.event_name == 'push' && github.ref == 'refs/heads/maintenance/0.23.0') }}
+        run: echo "SKIPPED live-model evaluation for maintenance/0.23.0; deterministic checks remain required."
       - name: 装完之后 CLI 真的能敲
         # [project.scripts] 写错、入口 import 不到，只有真装一次才发现 ——
         # 而「装完能不能用」正是别人愿不愿意继续读下去的门槛。

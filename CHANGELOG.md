@@ -2,6 +2,12 @@
 
 发布记录以 Git tag、GitHub Release 和 PyPI 为准；这里按版本记录对接入方可见的变化。
 
+## 0.23.0.post1 — maintenance candidate (unreleased)
+
+- Backport the shared retry-budget fix: a format/semantic retry that truncates has already consumed its retry slot. Capture and Dream stop instead of issuing an extra model call.
+- Based on 0.23.0; prompts, storage and public APIs retain that baseline. This maintenance release does not include 0.23.1 features. Hosts must pin it explicitly.
+- Bundled DSH manifest uses SemVer `0.23.0+post.1` for Python version `0.23.0.post1`; the adapter is not independently published.
+
 ## 0.23.0 — 2026-09-28
 
 - Capture and history-import prompts now preserve a person's concrete details, including supported one-time experiences, rather than generalizing away names, items, amounts, dates and places. Dream merge/thicken prompts explicitly ask to retain source values; this is model guidance, not a deterministic no-loss guarantee.

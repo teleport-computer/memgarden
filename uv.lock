@@ -75,7 +75,7 @@ wheels = [
 
 [[package]]
 name = "memgarden"
-version = "0.23.0"
+version = "0.23.0.post1"
 source = { editable = "." }
 
 [package.optional-dependencies]

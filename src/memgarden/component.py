@@ -268,6 +268,9 @@ class _CapturePlan:
         误判只是多花一次调用。所以宿主宁可宽一点。
         """
         self.calls += 1
+        # Charge the reply already requested before deciding on another retry.
+        if self._stage in {"format_retry", "semantic_retry"}:
+            self.retried += 1
         if truncated and self._stage != "truncation_retry" and self.retried < self.owner._max_retries:
             self.owner._step(Step(
                 kind="retrying", purpose="capture", attempt=self.calls,
@@ -304,7 +307,6 @@ class _CapturePlan:
             # ⚠️ 宿主 io 的两条运行时在这件事上**本来就不一致**（V1 丢卡继续、
             # V2 整轮失败），那是它那边的既有分歧，不该由这个组件替它拍板。
             # 组件取更保守的那个：不丢用户的记忆，也不吐出执行不了的指令。
-            self.retried += 1
             self._stage = "done"
             if err:
                 self.err = str(err)
@@ -315,8 +317,6 @@ class _CapturePlan:
             return
 
         self.cards, self.err = cards, err
-        if self._stage == "format_retry":
-            self.retried += 1
 
         self.owner._step(Step(
             kind="parsed", purpose="capture", attempt=self.calls,
@@ -510,6 +510,9 @@ class _MaintenancePlan:
 
     def feed(self, raw, *, truncated: bool = False) -> None:
         self.calls += 1
+        # A truncated format retry has already consumed this retry slot.
+        if self._stage == "format_retry":
+            self.retried += 1
         text = _reply_text(raw)
         self.owner._step(Step(
             kind="model_called", purpose="dream", attempt=self.calls,
@@ -532,8 +535,6 @@ class _MaintenancePlan:
             known_ids=self.known_ids,
         )
         self.consolidations, self.err = cons, err
-        if self._stage == "format_retry":
-            self.retried += 1
         self.owner._step(Step(kind="parsed", purpose="dream", attempt=self.calls,
                               detail={"consolidations": len(cons), "error": err}))
         if err and is_retryable_parse_error(err, raw=text) and self.retried < self.owner._max_retries:

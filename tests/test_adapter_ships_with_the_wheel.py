@@ -31,11 +31,11 @@ def test_the_plugin_file_is_importable_from_the_installed_package():
 
 
 def test_the_adapter_version_matches_the_python_package():
-    """两个版本号必须一致。不一致就是「同一份代码报了两个版本」。"""
+    """同一发布身份；PEP 440 post 后缀映射为 npm SemVer build metadata。"""
     declared = tomllib.loads(
         (ROOT / "pyproject.toml").read_text("utf-8"))["project"]["version"]
     adapter = json.loads(PACKAGE_JSON.read_text("utf-8"))["version"]
-    assert adapter == declared, (
+    assert adapter == declared.replace(".post", "+post."), (
         f"Adapter 说 {adapter}，Python 包说 {declared} —— "
         "它们共用同一套 wire 协议，版本必须同步")
 

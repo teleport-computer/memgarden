@@ -7,10 +7,14 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 dev extra already includes tomli.
+    import tomli as tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -42,11 +46,25 @@ def main() -> int:
             f"uv.lock 说 {locked}，pyproject 说 {declared} —— "
             "跑一次 `uv lock` 并把锁文件一起提交")
 
-    # tag 只在发版流水线上有；本地跑时没有这个环境变量，跳过即可。
-    ref = os.environ.get("GITHUB_REF_NAME") or ""
-    tag = ref[1:] if ref.startswith("v") else ref
-    if tag and re.fullmatch(r"\d+\.\d+\.\d+", tag) and tag != declared:
-        problems.append(f"tag 是 v{tag}，pyproject 说 {declared}")
+    # Explicit release input also covers workflow_dispatch from a branch.
+    release_tag = os.environ.get("MEMGARDEN_RELEASE_TAG", "")
+    is_tag = os.environ.get("GITHUB_REF_TYPE") == "tag"
+    ref = release_tag or (os.environ.get("GITHUB_REF_NAME", "") if is_tag else "")
+    version_pattern = r"[0-9]+\.[0-9]+\.[0-9]+(?:\.post[0-9]+)?"
+    if not re.fullmatch(version_pattern, declared):
+        problems.append(f"unsupported package version: {declared}")
+    if release_tag or is_tag:
+        if not re.fullmatch(r"v" + version_pattern, ref):
+            problems.append(f"malformed release tag: {ref!r}")
+        elif ref[1:] != declared:
+            problems.append(f"tag 是 {ref}，pyproject 说 {declared}")
+
+    # npm SemVer has no PEP 440 post-release suffix. The adapter is bundled,
+    # never independently published; build metadata identifies the same bundle.
+    adapter = json.loads((ROOT / "src/memgarden/adapters/dsh/package.json").read_text())
+    expected_adapter = declared.replace(".post", "+post.")
+    if adapter.get("version") != expected_adapter:
+        problems.append(f"adapter version must be {expected_adapter}")
 
     if problems:
         print("版本号对不上：")
