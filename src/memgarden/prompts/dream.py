@@ -16,6 +16,7 @@ This module owns prompt rendering and output parsing only.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -287,6 +288,84 @@ def _clamp01(value) -> float:
     return max(0.0, min(1.0, f))
 
 
+
+# Recovery is deliberately a small envelope grammar, not a search through JSON
+# candidates. Structural punctuation in the prose is excluded, so arrays,
+# wrappers, quoted strings, fences and thinking tags cannot hide a child object.
+# The candidate must start on a fresh line and consume the entire remaining text.
+_DREAM_PROSE_RECOVERY = re.compile(
+    r'[^{}\[\]"\\`<>:]*'
+    r'(?P<preamble>\{[^{}\[\]"\\`<>:\r\n]+\})'
+    r'[^{}\[\]"\\`<>:]*[\r\n][ \t]*'
+    r'(?P<candidate>\{[\s\S]*\})\s*'
+)
+_DREAM_RECOVERY_MAX_CHARS = 65536
+
+
+def _dream_recovery_doc(raw: str, failed_block: str) -> dict | None:
+    """Recover only a balanced non-JSON prose preamble plus one whole document.
+
+    Used exclusively after the first block fails JSON decoding. No recovery of
+    unfinished containers, no scanning nested objects, and no schema-error bypass.
+    The stricter structure gate prevents the normal parser's row-dropping policy
+    from turning a malformed recovery candidate into a successful noop.
+    """
+    if len(raw) > _DREAM_RECOVERY_MAX_CHARS:
+        return None
+    match = _DREAM_PROSE_RECOVERY.fullmatch(raw)
+    if match is None or match['preamble'] != failed_block:
+        return None
+
+    def unique_object(pairs):
+        doc = {}
+        for key, value in pairs:
+            if key in doc:
+                raise ValueError('duplicate key')
+            doc[key] = value
+        return doc
+
+    def reject_constant(value):
+        raise ValueError('non-JSON constant')
+
+    try:
+        doc = json.loads(match['candidate'], object_pairs_hook=unique_object,
+                         parse_constant=reject_constant)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(doc, dict) or set(doc) - {'consolidations', 'questions_to_ask'}:
+        return None
+    rows = doc.get('consolidations')
+    questions = doc.get('questions_to_ask', [])
+    if not isinstance(rows, list) or not isinstance(questions, list):
+        return None
+    if any(not isinstance(q, str) for q in questions):
+        return None
+    for row in rows:
+        if not isinstance(row, dict) or row.get('op') not in DREAM_OPS:
+            return None
+        ids = row.get('card_ids')
+        if not isinstance(ids, list) or not ids or any(
+            not isinstance(i, str) or not i.strip() for i in ids
+        ):
+            return None
+        if not isinstance(row.get('rationale'), str) or not row['rationale'].strip():
+            return None
+        result = row.get('result')
+        if not isinstance(result, dict) or any(
+            not isinstance(result.get(key), str) or not result[key].strip()
+            for key in ('summary', 'content')
+        ):
+            return None
+        if 'bucket' in result and not isinstance(result['bucket'], str):
+            return None
+        if 'threads' in result and (
+            not isinstance(result['threads'], list)
+            or any(not isinstance(t, str) for t in result['threads'])
+        ):
+            return None
+    return doc
+
+
 def parse_dream_consolidations(
     raw: str, *, strict: bool = True, known_ids=(),
     signals: LeakSignals = GENERIC_SIGNALS,
@@ -323,7 +402,9 @@ def parse_dream_consolidations(
     try:
         doc = json.loads(block)
     except (ValueError, TypeError) as e:
-        return [], [], f"json_decode_error:{type(e).__name__}"
+        doc = _dream_recovery_doc(raw, block)
+        if doc is None:
+            return [], [], f"json_decode_error:{type(e).__name__}"
     if not isinstance(doc, dict):
         return [], [], "not_an_object"
 
