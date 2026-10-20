@@ -8,6 +8,8 @@ mutations；宿主或 MountedGarden 负责存储，不依赖任何原宿主 API 
 """
 from __future__ import annotations
 
+import re
+
 
 from ..text.leak_signals import GENERIC_SIGNALS, LeakSignals
 from ..text.card_text import (
@@ -237,6 +239,85 @@ def _capture_metadata(row: dict, policy: CapturePolicy) -> tuple[dict, str | Non
     return metadata, None
 
 
+
+# Capture-only recovery envelope, intentionally independent of the Dream helper.
+# No arbitrary candidate search: JSON punctuation/fences/tags are excluded from
+# the prose, and the sole candidate must consume the whole remaining document.
+_CAPTURE_PROSE_RECOVERY = re.compile(
+    r'[^{}\[\]"\\`<>:]*'
+    r'(?P<preamble>\{[^{}\[\]"\\`<>:\r\n]+\})'
+    r'[^{}\[\]"\\`<>:]*[\r\n][ \t]*'
+    r'(?P<candidate>\{[\s\S]*\})\s*'
+)
+_CAPTURE_RECOVERY_MAX_CHARS = 65536
+
+
+def _capture_recovery_doc(raw: str, failed_block: str) -> dict | None:
+    """Recover a single contract-shaped object after balanced non-JSON prose.
+
+    Called only after normal decoding AND existing quote repair have failed.
+    Canonical empty ``cards`` is supported; noop/unknown/invalid rows are not
+    recovered, since dropping them must not invent a successful empty result.
+    All accepted rows still pass through the original policy/content/metadata
+    gates below, and the component's existing target/semantic validation.
+    """
+    import json
+    import math
+
+    if len(raw) > _CAPTURE_RECOVERY_MAX_CHARS:
+        return None
+    match = _CAPTURE_PROSE_RECOVERY.fullmatch(raw)
+    if match is None or match['preamble'] != failed_block:
+        return None
+
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate key')
+            result[key] = value
+        return result
+
+    def reject_constant(value):
+        raise ValueError('non-JSON constant')
+
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError('non-finite number')
+        return number
+
+    try:
+        doc = json.loads(match['candidate'], object_pairs_hook=unique_object,
+                         parse_constant=reject_constant, parse_float=finite_float)
+    except (ValueError, TypeError, RecursionError):
+        return None
+    if not isinstance(doc, dict) or set(doc) != {'cards'} or not isinstance(doc['cards'], list):
+        return None
+    for row in doc['cards']:
+        if not isinstance(row, dict) or row.get('action') not in ('add', 'merge', 'supersede'):
+            return None
+        if row.get('type') not in CAPTURE_TYPES:
+            return None
+        if any(not isinstance(row.get(key), str) or not row[key].strip()
+               for key in ('summary', 'content')):
+            return None
+        if row.get('target_id') is not None and not isinstance(row['target_id'], str):
+            return None
+        if row['action'] in ('merge', 'supersede') and not str(row.get('target_id') or '').strip():
+            return None
+        if 'bucket' in row and not isinstance(row['bucket'], str):
+            return None
+        for key in ('threads', 'retrieval_cues'):
+            if key in row and (not isinstance(row[key], list)
+                               or any(not isinstance(value, str) for value in row[key])):
+                return None
+        for key in ('importance', 'pulse'):
+            if key in row and type(row[key]) not in (int, float):
+                return None
+    return doc
+
+
 _UNPARSED = object()
 
 
@@ -292,7 +373,9 @@ def parse_capture_cards(
             except (ValueError, TypeError):
                 continue
         if doc is _UNPARSED:
-            return [], f"json_decode_error:{type(first).__name__}"
+            doc = _capture_recovery_doc(raw, block)
+            if doc is None:
+                return [], f"json_decode_error:{type(first).__name__}"
     if not isinstance(doc, dict):
         return [], "not_an_object"
     rows = doc.get("cards")
