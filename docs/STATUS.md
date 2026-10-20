@@ -11,6 +11,25 @@ runtime remain at the post1 baseline; this is not an upgrade to 0.23.1. Python
 version is `0.23.0.post2`, bundled manifest `0.23.0+post.2`. Publication and host
 installation remain separate gates; neither is implied by this candidate.
 
+## Unreleased Capture parser candidate
+
+A local, unversioned candidate adds Capture-only recovery after normal JSON
+extraction and all existing quote-repair candidates fail. A restricted balanced
+non-JSON prose annotation may precede one complete standalone Capture object on
+a new line, within 65,536 input characters. Arrays/wrappers, thinking/fences,
+multiple objects, duplicate keys, nonfinite values and malformed rows are not
+recovered. Canonical `{"cards":[]}` is supported; rows with noop or unknown
+actions are deliberately not recovered. Existing successful noop/first-object
+selection and quote repair retain their behavior. This does not globally reject
+all multi-object or unfinished-thinking replies that previously succeeded.
+
+Recovered rows still run through Capture's policy, content, metadata, card-limit
+and component target/semantic gates. Shared extraction, Dream (including post2
+recovery), post1 retry accounting and deadlines are unchanged. No version/tag,
+publication or host dependency change accompanies this candidate. Synthetic
+reproduction does not identify the cause of the observed production Capture
+no_json_object event; model_not_found remains a configuration lead.
+
 ## Unreleased Dream parser candidate
 
 Dream alone may recover after its first balanced block fails JSON decoding when
