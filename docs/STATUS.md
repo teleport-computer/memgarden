@@ -2,18 +2,19 @@
 
 更新：2026-09-28。发布状态以 [Releases](https://github.com/teleport-computer/memgarden/releases) 和 PyPI 为准；代码合入与生产宿主升级是不同步骤。
 
-## 0.23.0.post2 maintenance candidate
+## 0.23.0.post3 maintenance candidate
 
-Unreleased candidate based on published `v0.23.0.post1` (source `eb98ae7`).
-It retains the shared Capture/Dream retry-budget fix and adds only the scoped
-Dream parser recovery below plus release metadata. Prompts, storage, API and DSH
-runtime remain at the post1 baseline; this is not an upgrade to 0.23.1. Python
-version is `0.23.0.post2`, bundled manifest `0.23.0+post.2`. Publication and host
-installation remain separate gates; neither is implied by this candidate.
+Unreleased package candidate based on the accepted Capture source merge
+`0f7f5c7` on the published post2 maintenance line. Runtime code is unchanged from
+that accepted source. Version/release metadata advance to `0.23.0.post3` with
+bundled DSH manifest `0.23.0+post.3`. Post1 retry accounting and post2 Dream
+recovery are retained byte-for-byte. No 0.23.1 features are included. Publication,
+actual artifact host pinning and test installation remain separate gates; service
+main/production promotion and heartbeat remain on hold.
 
-## Unreleased Capture parser candidate
+## Capture recovery included in the post3 candidate
 
-A local, unversioned candidate adds Capture-only recovery after normal JSON
+The reviewed source adds Capture-only recovery after normal JSON
 extraction and all existing quote-repair candidates fail. A restricted balanced
 non-JSON prose annotation may precede one complete standalone Capture object on
 a new line, within 65,536 input characters. Arrays/wrappers, thinking/fences,
@@ -25,8 +26,8 @@ all multi-object or unfinished-thinking replies that previously succeeded.
 
 Recovered rows still run through Capture's policy, content, metadata, card-limit
 and component target/semantic gates. Shared extraction, Dream (including post2
-recovery), post1 retry accounting and deadlines are unchanged. No version/tag,
-publication or host dependency change accompanies this candidate. Synthetic
+recovery), post1 retry accounting and deadlines are unchanged. The source-stage review did not publish or install a package; post3 packaging
+and host integration require their own exact-artifact checks. Synthetic
 reproduction does not identify the cause of the observed production Capture
 no_json_object event; model_not_found remains a configuration lead.
 

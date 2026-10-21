@@ -2,6 +2,12 @@
 
 发布记录以 Git tag、GitHub Release 和 PyPI 为准；这里按版本记录对接入方可见的变化。
 
+## 0.23.0.post3 — maintenance candidate (unreleased)
+
+- Add the reviewed Capture-only recovery for one structurally valid standalone object after a balanced non-JSON prose annotation, after normal decoding and quote repair both fail. Canonical empty cards are supported; malformed/noop rows are not recovered.
+- Retain post1 shared retry accounting and post2 Dream recovery, plus original Capture policy/content/metadata/quantity/target gates. Existing successful parsing and quote repair remain unchanged.
+- Python/host pin: `0.23.0.post3`; bundled DSH metadata: `0.23.0+post.3`. No 0.23.1 feature upgrade. Package publication and host test installation are separate gates; service main/production promotion remains on hold.
+
 ## 0.23.0.post2 — maintenance candidate (unreleased)
 
 - Recover a single standalone Dream JSON reply after a balanced non-JSON prose annotation, under a bounded, strict envelope and structure check. Existing semantic guards remain in force; unmatched braces remain unsupported.
