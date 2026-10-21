@@ -88,3 +88,14 @@ and build/install the exact wheel before release. Use a new `v0.23.0.post2` tag
 only after release authorization; do not overwrite post1. Hosts must pin
 `memgarden==0.23.0.post2` and regenerate artifact hashes from actual published
 files. A locally built wheel digest is not a substitute for the published digest.
+
+### 0.23.0.post3 candidate
+
+Use the accepted Capture maintenance source (`0f7f5c7`) as the base, preserving
+post1 retry accounting and post2 Dream recovery. Only release/version metadata
+changes at this packaging stage. Python `0.23.0.post3` corresponds to bundled
+SemVer `0.23.0+post.3`. Build/install the exact wheel and bind review to its source
+tree. After the normal maintenance PR/CI/merge gates, the authorized component
+release uses a new matching tag and the existing provenance workflow. Host pins
+must use actual published artifact hashes. Package publication for test does not
+authorize service main/production promotion or heartbeat restart.
